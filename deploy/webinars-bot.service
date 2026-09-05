@@ -1,0 +1,17 @@
+[Unit]
+Description=VEDAME SPACE Telegram bot (webinars + VEDA SANCTUM)
+After=network.target
+
+[Service]
+Type=simple
+# путь замени на реальный путь к проекту на сервере
+WorkingDirectory=/opt/veda-webinars-bot
+# если используешь venv (рекомендуется) - укажи путь до venv/bin/python3
+ExecStart=/opt/veda-webinars-bot/venv/bin/python3 main.py
+Restart=on-failure
+RestartSec=10
+# лучше отдельный непривилегированный пользователь, не root
+User=botuser
+
+[Install]
+WantedBy=multi-user.target
