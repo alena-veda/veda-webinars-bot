@@ -1428,14 +1428,44 @@ async def show_profile(message: Message):
     )
 
     level = compute_ascension_level(user_id)
-    luminar_rank = _luminar_rank(user_row["luminar_count"]) if user_row else 0
+    luminar_count = user_row["luminar_count"] if user_row else 0
+    luminar_rank = _luminar_rank(luminar_count)
     step_label = db.get_setting("profile_path_step_label_text").replace("{ступень}", ASCENSION_LEVEL_NAMES[level])
     path_lines = [step_label]
     if luminar_rank:
         rank_label = db.get_setting("profile_luminar_rank_label_text").replace("{ранг}", LUMINAR_LABELS[luminar_rank])
+        if luminar_rank < 3:
+            # прогресс к СЛЕДУЮЩЕМУ ключу — только пока не достигнут максимальный
+            # ранг (для Люминар III следующего пока не существует)
+            next_threshold = 10 if luminar_rank == 1 else 30
+            next_rank_name = LUMINAR_RANK_NAMES[luminar_rank + 1]
+            filled = max(0, min(10, round(luminar_count / next_threshold * 10)))
+            bar = "▓" * filled + "░" * (10 - filled)
+            progress_line = (
+                db.get_setting("profile_luminar_progress_next_text")
+                .replace("{следующий_ранг}", next_rank_name)
+                .replace("{бар}", bar)
+                .replace("{число}", str(luminar_count))
+                .replace("{порог}", str(next_threshold))
+            )
+            rank_label = rank_label + "\n" + progress_line
         path_lines.append(rank_label)
     path_lines.append(_personalize(db.get_setting(f"ascension_level{level}_brief_text"), user_row))
     blocks.append("\n\n".join(path_lines))
+
+    luminar_teaser = db.get_setting("luminar_intro_short_text")
+    if luminar_rank == 0:
+        # ранга ещё нет — показываем либо "путь к первому ключу" (кто-то уже
+        # пришёл по ссылке), либо нейтральное приглашение (пока никто не пришёл)
+        if luminar_count > 0:
+            remaining = 5 - luminar_count
+            luminar_teaser += "\n" + (
+                db.get_setting("profile_luminar_progress_text")
+                .replace("{число}", str(luminar_count))
+                .replace("{осталось}", str(remaining))
+            )
+        else:
+            luminar_teaser += "\n" + db.get_setting("profile_luminar_progress_zero_text")
 
     me = await message.bot.get_me()
     ref_link = _referral_link(me.username, user_id)
@@ -1447,7 +1477,7 @@ async def show_profile(message: Message):
         referral_text = referral_template.replace("{ссылка}", ref_link)
     else:
         referral_text = f"{referral_template}\n\n{ref_link}"
-    blocks.append(db.get_setting("luminar_intro_short_text") + "\n\n" + referral_text)
+    blocks.append(luminar_teaser + "\n\n" + referral_text)
 
     kb_rows = []
     if sanctum_button:
@@ -2684,6 +2714,9 @@ HTML_TRUSTED_FIELDS = {
     ("profile_text", "profile_path_step_label_text"),
     ("profile_text", "profile_luminar_rank_label_text"),
     ("profile_text", "profile_referral_intro_text"),
+    ("profile_text", "profile_luminar_progress_zero_text"),
+    ("profile_text", "profile_luminar_progress_text"),
+    ("profile_text", "profile_luminar_progress_next_text"),
     # кнопки (profile_btn_*) НЕ добавляем сюда нарочно — Telegram не показывает
     # HTML-разметку в тексте кнопки, поэтому для них нужен обычный текст без
     # форматирования (см. edit_field_value: html_trusted решается через
@@ -3027,6 +3060,9 @@ PROFILE_TEXT_LABELS = {
     "profile_btn_read_level_text": "кнопка «Читать послание ступени»",
     "profile_btn_luminar_intro_text": "кнопка «Подробнее о Созвездии Люминаров»",
     "profile_btn_path_overview_text": "кнопка «Как устроен Путь?»",
+    "profile_luminar_progress_zero_text": "строка, если ещё никто не пришёл по ссылке (0 приглашённых)",
+    "profile_luminar_progress_text": "строка «путь к первому ключу» (1-4 приглашённых)",
+    "profile_luminar_progress_next_text": "строка «путь к следующему ключу» (после первого ранга)",
 }
 
 # поля с плейсхолдерами — та же защита от опечатки (круглые скобки вместо
@@ -3041,6 +3077,8 @@ PROFILE_TEXT_PLACEHOLDERS = {
     "profile_path_step_label_text": ["{ступень}"],
     "profile_luminar_rank_label_text": ["{ранг}"],
     "profile_referral_intro_text": ["{ссылка}"],
+    "profile_luminar_progress_text": ["{число}", "{осталось}"],
+    "profile_luminar_progress_next_text": ["{следующий_ранг}", "{бар}", "{число}", "{порог}"],
 }
 
 
