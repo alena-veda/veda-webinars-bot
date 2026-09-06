@@ -370,6 +370,18 @@ def _referral_link(bot_username: str, user_id: int) -> str:
     return f"https://t.me/{bot_username}?start=ref_{user_id}"
 
 
+def _personal_link_kb(label: str):
+    """Готовая клавиатура с одной кнопкой-ссылкой на личный чат создательницы -
+    используется везде, где текст приглашает написать ей лично (Искра,
+    напоминание о намерении, оплата, поздравления Люминаров). Возвращает
+    None, если ссылка ещё не задана в панели - тогда сообщение уходит без
+    кнопки, а не с кнопкой в никуда."""
+    link = db.get_setting("admin_personal_chat_link")
+    if not link:
+        return None
+    return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text=label, url=link)]])
+
+
 class IntentionStates(StatesGroup):
     waiting_text = State()
 
@@ -413,8 +425,11 @@ async def _handle_ascension_transition(bot: Bot, user_id: int, old_level: int, n
     if text_key:
         text = db.get_setting(text_key)
         user_row = db.get_user(user_id)
+        # на ступени «Искра» текст сам приглашает написать личный запрос -
+        # кнопка тут же, не дожидаясь ритуала намерения
+        kb = _personal_link_kb("💌 Написать Алёне лично") if new_level == 2 else None
         try:
-            await bot.send_message(user_id, _personalize(text, user_row))
+            await bot.send_message(user_id, _personalize(text, user_row), reply_markup=kb)
         except Exception:
             logging.exception("Не удалось отправить поздравление со ступенью пользователю %s", user_id)
     if new_level == 2:
@@ -457,7 +472,9 @@ async def _credit_luminar_referral(bot: Bot, referred_user_id: int):
         await _handle_ascension_transition(bot, referrer_id, old_referrer_level, new_referrer_level)
 
     try:
-        await bot.send_message(referrer_id, user_message)
+        await bot.send_message(
+            referrer_id, user_message, reply_markup=_personal_link_kb("💌 Написать Алёне лично")
+        )
     except Exception:
         logging.exception("Не удалось уведомить о новом ранге Люминара пользователя %s", referrer_id)
 
@@ -750,13 +767,9 @@ async def intention_received(message: Message, state: FSMContext):
     db.set_sanctum_intention(message.from_user.id, text.strip())
     await state.clear()
     user_row = db.get_user(message.from_user.id)
-    personal_link = db.get_setting("admin_personal_chat_link")
-    kb = None
-    if personal_link:
-        kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="💌 Написать лично", url=personal_link)]])
     await message.answer(
         _personalize(db.get_setting("ascension_intention_confirmation_text"), user_row),
-        reply_markup=kb,
+        reply_markup=_personal_link_kb("💌 Написать запрос Алёне"),
     )
 
 
@@ -915,7 +928,8 @@ async def wb_reg(callback: CallbackQuery, state: FSMContext):
     await callback.message.answer(
         f"Отлично! Для участия в «{w['title']}» переведите {w['price']}.\n\n"
         f"{_payment_block('payment_purpose_webinar')}\n\n"
-        "После оплаты пришлите сюда, в VEDAME SPACE, скриншот Вашего чека 📸"
+        "После оплаты пришлите сюда, в VEDAME SPACE, скриншот Вашего чека 📸",
+        reply_markup=_personal_link_kb("💌 Написать Алёне лично"),
     )
     await callback.answer()
 
@@ -1050,7 +1064,8 @@ async def sanctum_apply(callback: CallbackQuery, state: FSMContext):
         f"Для вступления в {html.escape(SANCTUM_FULL_NAME)} переведите {price}.\n\n"
         f"{_payment_block('payment_purpose_sanctum')}\n\n"
         "После оплаты пришлите сюда, в VEDAME SPACE, скриншот Вашего чека 📸\n\n"
-        "Благодарю!"
+        "Благодарю!",
+        reply_markup=_personal_link_kb("💌 Написать Алёне лично"),
     )
     await callback.answer()
 
@@ -3080,8 +3095,10 @@ async def adm_personal_link(callback: CallbackQuery, state: FSMContext):
     await callback.message.answer(
         f"Сейчас: {status}\n\n"
         "Пришлите ссылку на Ваш личный чат в Telegram (например: https://t.me/Alena_Devi_Veda или просто "
-        "@Alena_Devi_Veda). Она используется в кнопке «Написать лично», которая приходит человеку сразу "
-        "после того, как он напишет своё намерение на ступени «Искра»."
+        "@Alena_Devi_Veda). Она используется в кнопке-ссылке на Ваш личный чат, которая приходит вместе с "
+        "сообщением о переходе на ступень «Искра», после того как человек напишет намерение, в ежемесячном "
+        "напоминании о намерении, во всех трёх поздравлениях с рангом Люминара и в сообщениях с реквизитами "
+        "оплаты (вебинары и VEDA SANCTUM)."
     )
     await callback.answer()
 
@@ -4231,7 +4248,7 @@ async def check_intention_reminders(bot: Bot):
         template = db.get_setting("ascension_intention_recall_text") or ""
         text = template.replace("{намерение}", m["intention_text"])
         try:
-            await bot.send_message(m["user_id"], text)
+            await bot.send_message(m["user_id"], text, reply_markup=_personal_link_kb("💌 Написать Алёне лично"))
         except Exception:
             logging.exception("Не удалось отправить напоминание о намерении пользователю %s", m["user_id"])
         db.mark_intention_reminded(m["user_id"], today.isoformat())
