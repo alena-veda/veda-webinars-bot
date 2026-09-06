@@ -554,11 +554,13 @@ ADMIN_PERMISSION_SECTIONS = [
         ("adm_webinars", "🗓 Вебинары"),
         ("adm_webinar_reminder_texts", "✉️ Тексты напоминаний о вебинарах"),
     ]),
-    ("⚜️ VEDA SANCTUM и Путь Восхождения", [
+    ("⚜️ VEDA SANCTUM", [
         ("adm_sanctum", "⚜️ Настройки VEDA SANCTUM"),
         ("adm_grant_access", "🔑 Выдать/продлить доступ VEDA SANCTUM"),
         ("adm_sanctum_list", "📋 Подписчики VEDA SANCTUM (убрать - прямо там)"),
         ("adm_reminder_texts", "✉️ Тексты напоминаний VEDA SANCTUM"),
+    ]),
+    ("🪜 Путь Восхождения и Люминаров", [
         ("adm_ascension_texts", "🪜 Тексты Пути Восхождения и Люминаров"),
         ("adm_ascension_photos", "🖼 Фото Пути Восхождения и Люминаров"),
         ("adm_intentions_list", "🕯 Намерения участников"),
