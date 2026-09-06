@@ -444,12 +444,9 @@ async def _handle_ascension_transition(bot: Bot, user_id: int, old_level: int, n
     if text_key:
         text = db.get_setting(text_key)
         user_row = db.get_user(user_id)
-        # на ступени «Искра» текст сам приглашает написать личный запрос -
-        # кнопка тут же, не дожидаясь ритуала намерения
-        kb = _personal_link_kb("💌 Написать Алёне лично") if new_level == 2 else None
         photo = db.get_setting(f"ascension_level{new_level}_photo")
         try:
-            await _send_with_optional_photo(bot, user_id, _personalize(text, user_row), photo, reply_markup=kb)
+            await _send_with_optional_photo(bot, user_id, _personalize(text, user_row), photo)
         except Exception:
             logging.exception("Не удалось отправить поздравление со ступенью пользователю %s", user_id)
     if new_level == 2:
