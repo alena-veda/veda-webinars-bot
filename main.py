@@ -550,6 +550,7 @@ ADMIN_PERMISSION_SECTIONS = [
         ("adm_sanctum_list", "📋 Подписчики VEDA SANCTUM (убрать - прямо там)"),
         ("adm_reminder_texts", "✉️ Тексты напоминаний VEDA SANCTUM"),
         ("adm_ascension_texts", "🪜 Тексты Пути Восхождения и Люминаров"),
+        ("adm_intentions_list", "🕯 Намерения участников"),
     ]),
     ("💳 Оплаты", [
         ("adm_payment", "💳 Реквизиты оплаты"),
@@ -1559,6 +1560,8 @@ async def show_profile(message: Message):
     meditation_btn = _meditation_button()
     if meditation_btn:
         kb_rows.append([meditation_btn])
+    if membership and membership["intention_text"]:
+        kb_rows.append([InlineKeyboardButton(text="✏️ Изменить намерение", callback_data="edit_intention")])
 
     greeting = _personalize(db.get_setting("profile_greeting_text"), user_row)
     text = f"{greeting}\n\n" + "\n\n".join(blocks)
@@ -4315,20 +4318,92 @@ async def check_webinar_reminders(bot: Bot):
     logging.info("[планировщик] check_webinar_reminders: завершено")
 
 
-# ---------- ежемесячное напоминание о намерении (ступень «Искра») ----------
+# ---------- админ-панель: намерения участников ----------
+
+@router.callback_query(F.data == "adm_intentions_list")
+async def adm_intentions_list(callback: CallbackQuery):
+    if not await _require_permission(callback, "adm_intentions_list"):
+        return
+    rows_data = db.get_all_intentions_for_admin()
+    if not rows_data:
+        text = "<b>🕯 Намерения участников</b>\n\nПока никто не написал намерение."
+        kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Назад", callback_data="adm_back")]])
+        await callback.message.edit_text(text, reply_markup=kb)
+        await callback.answer()
+        return
+
+    lines = [
+        "<b>🕯 Намерения участников</b>",
+        "",
+        "Напоминание приходит всем 8 и 22 числа. Отметьте «Разбор дан», когда лично разберёте намерение "
+        "человека - кнопка «написать лично» перестанет приходить ему в напоминаниях (само напоминание "
+        "останется). Если человек потом изменит текст намерения - отметка снимется сама.",
+    ]
+    rows = []
+    for r in rows_data:
+        name = f"@{r['username']}" if r["username"] else (r["preferred_name"] or r["first_name"] or str(r["user_id"]))
+        status_icon = "✅" if r["intention_reviewed"] else "◻️"
+        lines.append(f"\n{status_icon} <b>{html.escape(name)}</b>:\n«{html.escape(r['intention_text'])}»")
+        toggle_label = "◻️ Снять отметку" if r["intention_reviewed"] else "✅ Разбор дан"
+        rows.append([InlineKeyboardButton(
+            text=f"{toggle_label} - {name}", callback_data=f"adm_intent_toggle_{r['user_id']}"
+        )])
+    rows.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="adm_back")])
+    await callback.message.edit_text("\n".join(lines), reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("adm_intent_toggle_"))
+async def adm_intent_toggle(callback: CallbackQuery):
+    if not await _require_permission(callback, "adm_intentions_list"):
+        return
+    user_id = int(callback.data[len("adm_intent_toggle_"):])
+    membership = db.get_sanctum_membership(user_id)
+    currently_reviewed = bool(membership["intention_reviewed"]) if membership else False
+    db.set_intention_reviewed(user_id, not currently_reviewed)
+    await adm_intentions_list(callback)
+
+
+# ---------- напоминание о намерении (ступень «Искра», 8 и 22 числа каждого месяца) ----------
 
 async def check_intention_reminders(bot: Bot):
+    """Работает по фиксированному для всех расписанию (8 и 22 число каждого
+    месяца — см. day="8,22" в регистрации задачи в main()), а не по личному
+    дню каждого человека. Кнопка "написать лично" пропадает после того, как
+    она отметит разбор данным (intention_reviewed) — само напоминание при
+    этом продолжает приходить, это самостоятельная практика, не ожидание
+    ответа от неё."""
     logging.info("[планировщик] check_intention_reminders: старт")
     today = _today()
-    for m in db.get_intentions_due_today(today.day):
+    for m in db.get_active_intentions():
         template = db.get_setting("ascension_intention_recall_text") or ""
         text = template.replace("{намерение}", m["intention_text"])
+        rows = [[InlineKeyboardButton(text="✏️ Изменить намерение", callback_data="edit_intention")]]
+        if not m["intention_reviewed"]:
+            personal_link = db.get_setting("admin_personal_chat_link")
+            if personal_link:
+                rows.append([InlineKeyboardButton(text="💌 Написать Алёне лично", url=personal_link)])
         try:
-            await bot.send_message(m["user_id"], text, reply_markup=_personal_link_kb("💌 Написать Алёне лично"))
+            await bot.send_message(m["user_id"], text, reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
         except Exception:
             logging.exception("Не удалось отправить напоминание о намерении пользователю %s", m["user_id"])
         db.mark_intention_reminded(m["user_id"], today.isoformat())
     logging.info("[планировщик] check_intention_reminders: завершено")
+
+
+@router.callback_query(F.data == "edit_intention")
+async def edit_intention_start(callback: CallbackQuery, state: FSMContext):
+    membership = db.get_sanctum_membership(callback.from_user.id)
+    current = membership["intention_text"] if membership else None
+    if not current:
+        await callback.answer("У Вас пока нет записанного намерения.", show_alert=True)
+        return
+    await state.set_state(IntentionStates.waiting_text)
+    await callback.message.answer(
+        f"Сейчас записано:\n«{current}»\n\n"
+        "Пришлите новый текст намерения полностью - он заменит прежний."
+    )
+    await callback.answer()
 
 
 async def cleanup_feed_posts():
@@ -4387,7 +4462,7 @@ async def main():
     scheduler.add_job(check_sanctum_reminders, "cron", hour=config.SANCTUM_REMINDER_HOUR, args=[bot])
     scheduler.add_job(check_reengagement, "cron", hour=config.SANCTUM_REMINDER_HOUR, minute=30, args=[bot])
     scheduler.add_job(check_webinar_reminders, "interval", minutes=15, args=[bot])
-    scheduler.add_job(check_intention_reminders, "cron", hour=11, args=[bot])
+    scheduler.add_job(check_intention_reminders, "cron", day="8,22", hour=11, args=[bot])
     scheduler.add_job(cleanup_feed_posts, "cron", hour=config.SANCTUM_REMINDER_HOUR, minute=45)
     # misfire_grace_time увеличен (по умолчанию у APScheduler он мал) — если
     # окно 03:00 всё-таки пропущено, задача ещё догонит себя сама в течение

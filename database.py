@@ -289,6 +289,16 @@ def init_db():
     except Exception:
         pass
     try:
+        # ставится вручную ею через "🕯 Намерения участников" после того, как
+        # она лично дала человеку разбор его намерения — напоминание при этом
+        # продолжает приходить (это самостоятельная практика, не "ожидание
+        # ответа от неё"), но кнопка "написать лично" из него убирается, раз
+        # разбор уже дан. Сбрасывается обратно в 0 при любом редактировании
+        # намерения (см. set_sanctum_intention) — новый текст ещё не разбирали
+        c.execute("ALTER TABLE sanctum_membership ADD COLUMN intention_reviewed INTEGER DEFAULT 0")
+    except Exception:
+        pass
+    try:
         # суммарные дни присутствия в VEDA SANCTUM с самого первого входа —
         # растёт при каждом продлении (см. upsert_sanctum_membership), НЕ
         # обнуляется при перерыве (уже накопленное не теряется), основа для
@@ -1470,30 +1480,34 @@ def get_sanctum_membership(user_id):
 
 
 def set_sanctum_intention(user_id, text):
-    """Сохраняет намерение, которое человек написал в ответ на ритуал-приглашение
-    при переходе на 2-ю ступень — запоминает и число месяца, чтобы потом
-    напоминать ему об этом же самом намерении раз в месяц, в тот же день."""
+    """Сохраняет намерение — и при первом написании, и при любом последующем
+    редактировании/дополнении (человек может менять текст сколько угодно
+    раз). Напоминание больше не завязано на личный день месяца — приходит
+    всем в одни и те же даты (см. check_intention_reminders), поэтому здесь
+    больше не запоминается intention_day. intention_reviewed сбрасывается в 0
+    при каждом сохранении — если она уже отмечала разбор для предыдущего
+    текста, новый текст считается ещё не разобранным."""
     conn = get_conn()
-    day = min(datetime.now().day, 28)
     conn.execute(
-        "UPDATE sanctum_membership SET intention_text = ?, intention_day = ? WHERE user_id = ?",
-        (text, day, user_id),
+        "UPDATE sanctum_membership SET intention_text = ?, intention_reviewed = 0 WHERE user_id = ?",
+        (text, user_id),
     )
     conn.commit()
     conn.close()
 
 
-def get_intentions_due_today(day_of_month):
-    """Намерения, которые нужно напомнить сегодня (совпадает день месяца) и
-    ещё не напоминали в этом месяце (intention_last_reminded не сегодняшний
-    месяц)."""
+def get_active_intentions():
+    """Все намерения, которым сегодня нужно напомнить — сама привязка к датам
+    (8 и 22 число) сделана на уровне расписания задачи (main.py), здесь только
+    защита от повторной отправки, если задача вдруг сработает дважды за один
+    день (intention_last_reminded != сегодняшняя дата)."""
     conn = get_conn()
-    this_month = datetime.now().strftime("%Y-%m")
+    today_iso = datetime.now().strftime("%Y-%m-%d")
     rows = conn.execute(
-        "SELECT * FROM sanctum_membership WHERE intention_text IS NOT NULL AND intention_day = ? "
+        "SELECT * FROM sanctum_membership WHERE intention_text IS NOT NULL "
         "AND (status IS NULL OR status != 'removed') "
-        "AND (intention_last_reminded IS NULL OR substr(intention_last_reminded, 1, 7) != ?)",
-        (day_of_month, this_month),
+        "AND (intention_last_reminded IS NULL OR intention_last_reminded != ?)",
+        (today_iso,),
     ).fetchall()
     conn.close()
     return rows
@@ -1504,6 +1518,36 @@ def mark_intention_reminded(user_id, date_iso):
     conn.execute("UPDATE sanctum_membership SET intention_last_reminded = ? WHERE user_id = ?", (date_iso, user_id))
     conn.commit()
     conn.close()
+
+
+def set_intention_reviewed(user_id, reviewed: bool):
+    """Ставится вручную ею через "🕯 Намерения участников", когда она лично
+    дала человеку разбор его намерения — убирает кнопку "написать лично" из
+    последующих ежемесячных напоминаний (само напоминание продолжает идти)."""
+    conn = get_conn()
+    conn.execute(
+        "UPDATE sanctum_membership SET intention_reviewed = ? WHERE user_id = ?", (1 if reviewed else 0, user_id)
+    )
+    conn.commit()
+    conn.close()
+
+
+def get_all_intentions_for_admin():
+    """Список всех записанных намерений вместе с именем человека — для экрана
+    "🕯 Намерения участников", где она видит полный текст и может отметить,
+    что разбор дан."""
+    conn = get_conn()
+    rows = conn.execute(
+        """
+        SELECT sm.user_id, sm.intention_text, sm.intention_reviewed, u.preferred_name, u.first_name, u.username
+        FROM sanctum_membership sm
+        JOIN users u ON u.user_id = sm.user_id
+        WHERE sm.intention_text IS NOT NULL AND (sm.status IS NULL OR sm.status != 'removed')
+        ORDER BY sm.intention_reviewed ASC, u.preferred_name, u.first_name
+        """
+    ).fetchall()
+    conn.close()
+    return rows
 
 
 def increment_luminar_count(user_id):
