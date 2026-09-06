@@ -709,6 +709,40 @@ async def _send_welcome(message: Message):
     )
 
 
+NAME_QUESTION_TEXT = "Как я могу к Вам обращаться? Представьтесь, пожалуйста. ✨"
+
+
+async def _send_referral_welcome(message: Message, referrer):
+    """Особый первый момент для тех, кто пришёл по реферальной ссылке — до
+    вопроса об имени, отдельно от обычного сценария (см. обсуждение премиальных
+    систем приглашений - персонализация + эксклюзивность). Имя пригласившего
+    берётся так же, как везде в боте ({имя} = preferred_name или first_name),
+    а не username и не ID - username добавляется РЯДОМ, в скобках, кликабельным,
+    только если он у пригласившего вообще есть."""
+    referrer_name = referrer["preferred_name"] or referrer["first_name"] or "друг"
+    if referrer["username"]:
+        mention = (
+            f'{html.escape(referrer_name)} (<a href="https://t.me/{referrer["username"]}">'
+            f'@{html.escape(referrer["username"])}</a>)'
+        )
+    else:
+        mention = html.escape(referrer_name)
+    text = (
+        db.get_setting("referral_welcome_text")
+        .replace("{пригласивший}", mention)
+        .replace("{название}", html.escape(SANCTUM_FULL_NAME))
+    )
+    kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="Продолжить", callback_data="referral_continue")]])
+    await message.answer(text, reply_markup=kb)
+
+
+@router.callback_query(F.data == "referral_continue")
+async def referral_continue_cb(callback: CallbackQuery, state: FSMContext):
+    await state.set_state(NameStates.waiting_name)
+    await callback.message.answer(NAME_QUESTION_TEXT)
+    await callback.answer()
+
+
 @router.message(CommandStart())
 async def cmd_start(message: Message, state: FSMContext):
     await state.clear()
@@ -728,8 +762,13 @@ async def cmd_start(message: Message, state: FSMContext):
         message.from_user.id, message.from_user.username, message.from_user.first_name, referred_by=referred_by
     )
     if is_new:
+        if referred_by:
+            referrer = db.get_user(referred_by)
+            if referrer:
+                await _send_referral_welcome(message, referrer)
+                return
         await state.set_state(NameStates.waiting_name)
-        await message.answer("Как я могу к Вам обращаться? Представьтесь, пожалуйста. ✨")
+        await message.answer(NAME_QUESTION_TEXT)
         return
     await _send_welcome(message)
 
@@ -768,13 +807,24 @@ async def name_received(message: Message, state: FSMContext):
         await _send_webinar_card(message, pending_webinar_id, message.from_user.id)
         return
     await _send_welcome(message)
+    # небольшая пауза перед "Первым Касанием" — чтобы оба сообщения не
+    # выскакивали одним потоком сразу друг за другом
+    await asyncio.sleep(2)
     # "Первое Касание" — одноразовое сообщение только настоящим новичкам,
     # сразу после того, как они представились в самый первый раз (сюда не
     # попадают ни возвращающиеся люди, ни те, кто пришёл по ссылке на
     # конкретный вебинар — см. ветку выше)
     user_row = db.get_user(message.from_user.id)
     text = db.get_setting(ASCENSION_TEXT_KEYS[1])
-    await message.answer(_personalize(text, user_row))
+    photo = db.get_setting("ascension_level1_photo")
+    kb = None
+    if user_row and user_row["referred_by"]:
+        # кнопка на Sanctum здесь уместна именно для пришедших по ссылке —
+        # закрывает обещание "подробнее далее" из особого приветствия
+        kb = InlineKeyboardMarkup(
+            inline_keyboard=[[InlineKeyboardButton(text="⚜️ Что такое VEDA SANCTUM", callback_data="open_sanctum")]]
+        )
+    await _send_with_optional_photo(message.bot, message.from_user.id, _personalize(text, user_row), photo, kb)
 
 
 @router.message(Command("cancel"))
@@ -2791,6 +2841,7 @@ HTML_TRUSTED_FIELDS = {
     # членство именно в этом множестве)
     ("ascension_text", "ascension_intention_invite_text"),
     ("ascension_text", "ascension_intention_confirmation_text"),
+    ("ascension_text", "referral_welcome_text"),
     ("ascension_text", "ascension_intention_recall_text"),
     ("ascension_text", "luminar_intro_text"),
     ("ascension_text", "luminar_1_text"),
@@ -2914,6 +2965,7 @@ ASCENSION_TEXT_LABELS = {
     "ascension_overview_text": "«Как устроен Путь?» - справка (кнопка ℹ️ в профиле)",
     "ascension_intention_invite_text": "приглашение написать намерение (сразу после «Искры»)",
     "ascension_intention_confirmation_text": "ответ сразу после того, как человек написал намерение",
+    "referral_welcome_text": "особое приветствие для пришедших по реферальной ссылке (перед вопросом об имени)",
     "ascension_intention_recall_text": "ежемесячное напоминание о намерении",
     "luminar_intro_short_text": "«Созвездие Люминаров» - краткая строка (видна в профиле всегда)",
     "luminar_intro_text": "«Созвездие Люминаров» - полный текст (кнопка «Подробнее» в профиле)",
@@ -2928,6 +2980,7 @@ ASCENSION_TEXT_PLACEHOLDERS = {
     "ascension_level3_text": ["{имя}"],
     "ascension_overview_text": ["{имя}"],
     "ascension_intention_confirmation_text": ["{имя}"],
+    "referral_welcome_text": ["{пригласивший}", "{название}"],
     "ascension_intention_recall_text": ["{намерение}"],
     "luminar_1_text": ["{имя}"],
     "luminar_2_text": ["{имя}"],
