@@ -1,4 +1,5 @@
 import glob
+import json
 import os
 import sqlite3
 from datetime import datetime, timedelta
@@ -23,6 +24,55 @@ def get_conn():
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
     return conn
+
+
+# ---------- постоянное хранилище состояний диалога (FSM) ----------
+# Обнаружено 2026-09-06: стандартное MemoryStorage у aiogram хранит состояние
+# "на середине диалога" (пишет намерение, редактирует текст в панели,
+# оформляет оплату) только в оперативной памяти процесса - при КАЖДОМ
+# перезапуске бота (а во время активной разработки это происходит часто)
+# состояние всех людей одновременно стиралось. Следующее сообщение человека
+# после такого перезапуска не попадало ни в один обработчик и терялось молча
+# (реальный случай: попытка изменить намерение). Здесь то же самое, но
+# сохраняется в той же базе данных - переживает любой перезапуск бота.
+
+def fsm_get_state(storage_key):
+    conn = get_conn()
+    row = conn.execute("SELECT state FROM fsm_storage WHERE storage_key = ?", (storage_key,)).fetchone()
+    conn.close()
+    return row["state"] if row else None
+
+
+def fsm_set_state(storage_key, state):
+    conn = get_conn()
+    conn.execute(
+        "INSERT INTO fsm_storage (storage_key, state, data) VALUES (?, ?, '{}') "
+        "ON CONFLICT(storage_key) DO UPDATE SET state = excluded.state",
+        (storage_key, state),
+    )
+    conn.commit()
+    conn.close()
+
+
+def fsm_get_data(storage_key):
+    conn = get_conn()
+    row = conn.execute("SELECT data FROM fsm_storage WHERE storage_key = ?", (storage_key,)).fetchone()
+    conn.close()
+    if not row or not row["data"]:
+        return {}
+    return json.loads(row["data"])
+
+
+def fsm_set_data(storage_key, data):
+    conn = get_conn()
+    payload = json.dumps(data, ensure_ascii=False)
+    conn.execute(
+        "INSERT INTO fsm_storage (storage_key, state, data) VALUES (?, NULL, ?) "
+        "ON CONFLICT(storage_key) DO UPDATE SET data = excluded.data",
+        (storage_key, payload),
+    )
+    conn.commit()
+    conn.close()
 
 
 def init_db():
@@ -241,6 +291,14 @@ def init_db():
             is_public INTEGER DEFAULT 0,
             created_at TEXT,
             answered_at TEXT
+        )
+    """)
+
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS fsm_storage (
+            storage_key TEXT PRIMARY KEY,
+            state TEXT,
+            data TEXT
         )
     """)
 

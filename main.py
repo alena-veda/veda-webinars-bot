@@ -16,8 +16,7 @@ from aiogram.exceptions import TelegramBadRequest
 from aiogram.filters import Command, CommandStart
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
-from aiogram.fsm.storage.memory import MemoryStorage
-from aiogram.fsm.storage.base import StorageKey
+from aiogram.fsm.storage.base import BaseStorage, StorageKey
 from aiogram.types import (
     CallbackQuery,
     ChatMemberUpdated,
@@ -42,11 +41,49 @@ def _today():
 
 router = Router()
 
+
+class SQLiteStorage(BaseStorage):
+    """Хранилище состояний FSM прямо в webinars.db — в отличие от штатного
+    MemoryStorage (у которого в документации честно написано "не для
+    продакшена, все данные теряются при перезапуске"), переживает любой
+    перезапуск бота. Обнаружено 2026-09-06 на реальном случае: человек
+    начинал что-то посреди диалога (писал намерение, оформлял оплату,
+    редактировал текст в панели), в этот момент бот перезапускался ради
+    несвязанной правки - и следующее сообщение человека просто не попадало
+    ни в один обработчик и терялось молча, без единого сообщения кому-либо."""
+
+    @staticmethod
+    def _key(key: StorageKey) -> str:
+        parts = [str(key.bot_id), str(key.chat_id), str(key.user_id)]
+        if key.thread_id is not None:
+            parts.append(f"t{key.thread_id}")
+        if key.business_connection_id is not None:
+            parts.append(f"b{key.business_connection_id}")
+        if key.destiny != "default":
+            parts.append(f"d{key.destiny}")
+        return ":".join(parts)
+
+    async def set_state(self, key: StorageKey, state=None) -> None:
+        db.fsm_set_state(self._key(key), state.state if isinstance(state, State) else state)
+
+    async def get_state(self, key: StorageKey):
+        return db.fsm_get_state(self._key(key))
+
+    async def set_data(self, key: StorageKey, data) -> None:
+        db.fsm_set_data(self._key(key), dict(data))
+
+    async def get_data(self, key: StorageKey) -> dict:
+        return db.fsm_get_data(self._key(key))
+
+    async def close(self) -> None:
+        pass
+
+
 # общее хранилище FSM-состояний — на уровне модуля, а не только внутри main(),
 # потому что иногда нужно установить состояние КОНКРЕТНОМУ человеку не из его
 # собственного апдейта (например, пригласить его на ритуал-намерение сразу
 # после того, как АДМИН подтвердил его оплату — см. _invite_intention_ritual)
-fsm_storage = MemoryStorage()
+fsm_storage = SQLiteStorage()
 
 
 async def _block_guard(handler, event, data):
