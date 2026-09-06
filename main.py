@@ -554,13 +554,30 @@ ADMIN_PERMISSION_SECTIONS = [
         ("adm_webinars", "🗓 Вебинары"),
         ("adm_webinar_reminder_texts", "✉️ Тексты напоминаний о вебинарах"),
     ]),
-    ("⚜️ VEDA SANCTUM", [
+    ("⚜️ VEDA SANCTUM и Путь Восхождения", [
         ("adm_sanctum", "⚜️ Настройки VEDA SANCTUM"),
         ("adm_grant_access", "🔑 Выдать/продлить доступ VEDA SANCTUM"),
         ("adm_sanctum_list", "📋 Подписчики VEDA SANCTUM (убрать - прямо там)"),
         ("adm_reminder_texts", "✉️ Тексты напоминаний VEDA SANCTUM"),
         ("adm_ascension_texts", "🪜 Тексты Пути Восхождения и Люминаров"),
+        ("adm_ascension_photos", "🖼 Фото Пути Восхождения и Люминаров"),
         ("adm_intentions_list", "🕯 Намерения участников"),
+        ("adm_profile_texts", "✨ Тексты «Мой профиль»"),
+        ("adm_personal_link", "💌 Ссылка на личный чат с Alena Veda"),
+    ]),
+    ("🧘 VEDA HEALING FLOW", [
+        ("adm_meditation_text", "✏️ Текст VEDA HEALING FLOW"),
+        ("adm_photo_meditation", "🖼 Фото VEDA HEALING FLOW"),
+        ("adm_meditation_coming_soon", "🌙 Текст «скоро откроется» (пока нет ссылки)"),
+        ("adm_meditation_link", "🔗 Ссылка на VEDA HEALING FLOW"),
+    ]),
+    ("💠 Общие тексты бота", [
+        ("adm_welcome_text", "✏️ Текст приветствия (/start)"),
+        ("adm_photo_welcome", "🖼 Фото приветствия (/start)"),
+        ("adm_about", "💠 Текст «Философия Alena Veda»"),
+        ("adm_photo_about", "🖼 Фото «Философия Alena Veda»"),
+        ("adm_faq", "❓ Текст «Частые вопросы»"),
+        ("adm_rules", "📜 Текст «Правила пространства»"),
     ]),
     ("💳 Оплаты", [
         ("adm_payment", "💳 Реквизиты оплаты"),
@@ -570,21 +587,6 @@ ADMIN_PERMISSION_SECTIONS = [
     ("📢 Контент пространства", [
         ("adm_broadcast", "📢 Сделать рассылку"),
         ("adm_feed_add", "➕ Добавить публикацию в архив напрямую"),
-    ]),
-    ("✏️ Тексты и фото экранов бота", [
-        ("adm_about", "💠 Текст «Философия Alena Veda»"),
-        ("adm_faq", "❓ Текст «Частые вопросы»"),
-        ("adm_rules", "📜 Текст «Правила пространства»"),
-        ("adm_photo_about", "🖼 Фото «Философия Alena Veda»"),
-        ("adm_welcome_text", "✏️ Текст приветствия (/start)"),
-        ("adm_photo_welcome", "🖼 Фото приветствия (/start)"),
-        ("adm_meditation_text", "✏️ Текст VEDA HEALING FLOW"),
-        ("adm_meditation_coming_soon", "🌙 Текст «скоро откроется» (пока нет ссылки)"),
-        ("adm_meditation_link", "🔗 Ссылка на VEDA HEALING FLOW"),
-        ("adm_photo_meditation", "🖼 Фото VEDA HEALING FLOW"),
-        ("adm_profile_texts", "✨ Тексты «Мой профиль»"),
-        ("adm_personal_link", "💌 Ссылка на личный чат с Alena Veda"),
-        ("adm_ascension_photos", "🖼 Фото Пути Восхождения и Люминаров"),
     ]),
     ("🧲 Автоматизация", [
         ("adm_reengage", "🧲 Автовозврат потерянных людей"),
