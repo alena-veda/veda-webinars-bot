@@ -531,6 +531,7 @@ ADMIN_PERMISSION_SECTIONS = [
         ("adm_meditation_link", "🔗 Ссылка на VEDA HEALING FLOW"),
         ("adm_photo_meditation", "🖼 Фото VEDA HEALING FLOW"),
         ("adm_profile_texts", "✨ Тексты «Мой профиль»"),
+        ("adm_personal_link", "💌 Ссылка на личный чат с Alena Veda"),
     ]),
     ("🧲 Автоматизация", [
         ("adm_reengage", "🧲 Автовозврат потерянных людей"),
@@ -749,7 +750,14 @@ async def intention_received(message: Message, state: FSMContext):
     db.set_sanctum_intention(message.from_user.id, text.strip())
     await state.clear()
     user_row = db.get_user(message.from_user.id)
-    await message.answer(_personalize(db.get_setting("ascension_intention_confirmation_text"), user_row))
+    personal_link = db.get_setting("admin_personal_chat_link")
+    kb = None
+    if personal_link:
+        kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="💌 Написать лично", url=personal_link)]])
+    await message.answer(
+        _personalize(db.get_setting("ascension_intention_confirmation_text"), user_row),
+        reply_markup=kb,
+    )
 
 
 # ---------- вебинары (пользователь) ----------
@@ -3061,6 +3069,23 @@ async def adm_meditation_link(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
 
 
+@router.callback_query(F.data == "adm_personal_link")
+async def adm_personal_link(callback: CallbackQuery, state: FSMContext):
+    if not await _require_permission(callback, "adm_personal_link"):
+        return
+    current = db.get_setting("admin_personal_chat_link")
+    status = current if current else "пока не задана"
+    await state.set_state(EditFieldStates.waiting_value)
+    await state.update_data(target="personal_link", field="admin_personal_chat_link")
+    await callback.message.answer(
+        f"Сейчас: {status}\n\n"
+        "Пришлите ссылку на Ваш личный чат в Telegram (например: https://t.me/Alena_Devi_Veda или просто "
+        "@Alena_Devi_Veda). Она используется в кнопке «Написать лично», которая приходит человеку сразу "
+        "после того, как он напишет своё намерение на ступени «Искра»."
+    )
+    await callback.answer()
+
+
 PROFILE_TEXT_LABELS = {
     "profile_greeting_text": "приветствие в начале «Мой профиль»",
     "profile_join_date_text": "строка «С нами с ... уже N дней»",
@@ -3473,6 +3498,16 @@ async def edit_field_value(message: Message, state: FSMContext):
             raw = f"https://t.me/{raw}"
         db.set_setting("meditation_bot_link", raw)
         await message.answer(f"Ссылка на VEDA HEALING FLOW обновлена ✅\n{raw}\n\nКнопка теперь видна людям.")
+    elif target == "personal_link":
+        raw = value.strip().lstrip("@")
+        if raw.startswith("http://") or raw.startswith("https://"):
+            pass
+        elif raw.startswith("t.me/"):
+            raw = f"https://{raw}"
+        else:
+            raw = f"https://t.me/{raw}"
+        db.set_setting("admin_personal_chat_link", raw)
+        await message.answer(f"Ссылка на личный чат обновлена ✅\n{raw}")
     elif target == "admin_add":
         try:
             new_admin_id = int(value.strip())

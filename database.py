@@ -599,6 +599,7 @@ def init_db():
             "До ключа Люминар I осталось - {осталось}."
         ),
         "profile_luminar_progress_next_text": "Путь к {следующий_ранг}: {бар} - {число} из {порог}",
+        "admin_personal_chat_link": "https://t.me/Alena_Devi_Veda",
         "ascension_overview_text": (
             "{имя}, вот как устроены ветви пространства Восхождения.\n"
             "Здесь два связанных, но разных пути.\n\n"
