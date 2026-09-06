@@ -1695,19 +1695,18 @@ def _sanctum_payment_context(user_id: int) -> str:
     return f"\n🔄 Возобновление (истекло {date_part})"
 
 
-@router.message(ReceiptStates.waiting_receipt, F.photo)
-async def receipt_received(message: Message, state: FSMContext):
-    data = await state.get_data()
-    reg_id = data.get("reg_id")
-    reg = db.get_registration(reg_id)
+async def _process_receipt_photo(message: Message, reg_id) -> bool:
+    """Общая логика приёма чека — прикрепляет фото к заявке, отвечает
+    человеку и уведомляет админов. Используется и в обычном сценарии
+    (receipt_received, состояние в порядке), и в подстраховке (photo_fallback,
+    main.py, ниже — когда состояние ожидания было потеряно). Возвращает
+    False, если заявки уже нет или она не в статусе ожидания чека."""
+    reg = db.get_registration(reg_id) if reg_id else None
     if not reg or reg["status"] != "awaiting_receipt":
-        await state.clear()
-        await message.answer("Не нашла активную заявку. Попробуйте зарегистрироваться заново.")
-        return
+        return False
 
     file_id = message.photo[-1].file_id
     db.attach_receipt(reg_id, file_id)
-    await state.clear()
     await message.answer("Спасибо! Чек отправлен на проверку, я сообщу Вам о результате 🙏")
 
     user = message.from_user
@@ -1730,6 +1729,17 @@ async def receipt_received(message: Message, state: FSMContext):
             await message.bot.send_photo(admin_id, file_id, caption=caption, reply_markup=kb)
         except Exception:
             logging.exception("Не удалось отправить чек админу %s", admin_id)
+    return True
+
+
+@router.message(ReceiptStates.waiting_receipt, F.photo)
+async def receipt_received(message: Message, state: FSMContext):
+    data = await state.get_data()
+    reg_id = data.get("reg_id")
+    ok = await _process_receipt_photo(message, reg_id)
+    await state.clear()
+    if not ok:
+        await message.answer("Не нашла активную заявку. Попробуйте зарегистрироваться заново.")
 
 
 @router.message(ReceiptStates.waiting_receipt)
@@ -4578,6 +4588,25 @@ async def backup_database_job():
         logging.info("[планировщик] backup_database: завершено, файл %s", path)
     except Exception:
         logging.exception("[планировщик] backup_database: упало с ошибкой")
+
+
+@router.message(F.photo)
+async def photo_fallback(message: Message):
+    """Подстраховка на самом конце ВСЕХ обработчиков фото в файле - порядок
+    регистрации здесь принципиален: этот обработчик не имеет фильтра по
+    состоянию и потому обязан идти последним, иначе он перехватит фото,
+    предназначенные другим сценариям (загрузка фото в панели, фото для
+    рассылки и т.п.), которые должны сработать первыми.
+    Реальный случай (2026-09-06): человек прислал чек об оплате, но
+    состояние ожидания было потеряно (успел ещё раз нажать /start между
+    оформлением заявки и отправкой чека - /start всегда очищает состояние),
+    и фото просто пропало для бота молча, ни ей, ни ему не пришло никакого
+    сообщения. Теперь при потере состояния бот всё равно находит
+    незавершённую заявку по факту в базе и принимает чек как обычно."""
+    reg = db.get_awaiting_receipt_for_user(message.from_user.id)
+    if not reg:
+        return
+    await _process_receipt_photo(message, reg["id"])
 
 
 # ---------- запуск ----------

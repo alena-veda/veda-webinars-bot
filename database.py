@@ -1462,6 +1462,22 @@ def get_pending_registration(user_id, product_type, product_id):
     return row
 
 
+def get_awaiting_receipt_for_user(user_id):
+    """Незавершённая заявка этого человека, реально ждущая чек (любой
+    продукт) — подстраховка для photo_fallback (main.py): если состояние
+    ожидания чека было потеряно (например, человек успел ещё раз нажать
+    /start между оформлением заявки и отправкой скриншота — /start всегда
+    очищает состояние), заявка в базе всё равно показывает, что чек нужен,
+    и фото не теряется молча. Реальный случай, поймавший это: 2026-09-06."""
+    conn = get_conn()
+    row = conn.execute(
+        "SELECT * FROM registrations WHERE user_id = ? AND status = 'awaiting_receipt' ORDER BY id DESC LIMIT 1",
+        (user_id,),
+    ).fetchone()
+    conn.close()
+    return row
+
+
 def attach_receipt(reg_id, file_id):
     conn = get_conn()
     conn.execute(
