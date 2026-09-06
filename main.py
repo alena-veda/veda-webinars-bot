@@ -199,6 +199,21 @@ def _ru_days(n: int) -> str:
     return f"{n} {word}"
 
 
+def _ru_human_word(n: int) -> str:
+    """Правильное окончание «человек» после числительного — родительный
+    падеж: «человека» для 1 и для 2-4 (кроме 12-14, как «два/три/четыре
+    рубля»), «человек» для остального (0, 5-9, 11-14 и далее, как «пять
+    рублей»). В отличие от _ru_days возвращает только слово, без числа —
+    число подставляется отдельно в шаблоне через {число}."""
+    n_abs = abs(n) % 100
+    if 11 <= n_abs <= 14:
+        return "человек"
+    last = n_abs % 10
+    if last == 1 or 2 <= last <= 4:
+        return "человека"
+    return "человек"
+
+
 async def _require_text(message: Message):
     """Возвращает текст сообщения, или сама отвечает "нужен текст" и
     возвращает None, если пришло фото/стикер/что угодно нетекстовое —
@@ -1462,6 +1477,7 @@ async def show_profile(message: Message):
             luminar_teaser += "\n" + (
                 db.get_setting("profile_luminar_progress_text")
                 .replace("{число}", str(luminar_count))
+                .replace("{человек}", _ru_human_word(luminar_count))
                 .replace("{осталось}", str(remaining))
             )
         else:
@@ -3077,7 +3093,7 @@ PROFILE_TEXT_PLACEHOLDERS = {
     "profile_path_step_label_text": ["{ступень}"],
     "profile_luminar_rank_label_text": ["{ранг}"],
     "profile_referral_intro_text": ["{ссылка}"],
-    "profile_luminar_progress_text": ["{число}", "{осталось}"],
+    "profile_luminar_progress_text": ["{число}", "{человек}", "{осталось}"],
     "profile_luminar_progress_next_text": ["{следующий_ранг}", "{бар}", "{число}", "{порог}"],
 }
 
