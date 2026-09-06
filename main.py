@@ -3,6 +3,7 @@ import calendar
 import html
 import json
 import logging
+import random
 import re
 import urllib.parse
 from datetime import datetime, timedelta
@@ -81,6 +82,7 @@ BTN_MEDITATION = "🧘🏽‍♀️ VEDA HEALING FLOW"
 BTN_PROFILE = "✨ Мой профиль в VEDAME SPACE"
 BTN_ABOUT = "💠 Философия Alena Veda"
 BTN_FEED = "📖 Архив публикаций пространства"
+BTN_INFO = "❓ Инфо и правила"
 BTN_ADMIN = "⚙️ Админ-панель"
 
 SANCTUM_FULL_NAME = "VEDA SANCTUM | CODEofGOD"
@@ -472,6 +474,16 @@ async def _credit_luminar_referral(bot: Bot, referred_user_id: int):
     new_count = db.increment_luminar_count(referrer_id)
     new_rank = _luminar_rank(new_count)
     if new_rank <= old_rank:
+        # обычный, не пороговый реферал — мгновенная тёплая обратная связь,
+        # не дожидаясь порога 5/10/30 (иначе первые несколько приглашённых
+        # человеком остаются вообще незамеченными для него самого)
+        ping_variants = [db.get_setting(f"luminar_referral_ping_text_{i}") for i in (1, 2, 3)]
+        ping_variants = [t for t in ping_variants if t]
+        if ping_variants:
+            try:
+                await bot.send_message(referrer_id, random.choice(ping_variants))
+            except Exception:
+                logging.exception("Не удалось отправить мгновенное уведомление о реферале пользователю %s", referrer_id)
         return
 
     gift_desc = LUMINAR_GIFT_DESCRIPTIONS[new_rank]
@@ -523,6 +535,7 @@ def main_menu_kb(user_id: int) -> ReplyKeyboardMarkup:
         [KeyboardButton(text=BTN_PROFILE)],
         [KeyboardButton(text=BTN_ABOUT)],
         [KeyboardButton(text=BTN_FEED)],
+        [KeyboardButton(text=BTN_INFO)],
     ]
     if db.is_admin(user_id):
         rows.append([KeyboardButton(text=BTN_ADMIN)])
@@ -563,6 +576,8 @@ ADMIN_PERMISSION_SECTIONS = [
     ]),
     ("✏️ Тексты и фото экранов бота", [
         ("adm_about", "💠 Текст «Философия Alena Veda»"),
+        ("adm_faq", "❓ Текст «Частые вопросы»"),
+        ("adm_rules", "📜 Текст «Правила пространства»"),
         ("adm_photo_about", "🖼 Фото «Философия Alena Veda»"),
         ("adm_welcome_text", "✏️ Текст приветствия (/start)"),
         ("adm_photo_welcome", "🖼 Фото приветствия (/start)"),
@@ -1218,6 +1233,33 @@ async def show_about(message: Message):
         await message.answer_photo(about_photo)
     text = db.get_setting("about_text")
     await message.answer(text, protect_content=_protect_for(message.from_user.id))
+
+
+# ---------- инфо и правила ----------
+
+@router.message(F.text == BTN_INFO)
+async def show_info_menu(message: Message):
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="❓ Частые вопросы", callback_data="open_faq")],
+        [InlineKeyboardButton(text="📜 Правила пространства", callback_data="open_rules")],
+    ])
+    await message.answer("Выберите, что интересует:", reply_markup=kb)
+
+
+@router.callback_query(F.data == "open_faq")
+async def open_faq_cb(callback: CallbackQuery):
+    text = db.get_setting("faq_text")
+    kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="📜 Правила пространства", callback_data="open_rules")]])
+    await callback.message.answer(text, reply_markup=kb, protect_content=_protect_for(callback.from_user.id))
+    await callback.answer()
+
+
+@router.callback_query(F.data == "open_rules")
+async def open_rules_cb(callback: CallbackQuery):
+    text = db.get_setting("rules_text")
+    kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="❓ Частые вопросы", callback_data="open_faq")]])
+    await callback.message.answer(text, reply_markup=kb, protect_content=_protect_for(callback.from_user.id))
+    await callback.answer()
 
 
 # ---------- архив публикаций пространства (лента) ----------
@@ -2797,6 +2839,8 @@ HTML_TRUSTED_FIELDS = {
     ("sanctum", "price"),
     ("sanctum", "invite_link"),
     ("about", "about_text"),
+    ("faq", "faq_text"),
+    ("rules", "rules_text"),
     ("welcome_text", "welcome_text"),
     ("meditation_text", "meditation_text"),
     ("meditation_coming_soon", "meditation_coming_soon_text"),
@@ -2842,6 +2886,9 @@ HTML_TRUSTED_FIELDS = {
     ("ascension_text", "ascension_intention_invite_text"),
     ("ascension_text", "ascension_intention_confirmation_text"),
     ("ascension_text", "referral_welcome_text"),
+    ("ascension_text", "luminar_referral_ping_text_1"),
+    ("ascension_text", "luminar_referral_ping_text_2"),
+    ("ascension_text", "luminar_referral_ping_text_3"),
     ("ascension_text", "ascension_intention_recall_text"),
     ("ascension_text", "luminar_intro_text"),
     ("ascension_text", "luminar_1_text"),
@@ -2966,6 +3013,9 @@ ASCENSION_TEXT_LABELS = {
     "ascension_intention_invite_text": "приглашение написать намерение (сразу после «Искры»)",
     "ascension_intention_confirmation_text": "ответ сразу после того, как человек написал намерение",
     "referral_welcome_text": "особое приветствие для пришедших по реферальной ссылке (перед вопросом об имени)",
+    "luminar_referral_ping_text_1": "мгновенное уведомление о реферале - вариант 1 (случайно выбирается один из трёх)",
+    "luminar_referral_ping_text_2": "мгновенное уведомление о реферале - вариант 2",
+    "luminar_referral_ping_text_3": "мгновенное уведомление о реферале - вариант 3",
     "ascension_intention_recall_text": "ежемесячное напоминание о намерении",
     "luminar_intro_short_text": "«Созвездие Люминаров» - краткая строка (видна в профиле всегда)",
     "luminar_intro_text": "«Созвездие Люминаров» - полный текст (кнопка «Подробнее» в профиле)",
@@ -3098,6 +3148,34 @@ async def adm_about(callback: CallbackQuery, state: FSMContext):
     await callback.message.answer(
         f"Текущий текст «Философия Alena Veda»:\n\n{current}\n\n"
         f"Пришлите новый текст (он будет показан пользователю по кнопке «{html.escape(BTN_ABOUT)}»):"
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data == "adm_faq")
+async def adm_faq(callback: CallbackQuery, state: FSMContext):
+    if not await _require_permission(callback, "adm_faq"):
+        return
+    current = db.get_setting("faq_text")
+    await state.set_state(EditFieldStates.waiting_value)
+    await state.update_data(target="faq", field="faq_text")
+    await callback.message.answer(
+        f"Текущий текст «Частые вопросы»:\n\n{current}\n\n"
+        f"Пришлите новый текст (он показывается по кнопке «{html.escape(BTN_INFO)}» → «❓ Частые вопросы»):"
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data == "adm_rules")
+async def adm_rules(callback: CallbackQuery, state: FSMContext):
+    if not await _require_permission(callback, "adm_rules"):
+        return
+    current = db.get_setting("rules_text")
+    await state.set_state(EditFieldStates.waiting_value)
+    await state.update_data(target="rules", field="rules_text")
+    await callback.message.answer(
+        f"Текущий текст «Правила пространства»:\n\n{current}\n\n"
+        f"Пришлите новый текст (он показывается по кнопке «{html.escape(BTN_INFO)}» → «📜 Правила пространства»):"
     )
     await callback.answer()
 
@@ -3575,6 +3653,12 @@ async def edit_field_value(message: Message, state: FSMContext):
     elif target == "about":
         db.set_setting("about_text", value)
         await message.answer("Текст «Философия Alena Veda» обновлён ✅")
+    elif target == "faq":
+        db.set_setting("faq_text", value)
+        await message.answer("Текст «Частые вопросы» обновлён ✅")
+    elif target == "rules":
+        db.set_setting("rules_text", value)
+        await message.answer("Текст «Правила пространства» обновлён ✅")
     elif target == "welcome_text":
         db.set_setting("welcome_text", value)
         await message.answer("Текст приветствия обновлён ✅")
