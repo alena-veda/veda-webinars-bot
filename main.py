@@ -11,6 +11,7 @@ from zoneinfo import ZoneInfo
 from aiogram import Bot, Dispatcher, Router, F
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
+from aiogram.exceptions import TelegramBadRequest
 from aiogram.filters import Command, CommandStart
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
@@ -382,6 +383,22 @@ def _personal_link_kb(label: str):
     return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text=label, url=link)]])
 
 
+async def _send_with_optional_photo(bot: Bot, user_id: int, text: str, photo: str, reply_markup=None):
+    """Отправляет текст-поздравление; если для этого сообщения задано фото -
+    старается прислать одним сообщением (фото с подписью), как она просила.
+    У Telegram подпись к фото ограничена 1024 символами - если текст длиннее
+    (сейчас так у «Первое Касание», ~1670 символов) или Telegram отклонит по
+    другой причине, присылаем фото и полный текст отдельно, но подряд - чтобы
+    ни фото, ни хотя бы слово из текста не потерялись."""
+    if photo:
+        try:
+            await bot.send_photo(user_id, photo, caption=text, reply_markup=reply_markup)
+            return
+        except TelegramBadRequest:
+            await bot.send_photo(user_id, photo)
+    await bot.send_message(user_id, text, reply_markup=reply_markup)
+
+
 class IntentionStates(StatesGroup):
     waiting_text = State()
 
@@ -428,8 +445,9 @@ async def _handle_ascension_transition(bot: Bot, user_id: int, old_level: int, n
         # на ступени «Искра» текст сам приглашает написать личный запрос -
         # кнопка тут же, не дожидаясь ритуала намерения
         kb = _personal_link_kb("💌 Написать Алёне лично") if new_level == 2 else None
+        photo = db.get_setting(f"ascension_level{new_level}_photo")
         try:
-            await bot.send_message(user_id, _personalize(text, user_row), reply_markup=kb)
+            await _send_with_optional_photo(bot, user_id, _personalize(text, user_row), photo, reply_markup=kb)
         except Exception:
             logging.exception("Не удалось отправить поздравление со ступенью пользователю %s", user_id)
     if new_level == 2:
@@ -472,8 +490,12 @@ async def _credit_luminar_referral(bot: Bot, referred_user_id: int):
         await _handle_ascension_transition(bot, referrer_id, old_referrer_level, new_referrer_level)
 
     try:
-        await bot.send_message(
-            referrer_id, user_message, reply_markup=_personal_link_kb("💌 Написать Алёне лично")
+        await _send_with_optional_photo(
+            bot,
+            referrer_id,
+            user_message,
+            db.get_setting(f"luminar_{new_rank}_photo"),
+            reply_markup=_personal_link_kb("💌 Написать Алёне лично"),
         )
     except Exception:
         logging.exception("Не удалось уведомить о новом ранге Люминара пользователя %s", referrer_id)
@@ -549,6 +571,7 @@ ADMIN_PERMISSION_SECTIONS = [
         ("adm_photo_meditation", "🖼 Фото VEDA HEALING FLOW"),
         ("adm_profile_texts", "✨ Тексты «Мой профиль»"),
         ("adm_personal_link", "💌 Ссылка на личный чат с Alena Veda"),
+        ("adm_ascension_photos", "🖼 Фото Пути Восхождения и Люминаров"),
     ]),
     ("🧲 Автоматизация", [
         ("adm_reengage", "🧲 Автовозврат потерянных людей"),
@@ -3575,6 +3598,57 @@ async def adm_photo_about_start(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
 
 
+ASCENSION_PHOTO_LABELS = {
+    "ascension_level1_photo": "Фото «Первое Касание»",
+    "ascension_level2_photo": "Фото «Искра»",
+    "ascension_level3_photo": "Фото «Исследователь Глубины»",
+    "luminar_1_photo": "Фото поздравления Люминар I",
+    "luminar_2_photo": "Фото поздравления Люминар II",
+    "luminar_3_photo": "Фото поздравления Люминар III",
+}
+
+
+@router.callback_query(F.data == "adm_ascension_photos")
+async def adm_ascension_photos(callback: CallbackQuery):
+    if not await _require_permission(callback, "adm_ascension_photos"):
+        return
+    lines = [
+        "<b>🖼 Фото Пути Восхождения и Люминаров</b>",
+        "",
+        "Если фото задано - сообщение уйдёт одним целым (фото с подписью), а не отдельно текстом. "
+        "У Telegram подпись к фото ограничена 1024 символами - если сам текст длиннее (сейчас так "
+        "только у «Первое Касание»), фото и полный текст всё равно придут вместе, но двумя "
+        "сообщениями подряд, чтобы ни слова не потерялось.",
+        "",
+    ]
+    for key, label in ASCENSION_PHOTO_LABELS.items():
+        status = "✅ задано" if db.get_setting(key) else "- не задано"
+        lines.append(f"{label}: {status}")
+    rows = [
+        [InlineKeyboardButton(text=f"🖼 {label}", callback_data=f"adm_ap_{key}")]
+        for key, label in ASCENSION_PHOTO_LABELS.items()
+    ]
+    rows.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="adm_back")])
+    await callback.message.edit_text("\n".join(lines), reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("adm_ap_"))
+async def adm_ascension_photo_start(callback: CallbackQuery, state: FSMContext):
+    if not db.is_admin(callback.from_user.id):
+        await callback.answer("Только для администраторов", show_alert=True)
+        return
+    field = callback.data[len("adm_ap_"):]
+    await state.set_state(PhotoUploadStates.waiting_photo)
+    await state.update_data(target="ascension_photo", field=field)
+    current = "уже установлено" if db.get_setting(field) else "не установлено"
+    await callback.message.answer(
+        f"Пришлите фото для «{ASCENSION_PHOTO_LABELS[field]}» (сейчас {current}).\n\n"
+        "Или отправьте «-», чтобы убрать фото."
+    )
+    await callback.answer()
+
+
 @router.callback_query(F.data == "adm_photo_meditation")
 async def adm_photo_meditation_start(callback: CallbackQuery, state: FSMContext):
     if not await _require_permission(callback, "adm_photo_meditation"):
@@ -3645,6 +3719,8 @@ async def photo_upload_value(message: Message, state: FSMContext):
         db.update_sanctum_field("intro_photo", file_id)
     elif target == "webinar":
         db.update_webinar_field(data["target_id"], "photo", file_id)
+    elif target == "ascension_photo":
+        db.set_setting(data["field"], file_id)
 
     await state.clear()
     await message.answer("Фото обновлено ✅" if file_id else "Фото убрано ✅")
