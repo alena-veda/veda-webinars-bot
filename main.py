@@ -529,10 +529,10 @@ async def _credit_luminar_referral(bot: Bot, referred_user_id: int):
 
 def main_menu_kb(user_id: int) -> ReplyKeyboardMarkup:
     rows = [
-        [KeyboardButton(text=BTN_WEBINARS)],
         [KeyboardButton(text=BTN_SANCTUM)],
         [KeyboardButton(text=BTN_MEDITATION)],
         [KeyboardButton(text=BTN_PROFILE)],
+        [KeyboardButton(text=BTN_WEBINARS)],
         [KeyboardButton(text=BTN_ABOUT)],
         [KeyboardButton(text=BTN_FEED)],
         [KeyboardButton(text=BTN_INFO)],
