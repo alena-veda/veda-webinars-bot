@@ -773,15 +773,34 @@ async def cmd_start(message: Message, state: FSMContext):
                 referred_by = candidate
         except ValueError:
             pass
-    is_new = db.add_user(
+    db.add_user(
         message.from_user.id, message.from_user.username, message.from_user.first_name, referred_by=referred_by
     )
-    if is_new:
-        if referred_by:
-            referrer = db.get_user(referred_by)
+    user_row = db.get_user(message.from_user.id)
+    # знакомство считаем завершённым только когда сохранено имя — не просто
+    # по факту существования записи в базе. Реальный случай (2026-09-06):
+    # у человека временно не отправилось особое приветствие (Telegram на
+    # мгновение посчитал бота заблокированным), запись в базе уже была
+    # создана, и при повторном /start бот решил, что знакомство пройдено,
+    # пропустив и приветствие, и вопрос об имени, и "Первое Касание" вообще.
+    # Теперь при незавершённом знакомстве /start безопасно повторяет его
+    # заново, опираясь на уже сохранённого пригласившего (user_row), а не
+    # только на параметр именно этого конкретного /start.
+    if not (user_row and user_row["preferred_name"]):
+        referrer_id = (user_row["referred_by"] if user_row else None) or referred_by
+        if referrer_id:
+            referrer = db.get_user(referrer_id)
             if referrer:
-                await _send_referral_welcome(message, referrer)
-                return
+                try:
+                    await _send_referral_welcome(message, referrer)
+                    return
+                except Exception:
+                    logging.exception(
+                        "Не удалось отправить особое приветствие пригласившему пользователю %s",
+                        message.from_user.id,
+                    )
+                    # не бросаем дальше — человек всё равно получит обычный
+                    # вопрос об имени ниже, а не останется совсем без ответа
         await state.set_state(NameStates.waiting_name)
         await message.answer(NAME_QUESTION_TEXT)
         return
