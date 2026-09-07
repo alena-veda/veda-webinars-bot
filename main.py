@@ -477,6 +477,22 @@ async def _invite_intention_ritual(bot: Bot, user_id: int):
         logging.exception("Не удалось отправить приглашение к намерению пользователю %s", user_id)
 
 
+@router.callback_query(F.data == "start_intention")
+async def start_intention_cb(callback: CallbackQuery):
+    await _invite_intention_ritual(callback.bot, callback.from_user.id)
+    await callback.answer()
+
+
+def _intention_cta_kb(level: int):
+    """Кнопка «Написать намерение» - только на тексте ступени «Искра»
+    (level 2), и при самом переходе, и при повторном чтении полного текста
+    из профиля («📖 Читать послание ступени») - оба места используют один и
+    тот же текст, значит и кнопка должна быть на обоих одинаково."""
+    if level != 2:
+        return None
+    return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="📝 Написать намерение", callback_data="start_intention")]])
+
+
 async def _handle_ascension_transition(bot: Bot, user_id: int, old_level: int, new_level: int):
     """Если человек реально перешёл на новую ступень (не откат, не тот же
     уровень) — присылает её текст-поздравление, а на 2-й ступени следом ещё
@@ -489,7 +505,9 @@ async def _handle_ascension_transition(bot: Bot, user_id: int, old_level: int, n
         user_row = db.get_user(user_id)
         photo = db.get_setting(f"ascension_level{new_level}_photo")
         try:
-            await _send_with_optional_photo(bot, user_id, _personalize(text, user_row), photo)
+            await _send_with_optional_photo(
+                bot, user_id, _personalize(text, user_row), photo, reply_markup=_intention_cta_kb(new_level)
+            )
         except Exception:
             logging.exception("Не удалось отправить поздравление со ступенью пользователю %s", user_id)
     if new_level == 2:
@@ -1170,7 +1188,7 @@ async def open_level_message_cb(callback: CallbackQuery):
     level = int(callback.data[len("open_level_msg_"):])
     user_row = db.get_user(callback.from_user.id)
     text = _personalize(db.get_setting(ASCENSION_TEXT_KEYS[level]), user_row)
-    await callback.message.answer(text)
+    await callback.message.answer(text, reply_markup=_intention_cta_kb(level))
     await callback.answer()
 
 
