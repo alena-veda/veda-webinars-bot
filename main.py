@@ -495,8 +495,10 @@ def _intention_cta_kb(level: int):
 
 async def _handle_ascension_transition(bot: Bot, user_id: int, old_level: int, new_level: int):
     """Если человек реально перешёл на новую ступень (не откат, не тот же
-    уровень) — присылает её текст-поздравление, а на 2-й ступени следом ещё
-    и ритуал-приглашение написать намерение."""
+    уровень) — присылает её текст-поздравление. На 2-й ступени («Искра») под
+    сообщением есть кнопка «Написать намерение» - сам ритуал (_invite_intention_ritual)
+    запускается ТОЛЬКО по нажатию этой кнопки (см. start_intention_cb), не
+    автоматически, иначе приглашение и включение ожидания текста дублируются."""
     if new_level <= old_level:
         return
     text_key = ASCENSION_TEXT_KEYS.get(new_level)
@@ -510,8 +512,6 @@ async def _handle_ascension_transition(bot: Bot, user_id: int, old_level: int, n
             )
         except Exception:
             logging.exception("Не удалось отправить поздравление со ступенью пользователю %s", user_id)
-    if new_level == 2:
-        await _invite_intention_ritual(bot, user_id)
 
 
 async def _credit_luminar_referral(bot: Bot, referred_user_id: int):
