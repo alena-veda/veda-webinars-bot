@@ -422,20 +422,26 @@ def _personal_link_kb(label: str):
     return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text=label, url=link)]])
 
 
-async def _send_with_optional_photo(bot: Bot, user_id: int, text: str, photo: str, reply_markup=None):
+async def _send_with_optional_photo(
+    bot: Bot, user_id: int, text: str, photo: str, reply_markup=None, protect_content=False
+):
     """Отправляет текст-поздравление; если для этого сообщения задано фото -
     старается прислать одним сообщением (фото с подписью), как она просила.
     У Telegram подпись к фото ограничена 1024 символами - если текст длиннее
     (сейчас так у «Первое Касание», ~1670 символов) или Telegram отклонит по
     другой причине, присылаем фото и полный текст отдельно, но подряд - чтобы
-    ни фото, ни хотя бы слово из текста не потерялись."""
+    ни фото, ни хотя бы слово из текста не потерялись. Используется и для
+    поздравлений со ступенями/Люминарами, и для рассылок с фото (см.
+    adm_broadcast_execute) - там же самый риск: длинная подпись к фото."""
     if photo:
         try:
-            await bot.send_photo(user_id, photo, caption=text, reply_markup=reply_markup)
+            await bot.send_photo(
+                user_id, photo, caption=text or None, reply_markup=reply_markup, protect_content=protect_content
+            )
             return
         except TelegramBadRequest:
-            await bot.send_photo(user_id, photo)
-    await bot.send_message(user_id, text, reply_markup=reply_markup)
+            await bot.send_photo(user_id, photo, protect_content=protect_content)
+    await bot.send_message(user_id, text, reply_markup=reply_markup, protect_content=protect_content)
 
 
 class IntentionStates(StatesGroup):
@@ -4349,13 +4355,19 @@ async def adm_broadcast_send(callback: CallbackQuery, state: FSMContext):
         text = _personalize(data.get("text"), db.get_user(user_id))
         try:
             if data["content_type"] == "photo":
-                await callback.bot.send_photo(
-                    user_id, data["file_id"], caption=text or None, reply_markup=kb, protect_content=protect
+                await _send_with_optional_photo(
+                    callback.bot, user_id, text or "", data["file_id"], reply_markup=kb, protect_content=protect
                 )
             elif data["content_type"] == "video":
-                await callback.bot.send_video(
-                    user_id, data["file_id"], caption=text or None, reply_markup=kb, protect_content=protect
-                )
+                try:
+                    await callback.bot.send_video(
+                        user_id, data["file_id"], caption=text or None, reply_markup=kb, protect_content=protect
+                    )
+                except TelegramBadRequest:
+                    # тот же лимит подписи (1024 символа), что и у фото - видео
+                    # отдельно, полный текст следом, чтобы ничего не потерять
+                    await callback.bot.send_video(user_id, data["file_id"], protect_content=protect)
+                    await callback.bot.send_message(user_id, text, reply_markup=kb, protect_content=protect)
             elif data["content_type"] == "video_note":
                 await callback.bot.send_video_note(user_id, data["file_id"], reply_markup=kb, protect_content=protect)
             elif data["content_type"] == "album":
