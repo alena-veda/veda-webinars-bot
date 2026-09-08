@@ -2609,13 +2609,77 @@ async def adm_wb_delete(callback: CallbackQuery):
     await callback.answer("Вебинар удалён")
 
 
+def _wb_add_back_kb(target_step: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(text="⬅️ Назад", callback_data=f"adm_wb_add_back_{target_step}")
+    ]])
+
+
+async def _wb_add_ask_title(answer, state: FSMContext):
+    await state.set_state(WebinarAddStates.title)
+    await answer("Введите название вебинара (или /cancel для отмены):")
+
+
+async def _wb_add_ask_type(answer, state: FSMContext):
+    await state.set_state(WebinarAddStates.event_type)
+    kb_rows = _event_type_kb("wb_addtype_").inline_keyboard + [
+        [InlineKeyboardButton(text="⬅️ Назад", callback_data="adm_wb_add_back_title")]
+    ]
+    await answer("Это вебинар, практика или расстановка?", reply_markup=InlineKeyboardMarkup(inline_keyboard=kb_rows))
+
+
+async def _wb_add_ask_description(answer, state: FSMContext):
+    await state.set_state(WebinarAddStates.description)
+    await answer("Введите описание:", reply_markup=_wb_add_back_kb("event_type"))
+
+
+async def _wb_add_ask_date(answer, state: FSMContext):
+    await state.set_state(WebinarAddStates.date_text)
+    await answer(
+        "Введите дату и время в формате ДД.ММ.ГГГГ ЧЧ:ММ (например: 15.09.2026 18:00):",
+        reply_markup=_wb_add_back_kb("description"),
+    )
+
+
+async def _wb_add_ask_price(answer, state: FSMContext):
+    await state.set_state(WebinarAddStates.price)
+    await answer("Введите стоимость (например: 500 грн):", reply_markup=_wb_add_back_kb("date_text"))
+
+
+async def _wb_add_ask_invite_link(answer, state: FSMContext):
+    await state.set_state(WebinarAddStates.invite_link)
+    await answer(
+        "Введите ссылку на вебинар (Zoom / Google Meet и т.п.) - она будет отправлена "
+        "участнику после подтверждения оплаты:",
+        reply_markup=_wb_add_back_kb("price"),
+    )
+
+
 @router.callback_query(F.data == "adm_wb_add")
 async def adm_wb_add_start(callback: CallbackQuery, state: FSMContext):
     if not db.is_admin(callback.from_user.id):
         await callback.answer("Только для администраторов", show_alert=True)
         return
-    await state.set_state(WebinarAddStates.title)
-    await callback.message.answer("Введите название вебинара (или /cancel для отмены):")
+    await _wb_add_ask_title(callback.message.answer, state)
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("adm_wb_add_back_"))
+async def adm_wb_add_back(callback: CallbackQuery, state: FSMContext):
+    if not db.is_admin(callback.from_user.id):
+        await callback.answer("Только для администраторов", show_alert=True)
+        return
+    target_step = callback.data[len("adm_wb_add_back_"):]
+    if target_step == "title":
+        await _wb_add_ask_title(callback.message.answer, state)
+    elif target_step == "event_type":
+        await _wb_add_ask_type(callback.message.answer, state)
+    elif target_step == "description":
+        await _wb_add_ask_description(callback.message.answer, state)
+    elif target_step == "date_text":
+        await _wb_add_ask_date(callback.message.answer, state)
+    elif target_step == "price":
+        await _wb_add_ask_price(callback.message.answer, state)
     await callback.answer()
 
 
@@ -2625,16 +2689,14 @@ async def adm_wb_add_title(message: Message, state: FSMContext):
     if text is None:
         return
     await state.update_data(title=text)
-    await state.set_state(WebinarAddStates.event_type)
-    await message.answer("Это вебинар, практика или расстановка?", reply_markup=_event_type_kb("wb_addtype_"))
+    await _wb_add_ask_type(message.answer, state)
 
 
 @router.callback_query(WebinarAddStates.event_type, F.data.startswith("wb_addtype_"))
 async def adm_wb_add_type(callback: CallbackQuery, state: FSMContext):
     event_type = callback.data[len("wb_addtype_"):]
     await state.update_data(event_type=event_type)
-    await state.set_state(WebinarAddStates.description)
-    await callback.message.answer("Введите описание:")
+    await _wb_add_ask_description(callback.message.answer, state)
     await callback.answer()
 
 
@@ -2644,8 +2706,7 @@ async def adm_wb_add_description(message: Message, state: FSMContext):
     if text is None:
         return
     await state.update_data(description=text)
-    await state.set_state(WebinarAddStates.date_text)
-    await message.answer("Введите дату и время в формате ДД.ММ.ГГГГ ЧЧ:ММ (например: 15.09.2026 18:00):")
+    await _wb_add_ask_date(message.answer, state)
 
 
 @router.message(WebinarAddStates.date_text)
@@ -2662,8 +2723,7 @@ async def adm_wb_add_date(message: Message, state: FSMContext):
         )
         return
     await state.update_data(event_dt=dt.isoformat(), date_text=_format_event_dt(dt))
-    await state.set_state(WebinarAddStates.price)
-    await message.answer("Введите стоимость (например: 500 грн):")
+    await _wb_add_ask_price(message.answer, state)
 
 
 @router.message(WebinarAddStates.price)
@@ -2672,11 +2732,7 @@ async def adm_wb_add_price(message: Message, state: FSMContext):
     if text is None:
         return
     await state.update_data(price=text)
-    await state.set_state(WebinarAddStates.invite_link)
-    await message.answer(
-        "Введите ссылку на вебинар (Zoom / Google Meet и т.п.) - она будет отправлена "
-        "участнику после подтверждения оплаты:"
-    )
+    await _wb_add_ask_invite_link(message.answer, state)
 
 
 @router.message(WebinarAddStates.invite_link)
