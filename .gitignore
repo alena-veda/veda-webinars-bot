@@ -15,3 +15,6 @@ callback_audit.txt
 menu_audit.txt
 reverse_audit.txt
 state_audit.txt
+
+# временные файлы проверок, начинающиеся с "_" — на будущее, чтобы не забывать чистить руками
+_*.txt
