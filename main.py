@@ -119,7 +119,7 @@ BTN_MEDITATION = "🧘🏽‍♀️ VEDA HEALING FLOW"
 BTN_PROFILE = "✨ Мой профиль в VEDAME SPACE"
 BTN_ABOUT = "💠 Философия Alena Veda"
 BTN_FEED = "📖 Архив публикаций пространства"
-BTN_INFO = "❓ Инфо и правила"
+BTN_INFO = "❓ Инфо/Кодекс пространства"
 BTN_ADMIN = "⚙️ Админ-панель"
 
 SANCTUM_FULL_NAME = "VEDA SANCTUM | CODEofGOD"
@@ -724,6 +724,7 @@ class GrantAccessStates(StatesGroup):
     waiting_user_id = State()
     waiting_valid_until = State()
     waiting_price = State()
+    waiting_accumulated_months = State()
 
 
 class PromiseStates(StatesGroup):
@@ -2798,11 +2799,40 @@ async def adm_grant_access_price(message: Message, state: FSMContext):
     text = await _require_text(message)
     if text is None:
         return
+    raw_price = text.strip()
+    await state.update_data(explicit_price=None if raw_price == "-" else raw_price)
+    await state.set_state(GrantAccessStates.waiting_accumulated_months)
+    await message.answer(
+        "Нужно ли зачесть стаж, накопленный ДО этого бота (например, человек уже давно платит Вам за "
+        "Sanctum в обход бота)?\n\n"
+        "Если да - пришлите, сколько месяцев уже накоплено (можно дробное число, например 6.5) - это "
+        "заменит накопленный стаж целиком на указанный.\n\n"
+        "Если пересчитывать ничего не нужно (обычное продление) - пришлите «-»."
+    )
+
+
+@router.message(GrantAccessStates.waiting_accumulated_months)
+async def adm_grant_access_finish(message: Message, state: FSMContext):
+    text = await _require_text(message)
+    if text is None:
+        return
+    raw_months = text.strip()
+    accumulated_months = None
+    if raw_months != "-":
+        try:
+            accumulated_months = float(raw_months.replace(",", "."))
+            if accumulated_months < 0:
+                raise ValueError
+        except ValueError:
+            await message.answer(
+                "Не получилось распознать число месяцев. Пришлите число (например: 6 или 6.5) или «-»."
+            )
+            return
+
     data = await state.get_data()
     target_user_id = data["target_user_id"]
     explicit_valid_until = data.get("explicit_valid_until")
-    raw_price = text.strip()
-    explicit_price = None if raw_price == "-" else raw_price
+    explicit_price = data.get("explicit_price")
 
     old_level = compute_ascension_level(target_user_id)
     if explicit_valid_until is None:
@@ -2811,6 +2841,8 @@ async def adm_grant_access_price(message: Message, state: FSMContext):
         valid_until = datetime.strptime(explicit_valid_until, "%Y-%m-%d").date()
         locked_price = _resolve_price(target_user_id, explicit_price)
         db.upsert_sanctum_membership(target_user_id, explicit_valid_until, locked_price)
+    if accumulated_months is not None:
+        db.set_accumulated_days(target_user_id, round(accumulated_months * 30))
     new_level = compute_ascension_level(target_user_id)
 
     await state.clear()
@@ -3478,15 +3510,19 @@ async def _render_user_detail(callback: CallbackQuery, user_id: int):
         status = "👋 сам заблокировал бота / вышел"
     else:
         status = "✅ активен"
+    meditation_status = "✅ куплен" if u["bought_meditation_bot"] else "— пока не отмечен"
     text = (
         f"<b>{html.escape(_user_display_name(u))}</b>\n"
         f"ID: {u['user_id']}\n"
         f"С нами с: {joined}\n"
-        f"Статус: {status}"
+        f"Статус: {status}\n"
+        f"VEDA HEALING FLOW: {meditation_status}"
     )
     block_label = "✅ Разблокировать" if u["blocked"] else "🚫 Заблокировать"
+    meditation_label = "↩️ Снять отметку VEDA HEALING FLOW" if u["bought_meditation_bot"] else "🧘 Отметить покупку VEDA HEALING FLOW"
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="✍️ Написать", callback_data=f"admin_reply_{user_id}")],
+        [InlineKeyboardButton(text=meditation_label, callback_data=f"adm_user_meditation_toggle_{user_id}")],
         [InlineKeyboardButton(text=block_label, callback_data=f"adm_user_toggle_{user_id}")],
         [InlineKeyboardButton(text="🗑 Удалить (сможет зайти заново)", callback_data=f"adm_user_delete_{user_id}")],
         [InlineKeyboardButton(text="⬅️ К списку", callback_data="adm_users_list")],
@@ -3513,6 +3549,34 @@ async def adm_user_toggle(callback: CallbackQuery):
     db.set_user_blocked(user_id, now_blocked)
     await _render_user_detail(callback, user_id)
     await callback.answer("Заблокирован 🚫" if now_blocked else "Разблокирован ✅")
+
+
+@router.callback_query(F.data.startswith("adm_user_meditation_toggle_"))
+async def adm_user_meditation_toggle(callback: CallbackQuery):
+    """VEDA HEALING FLOW - отдельный, никак технически не связанный бот, поэтому
+    факт покупки там бот-информатор узнать сам не может - отмечается здесь
+    вручную, когда Вы узнали об оплате (из того бота или от самого человека).
+    Влияет на 3-ю ступень Пути (см. compute_ascension_level), поэтому при
+    появлении отметки сразу проверяем, не открылась ли она."""
+    if not db.is_admin(callback.from_user.id):
+        await callback.answer("Только для администраторов", show_alert=True)
+        return
+    user_id = int(callback.data[len("adm_user_meditation_toggle_"):])
+    u = db.get_user(user_id)
+    if not u:
+        await callback.answer("Этого человека больше нет среди подписчиков.", show_alert=True)
+        return
+    old_level = compute_ascension_level(user_id)
+    now_bought = not bool(u["bought_meditation_bot"])
+    db.set_bought_meditation_bot(user_id, now_bought)
+    new_level = compute_ascension_level(user_id)
+    if new_level > old_level:
+        try:
+            await _handle_ascension_transition(callback.bot, user_id, old_level, new_level)
+        except Exception:
+            logging.exception("Не удалось отправить поздравление со ступенью пользователю %s", user_id)
+    await _render_user_detail(callback, user_id)
+    await callback.answer("Отмечено ✅" if now_bought else "Отметка снята")
 
 
 @router.callback_query(F.data.startswith("adm_user_delete_"))

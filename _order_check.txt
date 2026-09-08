@@ -1,0 +1,6 @@
+1096 await state.set_state(ReceiptStates.waiting_receipt)
+1109 @router.message(F.text == BTN_SANCTUM)
+1231 await state.set_state(ReceiptStates.waiting_receipt)
+1810 @router.message(ReceiptStates.waiting_receipt)
+1811 async def receipt_wrong_type(message: Message):
+1935 await state.set_state(ReceiptStates.waiting_receipt)

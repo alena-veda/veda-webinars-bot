@@ -1663,6 +1663,32 @@ def get_all_intentions_for_admin():
     return rows
 
 
+def set_bought_meditation_bot(user_id, value: bool):
+    """Отметка "купил(а) VEDA HEALING FLOW" — ставится вручную из панели
+    администратора (см. adm_user_meditation_toggle, main.py), так как это
+    отдельный, никак технически не связанный бот, и бот-информатор не может
+    узнать об оплате там сам. Используется в compute_ascension_level как
+    один из двух ускорителей 3-й ступени."""
+    conn = get_conn()
+    conn.execute("UPDATE users SET bought_meditation_bot = ? WHERE user_id = ?", (1 if value else 0, user_id))
+    conn.commit()
+    conn.close()
+
+
+def set_accumulated_days(user_id, days: int):
+    """Ручная перезапись накопленного стажа в VEDA SANCTUM (main.py,
+    compute_ascension_level) — для случая, когда человека вносят в бота не
+    впервые, а он уже реально состоит в Sanctum какое-то время в обход бота
+    (например, платил Вам напрямую до того, как бот начал это отслеживать).
+    В отличие от upsert_sanctum_membership, НЕ прибавляет, а заменяет
+    значение целиком — вызывать только когда администратор сам явно назвал
+    итоговое число месяцев/дней, а не при обычном продлении."""
+    conn = get_conn()
+    conn.execute("UPDATE sanctum_membership SET accumulated_days = ? WHERE user_id = ?", (days, user_id))
+    conn.commit()
+    conn.close()
+
+
 def increment_luminar_count(user_id):
     """Засчитывает ещё одного реально вошедшего и оплатившего человека
     пригласившему — возвращает новый счётчик (нужен вызывающей стороне,
