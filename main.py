@@ -640,6 +640,7 @@ ADMIN_PERMISSION_SECTIONS = [
         ("adm_about", "💠 Текст «Философия Alena Veda»"),
         ("adm_photo_about", "🖼 Фото «Философия Alena Veda»"),
         ("adm_faq", "❓ Текст «Частые вопросы»"),
+        ("adm_faq_suggestions", "💡 Вопросы от людей для FAQ"),
         ("adm_rules", "📜 Текст «Правила пространства»"),
     ]),
     ("💳 Оплаты", [
@@ -769,6 +770,10 @@ class NameStates(StatesGroup):
 
 class ContactAdminStates(StatesGroup):
     waiting_message = State()
+
+
+class FaqSuggestionStates(StatesGroup):
+    waiting_text = State()
 
 
 class AdminReplyStates(StatesGroup):
@@ -1331,9 +1336,31 @@ async def show_info_menu(message: Message):
 @router.callback_query(F.data == "open_faq")
 async def open_faq_cb(callback: CallbackQuery):
     text = db.get_setting("faq_text")
-    kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="📜 Правила пространства", callback_data="open_rules")]])
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="💡 Предложить свой вопрос", callback_data="suggest_faq_question")],
+        [InlineKeyboardButton(text="📜 Правила пространства", callback_data="open_rules")],
+    ])
     await callback.message.answer(text, reply_markup=kb, protect_content=_protect_for(callback.from_user.id))
     await callback.answer()
+
+
+@router.callback_query(F.data == "suggest_faq_question")
+async def suggest_faq_question_start(callback: CallbackQuery, state: FSMContext):
+    await state.set_state(FaqSuggestionStates.waiting_text)
+    await callback.message.answer(
+        "Какой вопрос добавить в «Частые вопросы»? Опишите его - я обязательно его учту 🙏"
+    )
+    await callback.answer()
+
+
+@router.message(FaqSuggestionStates.waiting_text)
+async def suggest_faq_question_received(message: Message, state: FSMContext):
+    text = await _require_text(message)
+    if text is None:
+        return
+    await state.clear()
+    db.add_faq_suggestion(message.from_user.id, text)
+    await message.answer("Спасибо! Ваш вопрос передан - я включу его в «Частые вопросы» 🙏")
 
 
 @router.callback_query(F.data == "open_rules")
@@ -3287,6 +3314,50 @@ async def adm_faq(callback: CallbackQuery, state: FSMContext):
         f"Пришлите новый текст (он показывается по кнопке «{html.escape(BTN_INFO)}» → «❓ Частые вопросы»):"
     )
     await callback.answer()
+
+
+@router.callback_query(F.data == "adm_faq_suggestions")
+async def adm_faq_suggestions(callback: CallbackQuery):
+    """Список вопросов, которые люди сами предложили добавить в «Частые
+    вопросы» (см. suggest_faq_question_received) - без пересылки лично в
+    чат, специально по её просьбе: она сама заглядывает сюда, когда удобно,
+    переносит нужное в текст FAQ (adm_faq) вручную, и отмечает «Учтено»."""
+    if not await _require_permission(callback, "adm_faq_suggestions"):
+        return
+    rows_data = db.get_pending_faq_suggestions()
+    if not rows_data:
+        text = "<b>💡 Вопросы от людей для FAQ</b>\n\nПока никто ничего не предложил."
+        kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Назад", callback_data="adm_back")]])
+        await callback.message.edit_text(text, reply_markup=kb)
+        await callback.answer()
+        return
+
+    lines = [
+        "<b>💡 Вопросы от людей для FAQ</b>",
+        "",
+        "Перенесите нужное в текст «Частые вопросы» (✏️ Текст «Частые вопросы») вручную, "
+        "затем отметьте здесь «Учтено», чтобы вопрос ушёл из списка.",
+    ]
+    rows = []
+    for r in rows_data:
+        name = f"@{r['username']}" if r["username"] else (r["preferred_name"] or r["first_name"] or str(r["user_id"]))
+        date_part = (r["created_at"] or "").split(" ")[0]
+        lines.append(f"\n<b>{html.escape(name)}</b> ({date_part}):\n«{html.escape(r['question_text'])}»")
+        rows.append([InlineKeyboardButton(
+            text=f"✅ Учтено - {name}", callback_data=f"adm_faq_sugg_done_{r['id']}"
+        )])
+    rows.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="adm_back")])
+    await callback.message.edit_text("\n".join(lines), reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("adm_faq_sugg_done_"))
+async def adm_faq_suggestion_done(callback: CallbackQuery):
+    if not await _require_permission(callback, "adm_faq_suggestions"):
+        return
+    suggestion_id = int(callback.data[len("adm_faq_sugg_done_"):])
+    db.mark_faq_suggestion_reviewed(suggestion_id)
+    await adm_faq_suggestions(callback)
 
 
 @router.callback_query(F.data == "adm_rules")

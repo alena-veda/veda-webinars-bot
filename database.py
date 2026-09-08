@@ -303,6 +303,16 @@ def init_db():
     """)
 
     c.execute("""
+        CREATE TABLE IF NOT EXISTS faq_suggestions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            question_text TEXT NOT NULL,
+            created_at TEXT,
+            reviewed INTEGER DEFAULT 0
+        )
+    """)
+
+    c.execute("""
         CREATE TABLE IF NOT EXISTS sanctum_membership (
             user_id INTEGER PRIMARY KEY,
             valid_until TEXT,
@@ -1661,6 +1671,46 @@ def get_all_intentions_for_admin():
     ).fetchall()
     conn.close()
     return rows
+
+
+def add_faq_suggestion(user_id, question_text):
+    """Человек предложил вопрос для раздела «Частые вопросы» - складываем в
+    очередь на рассмотрение, НЕ пересылая администраторам лично (её явное
+    решение: она сама заглядывает в список, когда удобно, а не получает
+    сообщение в чат на каждый присланный вопрос)."""
+    conn = get_conn()
+    conn.execute(
+        "INSERT INTO faq_suggestions (user_id, question_text, created_at) VALUES (?, ?, ?)",
+        (user_id, question_text, datetime.now().strftime("%Y-%m-%d %H:%M:%S")),
+    )
+    conn.commit()
+    conn.close()
+
+
+def get_pending_faq_suggestions():
+    conn = get_conn()
+    rows = conn.execute(
+        "SELECT fs.id, fs.user_id, fs.question_text, fs.created_at, "
+        "u.username, u.preferred_name, u.first_name "
+        "FROM faq_suggestions fs LEFT JOIN users u ON u.user_id = fs.user_id "
+        "WHERE fs.reviewed = 0 ORDER BY fs.created_at ASC"
+    ).fetchall()
+    conn.close()
+    return rows
+
+
+def count_pending_faq_suggestions():
+    conn = get_conn()
+    row = conn.execute("SELECT COUNT(*) AS c FROM faq_suggestions WHERE reviewed = 0").fetchone()
+    conn.close()
+    return row["c"] if row else 0
+
+
+def mark_faq_suggestion_reviewed(suggestion_id):
+    conn = get_conn()
+    conn.execute("UPDATE faq_suggestions SET reviewed = 1 WHERE id = ?", (suggestion_id,))
+    conn.commit()
+    conn.close()
 
 
 def set_bought_meditation_bot(user_id, value: bool):
