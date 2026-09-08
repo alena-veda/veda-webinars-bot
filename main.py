@@ -1012,7 +1012,8 @@ async def wb_past_view(callback: CallbackQuery):
         kb_rows.append([InlineKeyboardButton(
             text=f"💬 Вопросы и ответы ({qa_count})", callback_data=f"wq_public_webinar_{webinar_id}"
         )])
-    kb = InlineKeyboardMarkup(inline_keyboard=kb_rows) if kb_rows else None
+    kb_rows.append([InlineKeyboardButton(text="⬅️ К прошедшим", callback_data="wb_past_list")])
+    kb = InlineKeyboardMarkup(inline_keyboard=kb_rows)
     if w["photo"]:
         await callback.message.answer_photo(w["photo"])
     await callback.message.answer(text, reply_markup=kb, protect_content=_protect_for(callback.from_user.id))
@@ -1046,11 +1047,18 @@ async def _send_webinar_card(message: Message, webinar_id: int, viewer_id: int) 
             kb_rows.append([InlineKeyboardButton(
                 text=f"💬 Вопросы и ответы ({qa_count})", callback_data=f"wq_public_webinar_{webinar_id}"
             )])
+    kb_rows.append([InlineKeyboardButton(text="⬅️ К списку вебинаров", callback_data="wb_list_back")])
     kb = InlineKeyboardMarkup(inline_keyboard=kb_rows)
     if w["photo"]:
         await message.answer_photo(w["photo"])
     await message.answer(text, reply_markup=kb, protect_content=_protect_for(viewer_id))
     return True
+
+
+@router.callback_query(F.data == "wb_list_back")
+async def wb_list_back_cb(callback: CallbackQuery):
+    await show_webinars(callback.message)
+    await callback.answer()
 
 
 @router.callback_query(F.data.startswith("wb_view_"))
