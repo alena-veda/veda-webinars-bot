@@ -1244,13 +1244,30 @@ async def sanctum_apply(callback: CallbackQuery, state: FSMContext):
     )
     await state.set_state(ReceiptStates.waiting_receipt)
     await state.update_data(reg_id=reg_id)
+    kb_rows = []
+    personal_kb = _personal_link_kb("💌 Написать Алёне лично")
+    if personal_kb:
+        kb_rows.extend(personal_kb.inline_keyboard)
+    kb_rows.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="sanctum_back")])
     await callback.message.answer(
         f"Для вступления в {html.escape(SANCTUM_FULL_NAME)} переведите {price}.\n\n"
         f"{_payment_block('payment_purpose_sanctum')}\n\n"
         "После оплаты пришлите сюда, в VEDAME SPACE, скриншот Вашего чека 📸\n\n"
         "Благодарю!",
-        reply_markup=_personal_link_kb("💌 Написать Алёне лично"),
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=kb_rows),
     )
+    await callback.answer()
+
+
+@router.callback_query(F.data == "sanctum_back")
+async def sanctum_back_cb(callback: CallbackQuery):
+    # единая точка "назад" с экрана реквизитов - ведёт не строго на предыдущий
+    # шаг, а в show_sanctum, который сам покажет правильный экран для этого
+    # конкретного человека (манифест для нового, "продлить/возобновить" для
+    # уже бывшего в Sanctum) - это надёжнее, чем помнить, откуда именно он
+    # попал на sanctum_apply (путей туда несколько - законы, продление из
+    # профиля, продление с самого экрана Sanctum).
+    await show_sanctum(callback.message, user_id=callback.from_user.id)
     await callback.answer()
 
 
@@ -1332,13 +1349,22 @@ async def show_about(message: Message):
 
 # ---------- инфо и правила ----------
 
-@router.message(F.text == BTN_INFO)
-async def show_info_menu(message: Message):
-    kb = InlineKeyboardMarkup(inline_keyboard=[
+def _info_menu_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="❓ Частые вопросы", callback_data="open_faq")],
         [InlineKeyboardButton(text="📜 Правила пространства", callback_data="open_rules")],
     ])
-    await message.answer("Выберите, что интересует:", reply_markup=kb)
+
+
+@router.message(F.text == BTN_INFO)
+async def show_info_menu(message: Message):
+    await message.answer("Выберите, что интересует:", reply_markup=_info_menu_kb())
+
+
+@router.callback_query(F.data == "info_menu_back")
+async def info_menu_back_cb(callback: CallbackQuery):
+    await callback.message.answer("Выберите, что интересует:", reply_markup=_info_menu_kb())
+    await callback.answer()
 
 
 @router.callback_query(F.data == "open_faq")
@@ -1347,6 +1373,7 @@ async def open_faq_cb(callback: CallbackQuery):
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="💡 Предложить свой вопрос", callback_data="suggest_faq_question")],
         [InlineKeyboardButton(text="📜 Правила пространства", callback_data="open_rules")],
+        [InlineKeyboardButton(text="⬅️ Назад", callback_data="info_menu_back")],
     ])
     await callback.message.answer(text, reply_markup=kb, protect_content=_protect_for(callback.from_user.id))
     await callback.answer()
@@ -1374,7 +1401,10 @@ async def suggest_faq_question_received(message: Message, state: FSMContext):
 @router.callback_query(F.data == "open_rules")
 async def open_rules_cb(callback: CallbackQuery):
     text = db.get_setting("rules_text")
-    kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="❓ Частые вопросы", callback_data="open_faq")]])
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="❓ Частые вопросы", callback_data="open_faq")],
+        [InlineKeyboardButton(text="⬅️ Назад", callback_data="info_menu_back")],
+    ])
     await callback.message.answer(text, reply_markup=kb, protect_content=_protect_for(callback.from_user.id))
     await callback.answer()
 
@@ -2765,16 +2795,78 @@ async def adm_sanctum_field_start(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
 
 
-@router.callback_query(F.data == "adm_grant_access")
-async def adm_grant_access_start(callback: CallbackQuery, state: FSMContext):
-    if not await _require_permission(callback, "adm_grant_access"):
-        return
+def _grant_back_kb(target_step: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(text="⬅️ Назад", callback_data=f"adm_grant_back_{target_step}")
+    ]])
+
+
+async def _grant_ask_user_id(answer, state: FSMContext):
     await state.set_state(GrantAccessStates.waiting_user_id)
-    await callback.message.answer(
+    await answer(
         f"Пришлите Telegram ID человека, которому выдать/продлить доступ в {html.escape(SANCTUM_FULL_NAME)} "
         "(или /cancel для отмены).\n\n"
         "Важно: этот человек должен был хотя бы раз нажать /start в этом боте - иначе бот не сможет ему написать."
     )
+
+
+async def _grant_ask_valid_until(answer, state: FSMContext):
+    await state.set_state(GrantAccessStates.waiting_valid_until)
+    await answer(
+        "До какой даты действует доступ?\n\n"
+        "Пришлите дату в формате ДД.ММ.ГГГГ (например: 31.08.2026) - удобно для переноса тех, "
+        "кто уже платит Вам за Санктум и знает свою дату окончания.\n\n"
+        "Или отправьте «-», чтобы посчитать автоматически по обычным правилам "
+        "(до конца текущего месяца, либо до конца следующего, если у человека уже есть активный период).",
+        reply_markup=_grant_back_kb("user_id"),
+    )
+
+
+async def _grant_ask_price(answer, state: FSMContext):
+    current_base_price = db.get_sanctum()["price"]
+    await state.set_state(GrantAccessStates.waiting_price)
+    await answer(
+        "Какая цена закреплена за этим человеком?\n\n"
+        f"Пришлите сумму (например: 2222 грн) - для действующих подписчиков со старой ценой это важно, "
+        f"иначе при продлении подставится текущая базовая цена ({current_base_price}).\n\n"
+        "Или отправьте «-», чтобы взять цену автоматически (его текущую закреплённую, если она уже есть, "
+        "иначе - текущую базовую).",
+        reply_markup=_grant_back_kb("valid_until"),
+    )
+
+
+async def _grant_ask_accumulated_months(answer, state: FSMContext):
+    await state.set_state(GrantAccessStates.waiting_accumulated_months)
+    await answer(
+        "Нужно ли зачесть стаж, накопленный ДО этого бота (например, человек уже давно платит Вам за "
+        "Sanctum в обход бота)?\n\n"
+        "Если да - пришлите, сколько месяцев уже накоплено (можно дробное число, например 6.5) - это "
+        "заменит накопленный стаж целиком на указанный.\n\n"
+        "Если пересчитывать ничего не нужно (обычное продление) - пришлите «-».",
+        reply_markup=_grant_back_kb("price"),
+    )
+
+
+@router.callback_query(F.data == "adm_grant_access")
+async def adm_grant_access_start(callback: CallbackQuery, state: FSMContext):
+    if not await _require_permission(callback, "adm_grant_access"):
+        return
+    await _grant_ask_user_id(callback.message.answer, state)
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("adm_grant_back_"))
+async def adm_grant_access_back(callback: CallbackQuery, state: FSMContext):
+    if not db.is_admin(callback.from_user.id):
+        await callback.answer("Только для администраторов", show_alert=True)
+        return
+    target_step = callback.data[len("adm_grant_back_"):]
+    if target_step == "user_id":
+        await _grant_ask_user_id(callback.message.answer, state)
+    elif target_step == "valid_until":
+        await _grant_ask_valid_until(callback.message.answer, state)
+    elif target_step == "price":
+        await _grant_ask_price(callback.message.answer, state)
     await callback.answer()
 
 
@@ -2789,14 +2881,7 @@ async def adm_grant_access_user_id(message: Message, state: FSMContext):
         await message.answer("ID должен быть числом. Попробуйте ещё раз или отправьте /cancel")
         return
     await state.update_data(target_user_id=target_user_id)
-    await state.set_state(GrantAccessStates.waiting_valid_until)
-    await message.answer(
-        "До какой даты действует доступ?\n\n"
-        "Пришлите дату в формате ДД.ММ.ГГГГ (например: 31.08.2026) - удобно для переноса тех, "
-        "кто уже платит Вам за Санктум и знает свою дату окончания.\n\n"
-        "Или отправьте «-», чтобы посчитать автоматически по обычным правилам "
-        "(до конца текущего месяца, либо до конца следующего, если у человека уже есть активный период)."
-    )
+    await _grant_ask_valid_until(message.answer, state)
 
 
 @router.message(GrantAccessStates.waiting_valid_until)
@@ -2818,15 +2903,7 @@ async def adm_grant_access_valid_until(message: Message, state: FSMContext):
             return
         await state.update_data(explicit_valid_until=valid_until.isoformat())
 
-    current_base_price = db.get_sanctum()["price"]
-    await state.set_state(GrantAccessStates.waiting_price)
-    await message.answer(
-        "Какая цена закреплена за этим человеком?\n\n"
-        f"Пришлите сумму (например: 2222 грн) - для действующих подписчиков со старой ценой это важно, "
-        f"иначе при продлении подставится текущая базовая цена ({current_base_price}).\n\n"
-        "Или отправьте «-», чтобы взять цену автоматически (его текущую закреплённую, если она уже есть, "
-        "иначе - текущую базовую)."
-    )
+    await _grant_ask_price(message.answer, state)
 
 
 @router.message(GrantAccessStates.waiting_price)
@@ -2836,14 +2913,7 @@ async def adm_grant_access_price(message: Message, state: FSMContext):
         return
     raw_price = text.strip()
     await state.update_data(explicit_price=None if raw_price == "-" else raw_price)
-    await state.set_state(GrantAccessStates.waiting_accumulated_months)
-    await message.answer(
-        "Нужно ли зачесть стаж, накопленный ДО этого бота (например, человек уже давно платит Вам за "
-        "Sanctum в обход бота)?\n\n"
-        "Если да - пришлите, сколько месяцев уже накоплено (можно дробное число, например 6.5) - это "
-        "заменит накопленный стаж целиком на указанный.\n\n"
-        "Если пересчитывать ничего не нужно (обычное продление) - пришлите «-»."
-    )
+    await _grant_ask_accumulated_months(message.answer, state)
 
 
 @router.message(GrantAccessStates.waiting_accumulated_months)
