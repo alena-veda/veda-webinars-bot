@@ -4317,17 +4317,148 @@ def _segment_picker_kb(selected: list) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
+def _bc_back_kb(extra_rows: list = None) -> InlineKeyboardMarkup:
+    """Общая кнопка «Назад» для мастера рассылки. Пути внутри него сходятся
+    (например, на «Добавить в архив?» попадают и с выбора кнопки, и в обход
+    неё для альбома) — поэтому вместо фиксированной цели на каждый экран
+    ведём историю РЕАЛЬНО пройденных шагов (bc_history в данных состояния) и
+    возвращаемся туда, откуда человек в этот раз пришёл на самом деле, а не
+    куда-то заранее угаданное."""
+    rows = list(extra_rows or [])
+    rows.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="bc_back")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+async def _bc_push(state: FSMContext, step_name: str):
+    data = await state.get_data()
+    history = data.get("bc_history", [])
+    history.append(step_name)
+    await state.update_data(bc_history=history)
+
+
+async def _bc_ask_segment(answer, state: FSMContext):
+    data = await state.get_data()
+    selected = data.get("segments", [])
+    await state.set_state(BroadcastStates.waiting_segment)
+    await answer(
+        "Кому отправить рассылку? Можно выбрать несколько групп - тапайте по нужным, "
+        "они отметятся галочкой, потом нажмите «Дальше».",
+        reply_markup=_segment_picker_kb(selected),
+    )
+
+
+async def _bc_ask_content(answer, state: FSMContext):
+    data = await state.get_data()
+    selected = data.get("segments", [])
+    await state.set_state(BroadcastStates.waiting_content)
+    header = ""
+    if selected:
+        count = len(_segment_user_ids_multi(selected))
+        labels = ", ".join(SEGMENT_LABELS[s] for s in selected)
+        header = f"Выбрано: {labels} ({count} чел.)\n\n"
+    await answer(
+        f"{header}Пришлите пост для рассылки - текст, фото, видео или кружочек (можно с подписью, "
+        "кроме кружочка - у него подписи не бывает).\n\n"
+        "Подсказка: если написать {имя} где-нибудь в тексте, каждому человеку подставится "
+        "именно его имя из Telegram.",
+        reply_markup=_bc_back_kb(),
+    )
+
+
+async def _bc_ask_more_photos(answer, state: FSMContext):
+    data = await state.get_data()
+    photos = data.get("photos", [])
+    await state.set_state(BroadcastStates.waiting_more_photos)
+    await answer(
+        f"Фото добавлено ({len(photos)}). Если нужен альбом из нескольких фото - присылайте ещё, "
+        "по одному. Когда фото достаточно - нажмите «Готово».",
+        reply_markup=_bc_back_kb([[InlineKeyboardButton(text="✅ Готово, фото достаточно", callback_data="bc_photos_done")]]),
+    )
+
+
+async def _bc_ask_button_choice(answer, state: FSMContext):
+    await state.set_state(BroadcastStates.waiting_button_choice)
+    kb = _bc_back_kb([
+        [InlineKeyboardButton(text="🔗 Обычная ссылка", callback_data="bc_btn_url")],
+        [InlineKeyboardButton(text="📅 Кнопка «Зарегистрироваться на вебинар»", callback_data="bc_btn_webinar")],
+        [InlineKeyboardButton(text="🔁 Кнопка «Поделиться ботом»", callback_data="bc_btn_share")],
+        [InlineKeyboardButton(text="Без кнопки", callback_data="bc_btn_no")],
+    ])
+    await answer("Добавить кнопку под постом?", reply_markup=kb)
+
+
+async def _bc_ask_button_text(answer, state: FSMContext):
+    await state.set_state(BroadcastStates.waiting_button_text)
+    await answer("Введите текст на кнопке (например: Подробнее):", reply_markup=_bc_back_kb())
+
+
+async def _bc_ask_button_url(answer, state: FSMContext):
+    await state.set_state(BroadcastStates.waiting_button_url)
+    await answer("Теперь пришлите ссылку для кнопки (например: https://t.me/ваш_канал):", reply_markup=_bc_back_kb())
+
+
+async def _bc_ask_archive_choice(answer, state: FSMContext):
+    await state.set_state(BroadcastStates.waiting_archive_choice)
+    kb = _bc_back_kb([
+        [InlineKeyboardButton(text="✅ Да, добавить в архив", callback_data="bc_archive_yes")],
+        [InlineKeyboardButton(text="Нет, только разовая рассылка", callback_data="bc_archive_no")],
+    ])
+    await answer(f"Добавить этот пост в «{BTN_FEED}»?", reply_markup=kb)
+
+
+async def _bc_ask_archive_days(answer, state: FSMContext):
+    await state.set_state(BroadcastStates.waiting_archive_days)
+    await answer(
+        "На сколько дней хранить в архиве? Пришлите число (например, 14), "
+        "или «-», чтобы хранить бессрочно (пока сами не удалите):",
+        reply_markup=_bc_back_kb(),
+    )
+
+
+async def _bc_ask_allow_questions(answer, state: FSMContext):
+    await state.set_state(BroadcastStates.waiting_allow_questions)
+    kb = _bc_back_kb([
+        [InlineKeyboardButton(text="✅ Да, разрешить", callback_data="bc_q_yes")],
+        [InlineKeyboardButton(text="Нет, без вопросов", callback_data="bc_q_no")],
+    ])
+    await answer("Разрешить людям задавать вопросы под этой публикацией в архиве?", reply_markup=kb)
+
+
+BC_ASK_FUNCS = {
+    "segment": _bc_ask_segment,
+    "content": _bc_ask_content,
+    "more_photos": _bc_ask_more_photos,
+    "button_choice": _bc_ask_button_choice,
+    "button_text": _bc_ask_button_text,
+    "button_url": _bc_ask_button_url,
+    "archive_choice": _bc_ask_archive_choice,
+    "archive_days": _bc_ask_archive_days,
+    "allow_questions": _bc_ask_allow_questions,
+}
+
+
+@router.callback_query(F.data == "bc_back")
+async def adm_broadcast_back(callback: CallbackQuery, state: FSMContext):
+    if not db.is_admin(callback.from_user.id):
+        await callback.answer("Только для администраторов", show_alert=True)
+        return
+    data = await state.get_data()
+    history = data.get("bc_history", [])
+    if not history:
+        await callback.answer()
+        return
+    prev_step = history.pop()
+    await state.update_data(bc_history=history)
+    await BC_ASK_FUNCS[prev_step](callback.message.answer, state)
+    await callback.answer()
+
+
 @router.callback_query(F.data == "adm_broadcast")
 async def adm_broadcast_start(callback: CallbackQuery, state: FSMContext):
     if not await _require_permission(callback, "adm_broadcast"):
         return
-    await state.set_state(BroadcastStates.waiting_segment)
-    await state.update_data(segments=[])
-    await callback.message.answer(
-        "Кому отправить рассылку? Можно выбрать несколько групп - тапайте по нужным, "
-        "они отметятся галочкой, потом нажмите «Дальше».",
-        reply_markup=_segment_picker_kb([]),
-    )
+    await state.update_data(segments=[], bc_history=[])
+    await _bc_ask_segment(callback.message.answer, state)
     await callback.answer()
 
 
@@ -4356,45 +4487,17 @@ async def adm_broadcast_segment_done(callback: CallbackQuery, state: FSMContext)
     if count == 0:
         await callback.answer("В выбранных группах пока нет ни одного человека", show_alert=True)
         return
-    labels = ", ".join(SEGMENT_LABELS[s] for s in selected)
-    await state.set_state(BroadcastStates.waiting_content)
-    await callback.message.answer(
-        f"Выбрано: {labels} ({count} чел.)\n\n"
-        "Пришлите пост для рассылки - текст, фото, видео или кружочек (можно с подписью, "
-        "кроме кружочка - у него подписи не бывает).\n\n"
-        "Подсказка: если написать {имя} где-нибудь в тексте, каждому человеку подставится "
-        "именно его имя из Telegram."
-    )
+    await _bc_push(state, "segment")
+    await _bc_ask_content(callback.message.answer, state)
     await callback.answer()
-
-
-async def _ask_button_choice(message: Message, state: FSMContext):
-    await state.set_state(BroadcastStates.waiting_button_choice)
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🔗 Обычная ссылка", callback_data="bc_btn_url")],
-        [InlineKeyboardButton(text="📅 Кнопка «Зарегистрироваться на вебинар»", callback_data="bc_btn_webinar")],
-        [InlineKeyboardButton(text="🔁 Кнопка «Поделиться ботом»", callback_data="bc_btn_share")],
-        [InlineKeyboardButton(text="Без кнопки", callback_data="bc_btn_no")],
-    ])
-    await message.answer("Добавить кнопку под постом?", reply_markup=kb)
-
-
-def _photos_done_kb() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="✅ Готово, фото достаточно", callback_data="bc_photos_done")]
-    ])
 
 
 @router.message(BroadcastStates.waiting_content)
 async def adm_broadcast_content(message: Message, state: FSMContext):
     if message.photo:
         await state.update_data(photos=[message.photo[-1].file_id], text=message.html_text or "")
-        await state.set_state(BroadcastStates.waiting_more_photos)
-        await message.answer(
-            "Фото добавлено (1). Если нужен альбом из нескольких фото - присылайте ещё, "
-            "по одному. Когда фото достаточно - нажмите «Готово».",
-            reply_markup=_photos_done_kb(),
-        )
+        await _bc_push(state, "content")
+        await _bc_ask_more_photos(message.answer, state)
         return
     elif message.video:
         content_type, file_id = "video", message.video.file_id
@@ -4410,7 +4513,8 @@ async def adm_broadcast_content(message: Message, state: FSMContext):
         return
 
     await state.update_data(content_type=content_type, text=message.html_text or "", file_id=file_id)
-    await _ask_button_choice(message, state)
+    await _bc_push(state, "content")
+    await _bc_ask_button_choice(message.answer, state)
 
 
 @router.message(BroadcastStates.waiting_more_photos, F.photo)
@@ -4421,7 +4525,7 @@ async def adm_broadcast_more_photo(message: Message, state: FSMContext):
     await state.update_data(photos=photos)
     await message.answer(
         f"Фото добавлено ({len(photos)}). Присылайте ещё или нажмите «Готово».",
-        reply_markup=_photos_done_kb(),
+        reply_markup=_bc_back_kb([[InlineKeyboardButton(text="✅ Готово, фото достаточно", callback_data="bc_photos_done")]]),
     )
 
 
@@ -4436,14 +4540,16 @@ async def adm_broadcast_photos_done(callback: CallbackQuery, state: FSMContext):
     photos = data.get("photos", [])
     if len(photos) == 1:
         await state.update_data(content_type="photo", file_id=photos[0])
-        await _ask_button_choice(callback.message, state)
+        await _bc_push(state, "more_photos")
+        await _bc_ask_button_choice(callback.message.answer, state)
     else:
         await state.update_data(content_type="album", file_ids=photos)
         await callback.message.answer(
             f"Альбом из {len(photos)} фото готов. У альбомов в Telegram нельзя добавить кнопку под постом "
             "(так устроен сам Telegram) - переходим сразу к отправке."
         )
-        await _ask_archive_choice(callback.message, state)
+        await _bc_push(state, "more_photos")
+        await _bc_ask_archive_choice(callback.message.answer, state)
     await callback.answer()
 
 
@@ -4459,18 +4565,10 @@ async def _broadcast_ask_confirm(message: Message, state: FSMContext):
     await message.answer("Готово к отправке. Подтверждаете рассылку?", reply_markup=kb)
 
 
-async def _ask_archive_choice(message: Message, state: FSMContext):
-    await state.set_state(BroadcastStates.waiting_archive_choice)
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="✅ Да, добавить в архив", callback_data="bc_archive_yes")],
-        [InlineKeyboardButton(text="Нет, только разовая рассылка", callback_data="bc_archive_no")],
-    ])
-    await message.answer(f"Добавить этот пост в «{BTN_FEED}»?", reply_markup=kb)
-
-
 @router.callback_query(BroadcastStates.waiting_archive_choice, F.data == "bc_archive_no")
 async def adm_broadcast_archive_no(callback: CallbackQuery, state: FSMContext):
     await state.update_data(archive=False)
+    await _bc_push(state, "archive_choice")
     await _broadcast_ask_confirm(callback.message, state)
     await callback.answer()
 
@@ -4478,11 +4576,8 @@ async def adm_broadcast_archive_no(callback: CallbackQuery, state: FSMContext):
 @router.callback_query(BroadcastStates.waiting_archive_choice, F.data == "bc_archive_yes")
 async def adm_broadcast_archive_yes(callback: CallbackQuery, state: FSMContext):
     await state.update_data(archive=True)
-    await state.set_state(BroadcastStates.waiting_archive_days)
-    await callback.message.answer(
-        "На сколько дней хранить в архиве? Пришлите число (например, 14), "
-        "или «-», чтобы хранить бессрочно (пока сами не удалите):"
-    )
+    await _bc_push(state, "archive_choice")
+    await _bc_ask_archive_days(callback.message.answer, state)
     await callback.answer()
 
 
@@ -4505,17 +4600,14 @@ async def adm_broadcast_archive_days(message: Message, state: FSMContext):
             )
             return
         await state.update_data(archive_days=n)
-    await state.set_state(BroadcastStates.waiting_allow_questions)
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="✅ Да, разрешить", callback_data="bc_q_yes")],
-        [InlineKeyboardButton(text="Нет, без вопросов", callback_data="bc_q_no")],
-    ])
-    await message.answer("Разрешить людям задавать вопросы под этой публикацией в архиве?", reply_markup=kb)
+    await _bc_push(state, "archive_days")
+    await _bc_ask_allow_questions(message.answer, state)
 
 
 @router.callback_query(BroadcastStates.waiting_allow_questions, F.data == "bc_q_yes")
 async def adm_broadcast_allow_questions_yes(callback: CallbackQuery, state: FSMContext):
     await state.update_data(allow_questions=True)
+    await _bc_push(state, "allow_questions")
     await _broadcast_ask_confirm(callback.message, state)
     await callback.answer()
 
@@ -4523,6 +4615,7 @@ async def adm_broadcast_allow_questions_yes(callback: CallbackQuery, state: FSMC
 @router.callback_query(BroadcastStates.waiting_allow_questions, F.data == "bc_q_no")
 async def adm_broadcast_allow_questions_no(callback: CallbackQuery, state: FSMContext):
     await state.update_data(allow_questions=False)
+    await _bc_push(state, "allow_questions")
     await _broadcast_ask_confirm(callback.message, state)
     await callback.answer()
 
@@ -4530,15 +4623,16 @@ async def adm_broadcast_allow_questions_no(callback: CallbackQuery, state: FSMCo
 @router.callback_query(BroadcastStates.waiting_button_choice, F.data == "bc_btn_no")
 async def adm_broadcast_no_button(callback: CallbackQuery, state: FSMContext):
     await state.update_data(button_kind=None)
-    await _ask_archive_choice(callback.message, state)
+    await _bc_push(state, "button_choice")
+    await _bc_ask_archive_choice(callback.message.answer, state)
     await callback.answer()
 
 
 @router.callback_query(BroadcastStates.waiting_button_choice, F.data == "bc_btn_url")
 async def adm_broadcast_url_button(callback: CallbackQuery, state: FSMContext):
     await state.update_data(button_kind="url")
-    await state.set_state(BroadcastStates.waiting_button_text)
-    await callback.message.answer("Введите текст на кнопке (например: Подробнее):")
+    await _bc_push(state, "button_choice")
+    await _bc_ask_button_text(callback.message.answer, state)
     await callback.answer()
 
 
@@ -4548,8 +4642,8 @@ async def adm_broadcast_button_text(message: Message, state: FSMContext):
     if text is None:
         return
     await state.update_data(button_text=text)
-    await state.set_state(BroadcastStates.waiting_button_url)
-    await message.answer("Теперь пришлите ссылку для кнопки (например: https://t.me/ваш_канал):")
+    await _bc_push(state, "button_text")
+    await _bc_ask_button_url(message.answer, state)
 
 
 @router.message(BroadcastStates.waiting_button_url)
@@ -4558,7 +4652,8 @@ async def adm_broadcast_button_url(message: Message, state: FSMContext):
     if text is None:
         return
     await state.update_data(button_url=text)
-    await _ask_archive_choice(message, state)
+    await _bc_push(state, "button_url")
+    await _bc_ask_archive_choice(message.answer, state)
 
 
 @router.callback_query(BroadcastStates.waiting_button_choice, F.data == "bc_btn_webinar")
@@ -4570,8 +4665,18 @@ async def adm_broadcast_webinar_button(callback: CallbackQuery):
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text=_strip_html_tags(w["title"]), callback_data=f"bc_wbpick_{w['id']}")]
         for w in webinars
-    ])
+    ] + [[InlineKeyboardButton(text="⬅️ Назад", callback_data="bc_btn_webinar_back")]])
     await callback.message.answer("На какой вебинар должна вести кнопка?", reply_markup=kb)
+    await callback.answer()
+
+
+@router.callback_query(BroadcastStates.waiting_button_choice, F.data == "bc_btn_webinar_back")
+async def adm_broadcast_webinar_button_back(callback: CallbackQuery, state: FSMContext):
+    # это НЕ откат по истории (bc_back) — выбор конкретного вебинара для кнопки
+    # не был отдельным шагом состояния (всё ещё waiting_button_choice), поэтому
+    # просто перерисовываем тот же самый экран "Добавить кнопку под постом?",
+    # не трогая bc_history - иначе откатило бы на шаг дальше, чем нужно
+    await _bc_ask_button_choice(callback.message.answer, state)
     await callback.answer()
 
 
@@ -4587,7 +4692,8 @@ async def adm_broadcast_webinar_button_pick(callback: CallbackQuery, state: FSMC
         button_text="Зарегистрироваться на вебинар",
         button_data=f"wb_view_{webinar_id}",
     )
-    await _ask_archive_choice(callback.message, state)
+    await _bc_push(state, "button_choice")
+    await _bc_ask_archive_choice(callback.message.answer, state)
     await callback.answer()
 
 
@@ -4598,7 +4704,8 @@ async def adm_broadcast_share_button(callback: CallbackQuery, state: FSMContext)
     share_text = "Загляните сюда: вебинары, практики и VEDA SANCTUM ✨"
     share_url = "https://t.me/share/url?" + urllib.parse.urlencode({"url": bot_link, "text": share_text})
     await state.update_data(button_kind="url", button_text="🔁 Поделиться ботом", button_url=share_url)
-    await _ask_archive_choice(callback.message, state)
+    await _bc_push(state, "button_choice")
+    await _bc_ask_archive_choice(callback.message.answer, state)
     await callback.answer()
 
 
