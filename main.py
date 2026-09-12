@@ -641,6 +641,8 @@ ADMIN_PERMISSION_SECTIONS = [
         ("adm_photo_about", "🖼 Фото «Философия Alena Veda»"),
         ("adm_faq", "❓ Текст «Частые вопросы»"),
         ("adm_faq_suggestions", "💡 Вопросы от людей для FAQ"),
+        ("adm_faq_suggestion_invite", "✏️ Текст приглашения «Предложить вопрос»"),
+        ("adm_faq_suggestion_confirm", "✏️ Текст подтверждения (вопрос принят)"),
         ("adm_rules", "📜 Текст «Правила пространства»"),
     ]),
     ("💳 Оплаты", [
@@ -1382,9 +1384,7 @@ async def open_faq_cb(callback: CallbackQuery):
 @router.callback_query(F.data == "suggest_faq_question")
 async def suggest_faq_question_start(callback: CallbackQuery, state: FSMContext):
     await state.set_state(FaqSuggestionStates.waiting_text)
-    await callback.message.answer(
-        "Какой вопрос добавить в «Частые вопросы»? Опишите его - я обязательно его учту 🙏"
-    )
+    await callback.message.answer(db.get_setting("faq_suggestion_invite_text"))
     await callback.answer()
 
 
@@ -1395,7 +1395,7 @@ async def suggest_faq_question_received(message: Message, state: FSMContext):
         return
     await state.clear()
     db.add_faq_suggestion(message.from_user.id, text)
-    await message.answer("Спасибо! Ваш вопрос передан - я включу его в «Частые вопросы» 🙏")
+    await message.answer(db.get_setting("faq_suggestion_confirm_text"))
 
 
 @router.callback_query(F.data == "open_rules")
@@ -3124,6 +3124,8 @@ HTML_TRUSTED_FIELDS = {
     ("sanctum", "invite_link"),
     ("about", "about_text"),
     ("faq", "faq_text"),
+    ("faq_suggestion_invite", "faq_suggestion_invite_text"),
+    ("faq_suggestion_confirm", "faq_suggestion_confirm_text"),
     ("rules", "rules_text"),
     ("welcome_text", "welcome_text"),
     ("meditation_text", "meditation_text"),
@@ -3446,6 +3448,34 @@ async def adm_faq(callback: CallbackQuery, state: FSMContext):
     await callback.message.answer(
         f"Текущий текст «Частые вопросы»:\n\n{current}\n\n"
         f"Пришлите новый текст (он показывается по кнопке «{html.escape(BTN_INFO)}» → «❓ Частые вопросы»):"
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data == "adm_faq_suggestion_invite")
+async def adm_faq_suggestion_invite(callback: CallbackQuery, state: FSMContext):
+    if not await _require_permission(callback, "adm_faq_suggestion_invite"):
+        return
+    current = db.get_setting("faq_suggestion_invite_text")
+    await state.set_state(EditFieldStates.waiting_value)
+    await state.update_data(target="faq_suggestion_invite", field="faq_suggestion_invite_text")
+    await callback.message.answer(
+        f"Текущий текст:\n\n{current}\n\n"
+        "Пришлите новый текст (он показывается по кнопке «💡 Предложить свой вопрос»):"
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data == "adm_faq_suggestion_confirm")
+async def adm_faq_suggestion_confirm(callback: CallbackQuery, state: FSMContext):
+    if not await _require_permission(callback, "adm_faq_suggestion_confirm"):
+        return
+    current = db.get_setting("faq_suggestion_confirm_text")
+    await state.set_state(EditFieldStates.waiting_value)
+    await state.update_data(target="faq_suggestion_confirm", field="faq_suggestion_confirm_text")
+    await callback.message.answer(
+        f"Текущий текст:\n\n{current}\n\n"
+        "Пришлите новый текст (он приходит сразу после того, как человек пришлёт свой вопрос):"
     )
     await callback.answer()
 
@@ -4016,6 +4046,12 @@ async def edit_field_value(message: Message, state: FSMContext):
     elif target == "faq":
         db.set_setting("faq_text", value)
         await message.answer("Текст «Частые вопросы» обновлён ✅")
+    elif target == "faq_suggestion_invite":
+        db.set_setting("faq_suggestion_invite_text", value)
+        await message.answer("Текст приглашения предложить вопрос обновлён ✅")
+    elif target == "faq_suggestion_confirm":
+        db.set_setting("faq_suggestion_confirm_text", value)
+        await message.answer("Текст подтверждения обновлён ✅")
     elif target == "rules":
         db.set_setting("rules_text", value)
         await message.answer("Текст «Правила пространства» обновлён ✅")

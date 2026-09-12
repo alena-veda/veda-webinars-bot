@@ -678,6 +678,10 @@ def init_db():
         ),
         "profile_luminar_progress_next_text": "Путь к {следующий_ранг}: {бар} - {число} из {порог}",
         "admin_personal_chat_link": "https://t.me/Alena_Devi_Veda",
+        "faq_suggestion_invite_text": (
+            "Какой вопрос добавить в «Частые вопросы»? Опишите его - я обязательно его учту 🙏"
+        ),
+        "faq_suggestion_confirm_text": "Спасибо! Ваш вопрос передан - я включу его в «Частые вопросы» 🙏",
         "faq_text": (
             "❓ <b>Частые вопросы</b>\n\n"
             "<b>Как оплатить участие или подписку?</b>\n"
