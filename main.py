@@ -512,6 +512,26 @@ async def _handle_ascension_transition(bot: Bot, user_id: int, old_level: int, n
             )
         except Exception:
             logging.exception("Не удалось отправить поздравление со ступенью пользователю %s", user_id)
+        await _send_ascension_extra_media(bot, user_id, new_level)
+
+
+async def _send_ascension_extra_media(bot: Bot, user_id: int, level: int):
+    """Необязательный личный штрих на переходе ступени - видеокружок и/или
+    голосовое, отдельным сообщением следом за текстом (у обоих в Telegram
+    не бывает подписи, поэтому не совмещаются с текстом в одно сообщение,
+    как фото). Ничего не делает, если для этой ступени ничего не загружено -
+    см. adm_ascension_media."""
+    video_note_id = db.get_setting(f"ascension_level{level}_video_note")
+    voice_id = db.get_setting(f"ascension_level{level}_voice")
+    if not video_note_id and not voice_id:
+        return
+    try:
+        if video_note_id:
+            await bot.send_video_note(user_id, video_note_id)
+        if voice_id:
+            await bot.send_voice(user_id, voice_id)
+    except Exception:
+        logging.exception("Не удалось отправить видео/голосовое ступени пользователю %s", user_id)
 
 
 async def _credit_luminar_referral(bot: Bot, referred_user_id: int):
@@ -624,6 +644,7 @@ ADMIN_PERMISSION_SECTIONS = [
     ("🪜 Путь Восхождения и Люминаров", [
         ("adm_ascension_texts", "🪜 Тексты Пути Восхождения и Люминаров"),
         ("adm_ascension_photos", "🖼 Фото Пути Восхождения и Люминаров"),
+        ("adm_ascension_media", "🎥 Видео/голос на переходе ступени"),
         ("adm_intentions_list", "🕯 Намерения участников"),
         ("adm_profile_texts", "✨ Тексты «Мой профиль»"),
         ("adm_personal_link", "💌 Ссылка на личный чат с Alena Veda"),
@@ -4183,6 +4204,84 @@ async def adm_ascension_photo_start(callback: CallbackQuery, state: FSMContext):
         "Или отправьте «-», чтобы убрать фото."
     )
     await callback.answer()
+
+
+# (label, тип содержимого) - на будущее легко добавить сюда и для других ступеней,
+# сейчас заведено только для «Искра», как она попросила первой
+ASCENSION_EXTRA_MEDIA_LABELS = {
+    "ascension_level2_video_note": ("🎥 Видеокружок «Искра»", "video_note"),
+    "ascension_level2_voice": ("🎤 Голосовое «Искра»", "voice"),
+}
+
+
+class AscensionMediaStates(StatesGroup):
+    waiting_media = State()
+
+
+@router.callback_query(F.data == "adm_ascension_media")
+async def adm_ascension_media(callback: CallbackQuery):
+    if not await _require_permission(callback, "adm_ascension_media"):
+        return
+    lines = [
+        "<b>🎥 Видео и голос на переходе ступени</b>",
+        "",
+        "Необязательное личное дополнение к тексту-поздравлению - отправляется отдельным "
+        "сообщением сразу следом (у кружочков и голосовых в Telegram не бывает подписи, "
+        "поэтому не совмещаются с текстом в одно сообщение, как фото).",
+        "",
+    ]
+    for key, (label, _) in ASCENSION_EXTRA_MEDIA_LABELS.items():
+        status = "✅ задано" if db.get_setting(key) else "- не задано"
+        lines.append(f"{label}: {status}")
+    rows = [
+        [InlineKeyboardButton(text=label, callback_data=f"adm_am_{key}")]
+        for key, (label, _) in ASCENSION_EXTRA_MEDIA_LABELS.items()
+    ]
+    rows.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="adm_back")])
+    await callback.message.edit_text("\n".join(lines), reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("adm_am_"))
+async def adm_ascension_media_start(callback: CallbackQuery, state: FSMContext):
+    if not db.is_admin(callback.from_user.id):
+        await callback.answer("Только для администраторов", show_alert=True)
+        return
+    field = callback.data[len("adm_am_"):]
+    label, kind = ASCENSION_EXTRA_MEDIA_LABELS[field]
+    await state.set_state(AscensionMediaStates.waiting_media)
+    await state.update_data(field=field, kind=kind)
+    current = "уже установлено" if db.get_setting(field) else "не установлено"
+    kind_label = "видеокружок" if kind == "video_note" else "голосовое сообщение"
+    await callback.message.answer(
+        f"Пришлите {kind_label} для «{label}» (сейчас {current}).\n\n"
+        "Проще всего: запишите несколько дублей, сохраните их себе в «Избранное» в Telegram, "
+        "выберите лучший - и перешлите (кнопка «Переслать») именно его сюда, в этот чат.\n\n"
+        "Или отправьте «-», чтобы убрать текущее."
+    )
+    await callback.answer()
+
+
+@router.message(AscensionMediaStates.waiting_media)
+async def ascension_media_value(message: Message, state: FSMContext):
+    data = await state.get_data()
+    field, kind = data["field"], data["kind"]
+    if kind == "video_note" and message.video_note:
+        file_id = message.video_note.file_id
+    elif kind == "voice" and message.voice:
+        file_id = message.voice.file_id
+    elif message.text and message.text.strip() == "-":
+        file_id = ""
+    else:
+        wrong = "видеокружок" if kind == "video_note" else "голосовое сообщение"
+        await message.answer(
+            f"Пришлите, пожалуйста, именно {wrong} (можно переслать из «Избранного»), "
+            "или «-», чтобы убрать текущее."
+        )
+        return
+    db.set_setting(field, file_id)
+    await state.clear()
+    await message.answer("Обновлено ✅" if file_id else "Убрано ✅")
 
 
 @router.callback_query(F.data == "adm_photo_meditation")
