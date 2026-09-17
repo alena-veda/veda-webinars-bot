@@ -495,14 +495,18 @@ def _intention_cta_kb(level: int):
 
 async def _handle_ascension_transition(bot: Bot, user_id: int, old_level: int, new_level: int):
     """Если человек реально перешёл на новую ступень (не откат, не тот же
-    уровень) — присылает её текст-поздравление. На 2-й ступени («Искра») под
-    сообщением есть кнопка «Написать намерение» - сам ритуал (_invite_intention_ritual)
-    запускается ТОЛЬКО по нажатию этой кнопки (см. start_intention_cb), не
-    автоматически, иначе приглашение и включение ожидания текста дублируются."""
+    уровень) — присылает видеокружок/голосовое (если заданы для этой ступени),
+    а следом текст-поздравление - именно в таком порядке, по её явному решению
+    2026-09-17: личный видео/голосовой штрих должен идти ПЕРЕД текстом, а не
+    после. На 2-й ступени («Искра») под текстом есть кнопка «Написать намерение» -
+    сам ритуал (_invite_intention_ritual) запускается ТОЛЬКО по нажатию этой
+    кнопки (см. start_intention_cb), не автоматически, иначе приглашение и
+    включение ожидания текста дублируются."""
     if new_level <= old_level:
         return
     text_key = ASCENSION_TEXT_KEYS.get(new_level)
     if text_key:
+        await _send_ascension_extra_media(bot, user_id, new_level)
         text = db.get_setting(text_key)
         user_row = db.get_user(user_id)
         photo = db.get_setting(f"ascension_level{new_level}_photo")
@@ -512,15 +516,14 @@ async def _handle_ascension_transition(bot: Bot, user_id: int, old_level: int, n
             )
         except Exception:
             logging.exception("Не удалось отправить поздравление со ступенью пользователю %s", user_id)
-        await _send_ascension_extra_media(bot, user_id, new_level)
 
 
 async def _send_ascension_extra_media(bot: Bot, user_id: int, level: int):
     """Необязательный личный штрих на переходе ступени - видеокружок и/или
-    голосовое, отдельным сообщением следом за текстом (у обоих в Telegram
-    не бывает подписи, поэтому не совмещаются с текстом в одно сообщение,
-    как фото). Ничего не делает, если для этой ступени ничего не загружено -
-    см. adm_ascension_media."""
+    голосовое, отдельным сообщением ПЕРЕД текстом-поздравлением (у обоих в
+    Telegram не бывает подписи, поэтому не совмещаются с текстом в одно
+    сообщение, как фото; порядок - её явное решение 2026-09-17). Ничего не
+    делает, если для этой ступени ничего не загружено - см. adm_ascension_media."""
     video_note_id = db.get_setting(f"ascension_level{level}_video_note")
     voice_id = db.get_setting(f"ascension_level{level}_voice")
     if not video_note_id and not voice_id:
@@ -1185,6 +1188,12 @@ async def show_sanctum(message: Message, user_id: int = None):
         await message.answer(text, reply_markup=kb, protect_content=_protect_for(user_id))
         return
 
+    # человек смотрит информацию о Sanctum, но ещё ни разу не начинал оформление -
+    # запоминаем момент для "поведенческого" напоминания (см. check_reengagement,
+    # get_sanctum_intro_viewers_due); сбрасывается, как только реально нажмёт
+    # "Инициировать шаг" (см. sanctum_apply)
+    db.mark_sanctum_intro_viewed(user_id)
+
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="Войти в глубину", callback_data="sanctum_laws")]
     ])
@@ -1250,6 +1259,9 @@ async def sanctum_apply(callback: CallbackQuery, state: FSMContext):
     if s["price"] == db.PLACEHOLDER_PRICE or not _payment_ready("payment_purpose_sanctum"):
         await callback.answer(NOT_READY_MESSAGE, show_alert=True)
         return
+    # реально начал оформление - "поведенческое" напоминание (см. show_sanctum,
+    # check_reengagement) больше не нужно
+    db.clear_sanctum_intro_viewed(callback.from_user.id)
     price = _price_for_user(callback.from_user.id)
 
     # та же защита от дублей, что и в wb_reg — одна активная заявка на Sanctum
@@ -2407,6 +2419,8 @@ async def adm_analytics_webinars(callback: CallbackQuery):
 REENGAGE_FIELD_LABELS = {
     "stall_text": "текст «завис на оплате»",
     "reengage_text": "текст «пришёл и пропал»",
+    "winback_text": "текст «возврат после ухода из Sanctum»",
+    "sanctum_nudge_text": "текст «посмотрел, не начал»",
 }
 
 
@@ -2421,6 +2435,12 @@ def _reengage_screen_text() -> str:
     reengage_enabled = db.get_setting("reengage_enabled") or "1"
     reengage_days = db.get_setting("reengage_days_silent") or "3"
     reengage_text = db.get_setting("reengage_text") or ""
+    winback_enabled = db.get_setting("winback_enabled") or "1"
+    winback_days = db.get_setting("winback_days_after_expiry") or "7"
+    winback_text = db.get_setting("winback_text") or ""
+    nudge_enabled = db.get_setting("sanctum_nudge_enabled") or "1"
+    nudge_hours = db.get_setting("sanctum_nudge_hours") or "5"
+    nudge_text = db.get_setting("sanctum_nudge_text") or ""
     return (
         "<b>🧲 Автовозврат потерянных людей</b>\n\n"
         "Бот сам, один раз на человека, мягко напоминает о себе - без повторов и без спама.\n\n"
@@ -2429,13 +2449,23 @@ def _reengage_screen_text() -> str:
         f"Текст: {html.escape(stall_text[:150])}{'…' if len(stall_text) > 150 else ''}\n\n"
         f"<b>2. Пришёл и пропал</b> - {_on_off(reengage_enabled)}\n"
         f"Через {reengage_days} дн. после /start, если человек ничего не покупал и не подавал заявку.\n"
-        f"Текст: {html.escape(reengage_text[:150])}{'…' if len(reengage_text) > 150 else ''}"
+        f"Текст: {html.escape(reengage_text[:150])}{'…' if len(reengage_text) > 150 else ''}\n\n"
+        f"<b>3. Возврат после ухода из Sanctum</b> - {_on_off(winback_enabled)}\n"
+        f"Через {winback_days} дн. после истечения доступа, если человек так и не продлил "
+        "(не касается тех, кого Вы убрали вручную).\n"
+        f"Текст: {html.escape(winback_text[:150])}{'…' if len(winback_text) > 150 else ''}\n\n"
+        f"<b>4. Посмотрел Sanctum, но не начал оформление</b> - {_on_off(nudge_enabled)}\n"
+        f"Через {nudge_hours} ч. после того, как открыл(а) экран VEDA SANCTUM, если так и не нажал(а) "
+        "«Инициировать шаг». Получает это напоминание ВМЕСТО «Пришёл и пропал», не вместе с ним.\n"
+        f"Текст: {html.escape(nudge_text[:150])}{'…' if len(nudge_text) > 150 else ''}"
     )
 
 
 def _reengage_screen_kb() -> InlineKeyboardMarkup:
     stall_enabled = db.get_setting("stall_enabled") or "1"
     reengage_enabled = db.get_setting("reengage_enabled") or "1"
+    winback_enabled = db.get_setting("winback_enabled") or "1"
+    nudge_enabled = db.get_setting("sanctum_nudge_enabled") or "1"
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(
             text=("🚫 Выключить" if stall_enabled == "1" else "✅ Включить") + " «завис на оплате»",
@@ -2449,6 +2479,18 @@ def _reengage_screen_kb() -> InlineKeyboardMarkup:
         )],
         [InlineKeyboardButton(text="✏️ Текст «пришёл и пропал»", callback_data="adm_rg_reengage_text")],
         [InlineKeyboardButton(text="⏱ Через сколько дней", callback_data="adm_rg_reengage_days_silent")],
+        [InlineKeyboardButton(
+            text=("🚫 Выключить" if winback_enabled == "1" else "✅ Включить") + " «возврат после ухода из Sanctum»",
+            callback_data="adm_reeng_toggle_winback",
+        )],
+        [InlineKeyboardButton(text="✏️ Текст «возврат после ухода из Sanctum»", callback_data="adm_rg_winback_text")],
+        [InlineKeyboardButton(text="⏱ Через сколько дней", callback_data="adm_rg_winback_days_after_expiry")],
+        [InlineKeyboardButton(
+            text=("🚫 Выключить" if nudge_enabled == "1" else "✅ Включить") + " «посмотрел, не начал»",
+            callback_data="adm_reeng_toggle_nudge",
+        )],
+        [InlineKeyboardButton(text="✏️ Текст «посмотрел, не начал»", callback_data="adm_rg_sanctum_nudge_text")],
+        [InlineKeyboardButton(text="⏱ Через сколько часов", callback_data="adm_rg_sanctum_nudge_hours")],
         [InlineKeyboardButton(text="⬅️ Назад", callback_data="adm_back")],
     ])
 
@@ -2483,6 +2525,28 @@ async def adm_reeng_toggle_silent(callback: CallbackQuery):
     await callback.answer()
 
 
+@router.callback_query(F.data == "adm_reeng_toggle_winback")
+async def adm_reeng_toggle_winback(callback: CallbackQuery):
+    if not db.is_admin(callback.from_user.id):
+        await callback.answer("Только для администраторов", show_alert=True)
+        return
+    current = db.get_setting("winback_enabled") or "1"
+    db.set_setting("winback_enabled", "0" if current == "1" else "1")
+    await callback.message.edit_text(_reengage_screen_text(), reply_markup=_reengage_screen_kb())
+    await callback.answer()
+
+
+@router.callback_query(F.data == "adm_reeng_toggle_nudge")
+async def adm_reeng_toggle_nudge(callback: CallbackQuery):
+    if not db.is_admin(callback.from_user.id):
+        await callback.answer("Только для администраторов", show_alert=True)
+        return
+    current = db.get_setting("sanctum_nudge_enabled") or "1"
+    db.set_setting("sanctum_nudge_enabled", "0" if current == "1" else "1")
+    await callback.message.edit_text(_reengage_screen_text(), reply_markup=_reengage_screen_kb())
+    await callback.answer()
+
+
 @router.callback_query(F.data.startswith("adm_rg_"))
 async def adm_reengage_field_start(callback: CallbackQuery, state: FSMContext):
     if not db.is_admin(callback.from_user.id):
@@ -2503,11 +2567,27 @@ async def adm_reengage_field_start(callback: CallbackQuery, state: FSMContext):
             f"{current_block}Через сколько дней после /start напоминать, если человек ничего не покупал? "
             "Пришлите число (например, 3):"
         )
+    elif field == "winback_days_after_expiry":
+        prompt = (
+            f"{current_block}Через сколько дней после истечения доступа напоминать, если человек так и "
+            "не продлил? Пришлите число (например, 7):"
+        )
+    elif field == "sanctum_nudge_hours":
+        prompt = (
+            f"{current_block}Через сколько часов после просмотра VEDA SANCTUM напоминать, если человек "
+            "так и не нажал «Инициировать шаг»? Пришлите число (например, 5):"
+        )
     elif field == "stall_text":
         prompt = (
             f"{current_block}Пришлите новый {REENGAGE_FIELD_LABELS[field]}.\n\n"
             "Можно вставить <code>{product}</code> (название того, что не оплачено) "
             "и <code>{имя}</code> (бот подставит имя человека)."
+        )
+    elif field == "winback_text":
+        prompt = (
+            f"{current_block}Пришлите новый {REENGAGE_FIELD_LABELS[field]}.\n\n"
+            "Можно вставить <code>{имя}</code> (имя человека), <code>{дата}</code> (когда истёк доступ) "
+            "и <code>{цена}</code> (закреплённая за ним цена)."
         )
     else:
         prompt = (
@@ -4008,7 +4088,7 @@ async def edit_field_value(message: Message, state: FSMContext):
         db.set_setting(field, value)
         await message.answer("Обновлено ✅")
     elif target == "reengage":
-        if field in ("stall_hours", "reengage_days_silent"):
+        if field in ("stall_hours", "reengage_days_silent", "winback_days_after_expiry", "sanctum_nudge_hours"):
             try:
                 n = int(value.strip())
                 if n <= 0:
@@ -4226,8 +4306,8 @@ async def adm_ascension_media(callback: CallbackQuery):
         "<b>🎥 Видео и голос на переходе ступени</b>",
         "",
         "Необязательное личное дополнение к тексту-поздравлению - отправляется отдельным "
-        "сообщением сразу следом (у кружочков и голосовых в Telegram не бывает подписи, "
-        "поэтому не совмещаются с текстом в одно сообщение, как фото).",
+        "сообщением ПЕРЕД самим текстом (у кружочков и голосовых в Telegram не бывает "
+        "подписи, поэтому не совмещаются с текстом в одно сообщение, как фото).",
         "",
     ]
     for key, (label, _) in ASCENSION_EXTRA_MEDIA_LABELS.items():
@@ -5005,6 +5085,48 @@ async def check_reengagement(bot: Bot):
             except Exception:
                 logging.exception("Не удалось отправить напоминание \"пришёл и пропал\" пользователю %s", user_row["user_id"])
             db.mark_reengage_sent(user_row["user_id"])
+
+    # возврат тех, кто БЫЛ в VEDA SANCTUM и не продлил (в отличие от блока выше -
+    # там люди, которые вообще никогда ничего не покупали) - её явное решение
+    # 2026-09-17, закрывает пробел: раньше после дня истечения бот больше
+    # никогда сам не напоминал о себе таким людям
+    if (db.get_setting("winback_enabled") or "1") == "1":
+        winback_days = int(db.get_setting("winback_days_after_expiry") or "7")
+        cutoff_date = (_today() - timedelta(days=winback_days)).isoformat()
+        template = db.get_setting("winback_text") or ""
+        winback_kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="Продлить", callback_data="sanctum_apply")]
+        ])
+        for m in db.get_lapsed_sanctum_user_ids(cutoff_date):
+            date_text = datetime.strptime(m["valid_until"], "%Y-%m-%d").strftime("%d.%m.%Y")
+            price_text = m["sanctum_price"] or db.get_sanctum()["price"]
+            text = _personalize(template, m).replace("{дата}", date_text).replace("{цена}", price_text)
+            try:
+                await bot.send_message(m["user_id"], text, reply_markup=winback_kb)
+            except Exception:
+                logging.exception("Не удалось отправить возвратное напоминание пользователю %s", m["user_id"])
+            db.mark_winback_sent(m["user_id"])
+
+    # "поведенческое" напоминание - человек смотрел информацию о Sanctum, но
+    # не дошёл до "Инициировать шаг" (её явное решение 2026-09-17: тоньше и
+    # уместнее общего "пришёл и пропал" - реагирует на конкретный интерес,
+    # а не просто на календарную тишину)
+    if (db.get_setting("sanctum_nudge_enabled") or "1") == "1":
+        nudge_hours = int(db.get_setting("sanctum_nudge_hours") or "5")
+        cutoff = (now - timedelta(hours=nudge_hours)).strftime("%Y-%m-%d %H:%M:%S")
+        template = db.get_setting("sanctum_nudge_text") or ""
+        nudge_kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="⚜️ Вернуться к VEDA SANCTUM", callback_data="open_sanctum")]
+        ])
+        for user_row in db.get_sanctum_intro_viewers_due(cutoff):
+            text = _personalize(template, user_row)
+            try:
+                await bot.send_message(user_row["user_id"], text, reply_markup=nudge_kb)
+            except Exception:
+                logging.exception(
+                    "Не удалось отправить напоминание \"посмотрел, не начал\" пользователю %s", user_row["user_id"]
+                )
+            db.mark_sanctum_nudge_sent(user_row["user_id"])
     logging.info("[планировщик] check_reengagement: завершено")
 
 

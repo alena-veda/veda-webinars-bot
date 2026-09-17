@@ -104,6 +104,24 @@ def init_db():
     except Exception:
         pass
     try:
+        # когда человек в последний раз открывал экран VEDA SANCTUM, ещё ни разу
+        # не начав оформление (см. show_sanctum/sanctum_apply, main.py) — основа
+        # для "поведенческого" напоминания check_reengagement: если посмотрел,
+        # но не нажал "Инициировать шаг" за настроенный срок. Сбрасывается в
+        # NULL, как только человек реально начинает оформление (sanctum_apply) —
+        # напоминание в этот момент уже не нужно.
+        c.execute("ALTER TABLE users ADD COLUMN sanctum_intro_viewed_at TEXT")
+    except Exception:
+        pass
+    try:
+        # отмечает, что "поведенческое" напоминание уже отправлено один раз —
+        # больше не отправляем и не считаем такого человека "полностью тихим"
+        # для общего напоминания "пришёл и пропал" (получил нацеленное вместо
+        # общего, а не оба сразу)
+        c.execute("ALTER TABLE users ADD COLUMN sanctum_nudge_sent INTEGER DEFAULT 0")
+    except Exception:
+        pass
+    try:
         # кто пригласил этого человека (реферальная ссылка вида ?start=ref_<id>) —
         # заполняется один раз, только при самом первом /start, никогда не
         # переписывается later (INSERT OR IGNORE в add_user это гарантирует)
@@ -374,6 +392,15 @@ def init_db():
         c.execute("ALTER TABLE sanctum_membership ADD COLUMN accumulated_days INTEGER DEFAULT 0")
     except Exception:
         pass
+    try:
+        # возвратная схема для тех, кто был в Sanctum и не продлил (main.py,
+        # check_reengagement) — чтобы не слать напоминание повторно одному и
+        # тому же человеку за один и тот же случай истечения; сбрасывается
+        # при новой оплате (см. upsert_sanctum_membership), чтобы при СЛЕДУЮЩЕМ
+        # истечении можно было напомнить снова
+        c.execute("ALTER TABLE sanctum_membership ADD COLUMN winback_sent INTEGER DEFAULT 0")
+    except Exception:
+        pass
 
     for admin_id in INITIAL_ADMIN_IDS:
         c.execute(
@@ -435,6 +462,20 @@ def init_db():
             "к себе - в VEDA HEALING FLOW есть медитации именно для такого контакта.\n"
             "А когда почувствуете зов пойти глубже - Врата в святилище VEDA SANCTUM откроются Вам, "
             "когда будете готовы совершить эту инициацию."
+        ),
+        "winback_enabled": "1",
+        "winback_days_after_expiry": "7",
+        "winback_text": (
+            "{имя}, Ваш доступ в VEDA SANCTUM закончился {дата}, и я заметила, что Вы пока не вернулись.\n\n"
+            "Дверь всё ещё открыта, и цена для Вас закреплена прежней - {цена}.\n\n"
+            "Если почувствуете зов - буду рада снова видеть Вас в поле ✨"
+        ),
+        "sanctum_nudge_enabled": "1",
+        "sanctum_nudge_hours": "5",
+        "sanctum_nudge_text": (
+            "{имя}, Вы заглядывали в VEDA SANCTUM - хочу мягко напомнить о шаге дальше, "
+            "если он всё ещё откликается.\n\n"
+            "Врата открыты, когда будете готовы ✨"
         ),
     }
     for key, value in _default_settings.items():
@@ -1085,12 +1126,19 @@ def get_silent_never_purchased_user_ids(cutoff_datetime_str):
     """Люди, которые пришли достаточно давно (created_at раньше cutoff), никогда
     ничего не покупали и ни разу не были в VEDA SANCTUM, и которым ещё не
     отправляли напоминание "пришёл и пропал". Возвращает полные строки users
-    (не только id) — нужны для персонализации текста по имени."""
+    (не только id) — нужны для персонализации текста по имени.
+
+    Отдельно исключены те, кто уже смотрел VEDA SANCTUM (sanctum_intro_viewed_at
+    задан) или кому уже отправили нацеленное "поведенческое" напоминание
+    (см. get_sanctum_intro_viewers_due) — им это, более точное по сути,
+    напоминание идёт ВМЕСТО общего, а не вдобавок к нему."""
     conn = get_conn()
     rows = conn.execute("""
         SELECT u.* FROM users u
         WHERE u.created_at <= ?
         AND (u.reengage_sent IS NULL OR u.reengage_sent = 0)
+        AND u.sanctum_intro_viewed_at IS NULL
+        AND (u.sanctum_nudge_sent IS NULL OR u.sanctum_nudge_sent = 0)
         AND u.user_id NOT IN (SELECT user_id FROM registrations)
         AND u.user_id NOT IN (SELECT user_id FROM sanctum_membership)
     """, (cutoff_datetime_str,)).fetchall()
@@ -1098,9 +1146,89 @@ def get_silent_never_purchased_user_ids(cutoff_datetime_str):
     return rows
 
 
+def mark_sanctum_intro_viewed(user_id):
+    """Обновляет момент последнего просмотра VEDA SANCTUM - но только пока
+    человеку ещё не отправлено "поведенческое" напоминание (см.
+    get_sanctum_intro_viewers_due) - после отправки больше не отслеживаем,
+    чтобы не запустить бесконечный цикл повторных напоминаний."""
+    conn = get_conn()
+    conn.execute(
+        "UPDATE users SET sanctum_intro_viewed_at = ? "
+        "WHERE user_id = ? AND (sanctum_nudge_sent IS NULL OR sanctum_nudge_sent = 0)",
+        (datetime.now().strftime("%Y-%m-%d %H:%M:%S"), user_id),
+    )
+    conn.commit()
+    conn.close()
+
+
+def clear_sanctum_intro_viewed(user_id):
+    """Человек реально начал оформление (sanctum_apply) - "поведенческое"
+    напоминание больше не нужно, обычные напоминания об оплате (stall) уже
+    подхватят его дальше."""
+    conn = get_conn()
+    conn.execute("UPDATE users SET sanctum_intro_viewed_at = NULL WHERE user_id = ?", (user_id,))
+    conn.commit()
+    conn.close()
+
+
+def get_sanctum_intro_viewers_due(cutoff_datetime_str):
+    """Люди, которые смотрели информацию о VEDA SANCTUM (см.
+    mark_sanctum_intro_viewed), но не дошли до "Инициировать шаг" дольше
+    настроенного срока, и которым это конкретное напоминание ещё не
+    отправляли."""
+    conn = get_conn()
+    rows = conn.execute("""
+        SELECT * FROM users
+        WHERE sanctum_intro_viewed_at IS NOT NULL
+        AND sanctum_intro_viewed_at <= ?
+        AND (sanctum_nudge_sent IS NULL OR sanctum_nudge_sent = 0)
+    """, (cutoff_datetime_str,)).fetchall()
+    conn.close()
+    return rows
+
+
+def mark_sanctum_nudge_sent(user_id):
+    conn = get_conn()
+    conn.execute(
+        "UPDATE users SET sanctum_nudge_sent = 1, sanctum_intro_viewed_at = NULL WHERE user_id = ?",
+        (user_id,),
+    )
+    conn.commit()
+    conn.close()
+
+
 def mark_reengage_sent(user_id):
     conn = get_conn()
     conn.execute("UPDATE users SET reengage_sent = 1 WHERE user_id = ?", (user_id,))
+    conn.commit()
+    conn.close()
+
+
+def get_lapsed_sanctum_user_ids(cutoff_date_str):
+    """Люди, у которых доступ в VEDA SANCTUM истёк как минимум cutoff_date_str
+    (valid_until раньше этой даты), которых она НЕ убирала вручную (status
+    'removed' - её осознанное решение, автоматика туда не лезет), и которым
+    ещё не отправляли возвратное напоминание за ЭТО истечение (winback_sent
+    сбрасывается в 0 при каждой новой оплате, см. upsert_sanctum_membership -
+    значит если человек продлит, а потом снова забудет, напомнить можно будет
+    ещё раз). Возвращает полные строки users, объединённые с ценой/датой
+    подписки - нужны и для персонализации, и для текста напоминания."""
+    conn = get_conn()
+    rows = conn.execute("""
+        SELECT u.*, sm.valid_until, sm.price AS sanctum_price
+        FROM sanctum_membership sm
+        JOIN users u ON u.user_id = sm.user_id
+        WHERE sm.status != 'removed'
+        AND sm.valid_until < ?
+        AND (sm.winback_sent IS NULL OR sm.winback_sent = 0)
+    """, (cutoff_date_str,)).fetchall()
+    conn.close()
+    return rows
+
+
+def mark_winback_sent(user_id):
+    conn = get_conn()
+    conn.execute("UPDATE sanctum_membership SET winback_sent = 1 WHERE user_id = ?", (user_id,))
     conn.commit()
     conn.close()
 
@@ -1785,11 +1913,11 @@ def upsert_sanctum_membership(user_id, valid_until, price):
 
     conn.execute(
         "INSERT INTO sanctum_membership "
-        "(user_id, valid_until, price, status, promise_date, promise_reminder_sent_for, accumulated_days) "
-        "VALUES (?, ?, ?, 'active', NULL, NULL, ?) "
+        "(user_id, valid_until, price, status, promise_date, promise_reminder_sent_for, accumulated_days, winback_sent) "
+        "VALUES (?, ?, ?, 'active', NULL, NULL, ?, 0) "
         "ON CONFLICT(user_id) DO UPDATE SET valid_until = excluded.valid_until, price = excluded.price, "
         "status = 'active', promise_date = NULL, promise_reminder_sent_for = NULL, "
-        "accumulated_days = excluded.accumulated_days",
+        "accumulated_days = excluded.accumulated_days, winback_sent = 0",
         (user_id, valid_until, price, total_days),
     )
     conn.commit()
