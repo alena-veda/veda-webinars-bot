@@ -524,17 +524,24 @@ async def _send_ascension_extra_media(bot: Bot, user_id: int, level: int):
     Telegram не бывает подписи, поэтому не совмещаются с текстом в одно
     сообщение, как фото; порядок - её явное решение 2026-09-17). Ничего не
     делает, если для этой ступени ничего не загружено - см. adm_ascension_media."""
+    # у видео и голосового - отдельные попытки: если, например, кружочек не
+    # прошёл (нередкий реальный случай - у человека в настройках Telegram
+    # включён запрет на голосовые/видеосообщения не от контактов, ошибка
+    # VOICE_MESSAGES_FORBIDDEN, обнаружено 2026-09-18), голосовое всё равно
+    # должно попытаться дойти само по себе, а не молча пропуститься вместе с ним
     video_note_id = db.get_setting(f"ascension_level{level}_video_note")
-    voice_id = db.get_setting(f"ascension_level{level}_voice")
-    if not video_note_id and not voice_id:
-        return
-    try:
-        if video_note_id:
+    if video_note_id:
+        try:
             await bot.send_video_note(user_id, video_note_id)
-        if voice_id:
+        except Exception:
+            logging.exception("Не удалось отправить видеокружок ступени пользователю %s", user_id)
+
+    voice_id = db.get_setting(f"ascension_level{level}_voice")
+    if voice_id:
+        try:
             await bot.send_voice(user_id, voice_id)
-    except Exception:
-        logging.exception("Не удалось отправить видео/голосовое ступени пользователю %s", user_id)
+        except Exception:
+            logging.exception("Не удалось отправить голосовое ступени пользователю %s", user_id)
 
 
 async def _credit_luminar_referral(bot: Bot, referred_user_id: int):
