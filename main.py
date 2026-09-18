@@ -3170,8 +3170,9 @@ async def adm_sanctum_list(callback: CallbackQuery):
         full = db.get_sanctum_membership(m["user_id"])
         acc_days = (full["accumulated_days"] or 0) if full else 0
         level = compute_ascension_level(m["user_id"])
+        id_link = f'<a href="tg://user?id={m["user_id"]}">ID {m["user_id"]}</a>'
         line = (
-            f"{status} - {html.escape(name)} (ID {m['user_id']}) - до {date_text} - {price} ({rate_tag})\n"
+            f"{status} - {html.escape(name)} ({id_link}) - до {date_text} - {price} ({rate_tag})\n"
             f"   🪜 {ASCENSION_LEVEL_NAMES[level]} - в поле по оплатам: {acc_days} дн. (~{acc_days / 30:.1f} мес.)"
         )
         if m["promise_date"]:
@@ -3849,7 +3850,7 @@ async def _render_user_detail(callback: CallbackQuery, user_id: int):
     meditation_status = "✅ куплен" if u["bought_meditation_bot"] else "— пока не отмечен"
     text = (
         f"<b>{html.escape(_user_display_name(u))}</b>\n"
-        f"ID: {u['user_id']}\n"
+        f'ID: <a href="tg://user?id={u["user_id"]}">{u["user_id"]}</a>\n'
         f"С нами с: {joined}\n"
         f"Статус: {status}\n"
         f"VEDA HEALING FLOW: {meditation_status}"
