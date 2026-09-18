@@ -1175,13 +1175,25 @@ def get_sanctum_intro_viewers_due(cutoff_datetime_str):
     """Люди, которые смотрели информацию о VEDA SANCTUM (см.
     mark_sanctum_intro_viewed), но не дошли до "Инициировать шаг" дольше
     настроенного срока, и которым это конкретное напоминание ещё не
-    отправляли."""
+    отправляли.
+
+    Отдельно исключены те, у кого уже есть заявка на Sanctum в ожидании (чек
+    или проверка) - обнаружен и закрыт реальный пограничный случай 2026-09-18:
+    человек нажимает "Инициировать шаг" (заявка создаётся, отметка просмотра
+    снимается), затем кнопкой "⬅️ Назад" возвращается на экран Sanctum - тот
+    заново отмечает "просмотрено", хотя оформление уже идёт. Без этого
+    исключения такой человек получил бы сразу два разных напоминания -
+    "завис на оплате" И "посмотрел, не начал" - про один и тот же шаг."""
     conn = get_conn()
     rows = conn.execute("""
         SELECT * FROM users
         WHERE sanctum_intro_viewed_at IS NOT NULL
         AND sanctum_intro_viewed_at <= ?
         AND (sanctum_nudge_sent IS NULL OR sanctum_nudge_sent = 0)
+        AND user_id NOT IN (
+            SELECT user_id FROM registrations
+            WHERE product_type = 'sanctum' AND status IN ('awaiting_receipt', 'awaiting_confirmation')
+        )
     """, (cutoff_datetime_str,)).fetchall()
     conn.close()
     return rows
