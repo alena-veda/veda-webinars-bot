@@ -2383,10 +2383,33 @@ async def wq_public_feed(callback: CallbackQuery):
 # ---------- админ-панель: вход ----------
 
 @router.message(F.text == BTN_ADMIN)
+@router.message(Command("admin"))
 async def admin_panel_entry(message: Message):
+    # /admin - запасной вход: кнопка «Админ-панель» живёт в меню внизу экрана,
+    # а Telegram запоминает это меню у человека и обновляет его только когда бот
+    # пришлёт новое - поэтому у только что добавленного администратора кнопки
+    # может ещё не быть (см. _notify_new_admin), а команда работает сразу
     if not db.is_admin(message.from_user.id):
         return
     await message.answer("Админ-панель:", reply_markup=admin_panel_kb(message.from_user.id))
+
+
+async def _notify_new_admin(bot: Bot, admin_id: int) -> bool:
+    """Сообщает только что добавленному администратору и заодно присылает ему
+    обновлённое меню - с кнопкой «Админ-панель». Без этого у него остаётся
+    старое меню без неё. False, если написать не получилось (человек ещё ни
+    разу не запускал бота)."""
+    try:
+        await bot.send_message(
+            admin_id,
+            "✨ Вам открыт доступ к админ-панели. Кнопка «⚙️ Админ-панель» появилась в меню внизу "
+            "(если её не видно - откройте панель командой /admin).",
+            reply_markup=main_menu_kb(admin_id),
+        )
+        return True
+    except Exception:
+        logging.exception("Не удалось уведомить нового администратора %s", admin_id)
+        return False
 
 
 @router.callback_query(F.data == "adm_back")
@@ -4138,12 +4161,17 @@ async def _render_admins_screen(callback: CallbackQuery):
     lines = ["<b>Администраторы:</b>"]
     rows = []
     for a in admin_ids:
+        u = db.get_user(a)
+        # имя - из карточки подписчика (кликабельная ссылка на профиль в Telegram);
+        # если человек ещё не запускал бота, карточки нет и остаётся только ID
+        who = f'<a href="tg://user?id={a}">{html.escape(_user_display_name(u))}</a> ' if u else ""
         if db.is_owner(a):
-            lines.append(f"• <code>{a}</code> (владелец - полный доступ)")
+            lines.append(f"• {who}<code>{a}</code> (владелец - полный доступ)")
         else:
-            lines.append(f"• <code>{a}</code>")
+            lines.append(f"• {who}<code>{a}</code>" + ("" if u else " (ещё не запускал бота)"))
+            label = _user_display_name(u) if u else str(a)
             rows.append([
-                InlineKeyboardButton(text=f"⚙️ Права для {a}", callback_data=f"adm_perm_edit_{a}"),
+                InlineKeyboardButton(text=f"⚙️ Права: {label}"[:40], callback_data=f"adm_perm_edit_{a}"),
                 InlineKeyboardButton(text="🗑 Удалить", callback_data=f"adm_admin_remove_{a}"),
             ])
     rows.append([InlineKeyboardButton(text="➕ Добавить администратора", callback_data="adm_admin_add")])
@@ -4183,7 +4211,8 @@ async def adm_perm_edit_start(callback: CallbackQuery, state: FSMContext):
     await state.set_state(AdminPermStates.picking)
     await state.update_data(target_admin_id=target_admin_id, selected_perms=list(current))
     await callback.message.answer(
-        f"Права администратора {target_admin_id}:", reply_markup=_admin_perm_picker_kb(current)
+        f"Права администратора {html.escape(_user_display_name(db.get_user(target_admin_id))) if db.get_user(target_admin_id) else target_admin_id}:",
+        reply_markup=_admin_perm_picker_kb(current),
     )
     await callback.answer()
 
@@ -4208,12 +4237,22 @@ async def admin_perm_done(callback: CallbackQuery, state: FSMContext):
     target_admin_id = data["target_admin_id"]
     selected = data.get("selected_perms", [])
     db.set_admin_permissions(target_admin_id, selected)
+    is_new = bool(data.get("new_admin"))
     await state.clear()
+    notified = ""
+    if is_new:
+        ok = await _notify_new_admin(callback.bot, target_admin_id)
+        notified = (
+            "\n\nЯ написала ему и прислала меню с кнопкой «Админ-панель»." if ok
+            else "\n\nНаписать ему не получилось - пусть нажмёт /start, затем откроет панель командой /admin."
+        )
     if selected:
         labels = "\n".join(f"• {ADMIN_PERMISSIONS[k]}" for k in selected)
     else:
         labels = "(ничего не выбрано - у этого администратора пока нет доступа ни к одному разделу)"
-    await callback.message.edit_text(f"Права обновлены ✅\n\nДоступно администратору {target_admin_id}:\n{labels}")
+    known = db.get_user(target_admin_id)
+    who = f"{html.escape(_user_display_name(known))} (ID {target_admin_id})" if known else f"ID {target_admin_id}"
+    await callback.message.edit_text(f"Права обновлены ✅\n\nДоступно администратору {who}:\n{labels}{notified}")
     await callback.answer()
 
 
@@ -4378,9 +4417,17 @@ async def edit_field_value(message: Message, state: FSMContext):
             return
         db.add_admin(new_admin_id)
         await state.set_state(AdminPermStates.picking)
-        await state.update_data(target_admin_id=new_admin_id, selected_perms=list(DEFAULT_HELPER_PERMISSIONS))
+        await state.update_data(
+            target_admin_id=new_admin_id, selected_perms=list(DEFAULT_HELPER_PERMISSIONS), new_admin=True
+        )
+        known = db.get_user(new_admin_id)
+        who = f"{html.escape(_user_display_name(known))} (ID {new_admin_id})" if known else f"ID {new_admin_id}"
+        warn = "" if known else (
+            "\n\n⚠️ Этот человек ещё ни разу не запускал бота - написать ему я пока не смогу. "
+            "Пусть нажмёт /start, и тогда откроет панель командой /admin."
+        )
         await message.answer(
-            f"Администратор с ID {new_admin_id} добавлен ✅\n\n"
+            f"Администратор {who} добавлен ✅{warn}\n\n"
             "Теперь отметьте, какие разделы ему доступны (по умолчанию отмечен обычный набор для "
             "помощника - можно менять). Нажмите «✅ Готово», когда закончите:",
             reply_markup=_admin_perm_picker_kb(DEFAULT_HELPER_PERMISSIONS),
