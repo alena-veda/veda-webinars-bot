@@ -401,6 +401,31 @@ def init_db():
         c.execute("ALTER TABLE sanctum_membership ADD COLUMN winback_sent INTEGER DEFAULT 0")
     except Exception:
         pass
+    try:
+        # дата, когда её вручную убрали из Sanctum (от неё, а не от valid_until,
+        # считаются срок сохранения цены и срок обнуления времени в поле у
+        # тех, кого убрали вручную); снимается при новой оплате
+        c.execute("ALTER TABLE sanctum_membership ADD COLUMN removed_at TEXT")
+        # для тех, кого убрали ДО появления этого поля - точная дата неизвестна,
+        # считаем от дня обновления (честнее, чем от valid_until, который может
+        # оказаться в будущем)
+        c.execute(
+            "UPDATE sanctum_membership SET removed_at = date('now') WHERE status = 'removed' AND removed_at IS NULL"
+        )
+    except Exception:
+        pass
+    try:
+        # уже отправлено напоминание "последний шанс сохранить цену" за этот
+        # случай ухода; сбрасывается при новой оплате
+        c.execute("ALTER TABLE sanctum_membership ADD COLUMN lastchance_sent INTEGER DEFAULT 0")
+    except Exception:
+        pass
+    try:
+        # время в поле уже обнулено за этот случай долгого отсутствия;
+        # сбрасывается при новой оплате
+        c.execute("ALTER TABLE sanctum_membership ADD COLUMN stage_reset_done INTEGER DEFAULT 0")
+    except Exception:
+        pass
 
     for admin_id in INITIAL_ADMIN_IDS:
         c.execute(
@@ -466,10 +491,40 @@ def init_db():
         "winback_enabled": "1",
         "winback_days_after_expiry": "7",
         "winback_text": (
-            "{имя}, Ваш доступ в VEDA SANCTUM закончился {дата}, и я заметила, что Вы пока не вернулись.\n\n"
-            "Дверь всё ещё открыта, и цена для Вас закреплена прежней - {цена}.\n\n"
-            "Если почувствуете зов - буду рада снова видеть Вас в поле ✨"
+            "{имя}, Ваш доступ в VEDA SANCTUM | CODEofGOD закончился {дата}.\n\n"
+            "Дверь остаётся открытой: до {дата_до} за Вами сохраняется Ваша прежняя цена - {цена}. "
+            "После этой даты вход будет по новой стоимости, как для новых участников.\n\n"
+            "Если Вам нужно немного времени - нажмите «Оплачу позже» и назовите дату оплаты "
+            "(это важно отметить именно здесь, в боте, а не писать мне лично: так я буду знать, "
+            "что Вы возвращаетесь).\n\n"
+            "Буду рада видеть Вас снова! С уважением, Алёна ☀️"
         ),
+        "price_lock_days": "30",
+        "stage_reset_days": "90",
+        "lastchance_days_before": "5",
+        "sanctum_removed_text": (
+            "{имя}, Ваш доступ в VEDA SANCTUM | CODEofGOD закончился {дата}.\n\n"
+            "Дверь остаётся открытой: до {дата_до} за Вами сохраняется Ваша прежняя цена - {цена}. "
+            "После этой даты вход будет по новой стоимости, как для новых участников.\n\n"
+            "Буду рада видеть Вас снова! С уважением, Алёна ☀️"
+        ),
+        "sanctum_lastchance_text": (
+            "{имя}, напоминаю: до {дата_до} Вы ещё можете вернуться в VEDA SANCTUM | CODEofGOD "
+            "по своей прежней цене - {цена}. После этой даты вход будет по новой стоимости, "
+            "как для новых участников.\n\n"
+            "Если Вам нужно немного времени - нажмите «Оплачу позже» и назовите дату оплаты "
+            "(это важно отметить именно здесь, в боте, а не писать мне лично: так я буду знать, "
+            "что Вы возвращаетесь).\n\n"
+            "С уважением, Алёна ☀️"
+        ),
+        "sanctum_reset_text": (
+            "{имя}, Вас давно не было в поле VEDA SANCTUM, поэтому отсчёт времени в поле "
+            "для ступеней Пути Восхождения начинается заново.\n"
+            "{сохранено}\n"
+            "Дверь в Sanctum открыта, когда Вы будете готовы. С уважением, Алёна ☀️"
+        ),
+        "sanctum_reset_luminar_line": "Ваш ранг Люминара остаётся с Вами ✨",
+        "sanctum_reset_meditation_line": "Возможность продолжить работу с VEDA HEALING FLOW тоже остаётся с Вами.",
         "sanctum_nudge_enabled": "1",
         "sanctum_nudge_hours": "5",
         "sanctum_nudge_text": (
@@ -478,6 +533,12 @@ def init_db():
             "Врата открыты, когда будете готовы ✨"
         ),
     }
+    # старая версия возвратного письма (до правил "цена сохраняется 30 дней") -
+    # заменяем на новую, но только если она не была отредактирована вручную
+    c.execute("SELECT value FROM settings WHERE key = 'winback_text'")
+    _row = c.fetchone()
+    if _row and _row[0] and "цена для Вас закреплена прежней" in _row[0]:
+        c.execute("UPDATE settings SET value = ? WHERE key = 'winback_text'", (_default_settings["winback_text"],))
     for key, value in _default_settings.items():
         c.execute("SELECT value FROM settings WHERE key = ?", (key,))
         if not c.fetchone():
@@ -1227,7 +1288,7 @@ def get_lapsed_sanctum_user_ids(cutoff_date_str):
     подписки - нужны и для персонализации, и для текста напоминания."""
     conn = get_conn()
     rows = conn.execute("""
-        SELECT u.*, sm.valid_until, sm.price AS sanctum_price
+        SELECT u.*, sm.valid_until, sm.price AS sanctum_price, sm.promise_date
         FROM sanctum_membership sm
         JOIN users u ON u.user_id = sm.user_id
         WHERE sm.status != 'removed'
@@ -1236,6 +1297,42 @@ def get_lapsed_sanctum_user_ids(cutoff_date_str):
     """, (cutoff_date_str,)).fetchall()
     conn.close()
     return rows
+
+
+def get_memberships_for_rules():
+    """Все подписки вместе с данными человека - основа для ежедневных проверок
+    правил ухода (main.py, check_reengagement): напоминание "последний шанс
+    сохранить цену" и обнуление времени в поле после долгого отсутствия. Только
+    те, кому бот вообще может написать (есть карточка в users)."""
+    conn = get_conn()
+    rows = conn.execute("""
+        SELECT sm.user_id, sm.valid_until, sm.price, sm.status, sm.promise_date, sm.accumulated_days,
+               sm.removed_at, sm.lastchance_sent, sm.stage_reset_done,
+               u.preferred_name, u.first_name, u.username, u.luminar_count, u.bought_meditation_bot,
+               u.blocked
+        FROM sanctum_membership sm
+        JOIN users u ON u.user_id = sm.user_id
+    """).fetchall()
+    conn.close()
+    return rows
+
+
+def mark_lastchance_sent(user_id):
+    conn = get_conn()
+    conn.execute("UPDATE sanctum_membership SET lastchance_sent = 1 WHERE user_id = ?", (user_id,))
+    conn.commit()
+    conn.close()
+
+
+def mark_stage_reset_done(user_id):
+    """Обнуляет накопленное время в поле (accumulated_days) - НЕ трогает
+    ранг Люминара и отметку покупки VEDA HEALING FLOW (они в users, а не тут)."""
+    conn = get_conn()
+    conn.execute(
+        "UPDATE sanctum_membership SET accumulated_days = 0, stage_reset_done = 1 WHERE user_id = ?", (user_id,)
+    )
+    conn.commit()
+    conn.close()
 
 
 def mark_winback_sent(user_id):
@@ -1925,11 +2022,13 @@ def upsert_sanctum_membership(user_id, valid_until, price):
 
     conn.execute(
         "INSERT INTO sanctum_membership "
-        "(user_id, valid_until, price, status, promise_date, promise_reminder_sent_for, accumulated_days, winback_sent) "
-        "VALUES (?, ?, ?, 'active', NULL, NULL, ?, 0) "
+        "(user_id, valid_until, price, status, promise_date, promise_reminder_sent_for, accumulated_days, winback_sent, "
+        "removed_at, lastchance_sent, stage_reset_done) "
+        "VALUES (?, ?, ?, 'active', NULL, NULL, ?, 0, NULL, 0, 0) "
         "ON CONFLICT(user_id) DO UPDATE SET valid_until = excluded.valid_until, price = excluded.price, "
         "status = 'active', promise_date = NULL, promise_reminder_sent_for = NULL, "
-        "accumulated_days = excluded.accumulated_days, winback_sent = 0",
+        "accumulated_days = excluded.accumulated_days, winback_sent = 0, "
+        "removed_at = NULL, lastchance_sent = 0, stage_reset_done = 0",
         (user_id, valid_until, price, total_days),
     )
     conn.commit()
@@ -1939,7 +2038,18 @@ def upsert_sanctum_membership(user_id, valid_until, price):
 def set_sanctum_status(user_id, status):
     assert status in ("active", "removed")
     conn = get_conn()
-    cur = conn.execute("UPDATE sanctum_membership SET status = ? WHERE user_id = ?", (status, user_id))
+    if status == "removed":
+        # запоминаем дату ухода и заново открываем цепочку "последний шанс" /
+        # "обнуление" именно для этого случая
+        cur = conn.execute(
+            "UPDATE sanctum_membership SET status = 'removed', removed_at = ?, lastchance_sent = 0, "
+            "stage_reset_done = 0 WHERE user_id = ?",
+            (datetime.now().strftime("%Y-%m-%d"), user_id),
+        )
+    else:
+        cur = conn.execute(
+            "UPDATE sanctum_membership SET status = 'active', removed_at = NULL WHERE user_id = ?", (user_id,)
+        )
     conn.commit()
     updated = cur.rowcount > 0
     conn.close()
