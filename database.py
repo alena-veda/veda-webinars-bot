@@ -970,12 +970,16 @@ def get_blocked_user_ids():
     return [r["user_id"] for r in rows]
 
 
-def delete_user(user_id):
-    """Удаляет человека из подписчиков бота — в отличие от блокировки, это
-    НЕ мешает ему зайти снова: при следующем /start он будет считаться
-    новым (add_user снова вернёт True), и бот заново спросит его имя."""
+def reset_user_onboarding(user_id):
+    """Даёт человеку пройти знакомство заново (бот снова спросит имя, повторит
+    приветствие и «Первое Касание») - и больше ничего. Раньше здесь строка
+    человека стиралась целиком, а вместе с ней пропадали ранг Люминара и отметка
+    о покупке VEDA HEALING FLOW (они хранятся в этой же строке), хотя это
+    постоянные достижения. Знакомство в cmd_start определяется только по
+    сохранённому имени (preferred_name), поэтому сбрасываем ровно его -
+    ступень, Sanctum, цена, заявки, Люминар, покупки и пригласивший не трогаются."""
     conn = get_conn()
-    conn.execute("DELETE FROM users WHERE user_id = ?", (user_id,))
+    conn.execute("UPDATE users SET preferred_name = NULL WHERE user_id = ?", (user_id,))
     conn.commit()
     conn.close()
 

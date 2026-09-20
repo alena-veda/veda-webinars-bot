@@ -4046,7 +4046,7 @@ async def _render_user_detail(callback: CallbackQuery, user_id: int):
         [InlineKeyboardButton(text="✍️ Написать", callback_data=f"admin_reply_{user_id}")],
         [InlineKeyboardButton(text=meditation_label, callback_data=f"adm_user_meditation_toggle_{user_id}")],
         [InlineKeyboardButton(text=block_label, callback_data=f"adm_user_toggle_{user_id}")],
-        [InlineKeyboardButton(text="🗑 Удалить (сможет зайти заново)", callback_data=f"adm_user_delete_{user_id}")],
+        [InlineKeyboardButton(text="🔄 Знакомство заново (сбросить только имя)", callback_data=f"adm_user_reset_{user_id}")],
         [InlineKeyboardButton(text="⬅️ К списку", callback_data="adm_users_list")],
     ])
     await callback.message.edit_text(text, reply_markup=kb)
@@ -4101,24 +4101,22 @@ async def adm_user_meditation_toggle(callback: CallbackQuery):
     await callback.answer("Отмечено ✅" if now_bought else "Отметка снята")
 
 
-@router.callback_query(F.data.startswith("adm_user_delete_"))
-async def adm_user_delete(callback: CallbackQuery):
+@router.callback_query(F.data.startswith("adm_user_reset_"))
+async def adm_user_reset(callback: CallbackQuery):
     if not db.is_admin(callback.from_user.id):
         await callback.answer("Только для администраторов", show_alert=True)
         return
     user_id = int(callback.data.split("_")[-1])
-    db.delete_user(user_id)
+    db.reset_user_onboarding(user_id)
     users = db.get_all_users_full()
-    if not users:
-        await callback.message.edit_text("Пока никто не запускал бота.")
-    else:
-        text = (
-            f"<b>👥 Подписчики бота ({len(users)})</b>\n\n"
-            "Человек удалён - если он снова нажмёт /start, бот встретит его как нового.\n\n"
-            "Нажмите на имя, чтобы посмотреть и управлять."
-        )
-        await callback.message.edit_text(text, reply_markup=_users_list_kb(users))
-    await callback.answer("Удалён 🗑")
+    text = (
+        f"<b>👥 Подписчики бота ({len(users)})</b>\n\n"
+        "Имя сброшено: при следующем /start бот заново спросит имя и повторит знакомство. "
+        "Ступень, ранг Люминара, покупка медитаций, Sanctum и цена остались как были.\n\n"
+        "Нажмите на имя, чтобы посмотреть и управлять."
+    )
+    await callback.message.edit_text(text, reply_markup=_users_list_kb(users))
+    await callback.answer("Имя сброшено 🔄")
 
 
 # ---------- админ-панель: администраторы ----------
