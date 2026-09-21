@@ -3140,13 +3140,65 @@ def _grant_back_kb(target_step: str) -> InlineKeyboardMarkup:
     ]])
 
 
+GRANT_LIST_LIMIT = 40  # больше кнопок в одном сообщении неудобно листать - остальных можно по ID
+
+
+def _member_short_name(m) -> str:
+    return f"@{m['username']}" if m["username"] else (m["preferred_name"] or m["first_name"] or str(m["user_id"]))
+
+
+def _grant_pick_kb() -> InlineKeyboardMarkup:
+    """Список тех, кто уже есть в Sanctum (с датой и ценой прямо на кнопке) -
+    чтобы выбрать человека нажатием, а не вводить ID вручную и сразу видеть, у
+    кого какая цена."""
+    today = _today()
+    rows = []
+    for m in db.get_all_sanctum_memberships()[:GRANT_LIST_LIMIT]:
+        valid_until = _parse_date(m["valid_until"]) if m["valid_until"] else None
+        if m["status"] == "removed":
+            mark = "🚫"
+        elif valid_until and valid_until >= today:
+            mark = "✅"
+        else:
+            mark = "❌"
+        date_text = valid_until.strftime("%d.%m.%Y") if valid_until else "-"
+        price = _strip_html_tags(m["price"] or "-")
+        label = f"{mark} {_member_short_name(m)} - до {date_text} - {price}"
+        rows.append([InlineKeyboardButton(text=label[:64], callback_data=f"adm_grant_pick_{m['user_id']}")])
+    rows.append([InlineKeyboardButton(text="➕ Другой подписчик бота (ещё не в Sanctum)", callback_data="adm_grant_others")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
 async def _grant_ask_user_id(answer, state: FSMContext):
     await state.set_state(GrantAccessStates.waiting_user_id)
     await answer(
-        f"Пришлите Telegram ID человека, которому выдать/продлить доступ в {html.escape(SANCTUM_FULL_NAME)} "
+        f"Кому выдать/продлить доступ в {html.escape(SANCTUM_FULL_NAME)}? Нажмите на человека в списке "
+        "(✅ доступ активен, ❌ закончился, 🚫 убран; рядом - до какого числа оплачено и по какой цене). "
+        "Если человека нет в списке - нажмите «Другой подписчик» или пришлите его Telegram ID "
         "(или /cancel для отмены).\n\n"
-        "Важно: этот человек должен был хотя бы раз нажать /start в этом боте - иначе бот не сможет ему написать."
+        "Важно: этот человек должен был хотя бы раз нажать /start в этом боте - иначе бот не сможет ему написать.",
+        reply_markup=_grant_pick_kb(),
     )
+
+
+async def _grant_after_target(answer, state: FSMContext, target_user_id: int):
+    """Человек выбран (кнопкой или по ID): показываем, что о нём известно
+    сейчас, и идём дальше к дате."""
+    await state.update_data(target_user_id=target_user_id)
+    u = db.get_user(target_user_id)
+    name = html.escape(_user_display_name(u)) if u else "(карточки в боте нет)"
+    membership = db.get_sanctum_membership(target_user_id)
+    if membership and membership["valid_until"]:
+        vu = _parse_date(membership["valid_until"])
+        status = " (убран)" if membership["status"] == "removed" else ""
+        now_line = (
+            f"Сейчас: доступ до {vu.strftime('%d.%m.%Y') if vu else '-'}{status}, "
+            f"цена {html.escape(_strip_html_tags(membership['price'] or '-'))}."
+        )
+    else:
+        now_line = "Сейчас в VEDA SANCTUM его нет."
+    await answer(f"Выбран: <b>{name}</b> (ID {target_user_id}).\n{now_line}")
+    await _grant_ask_valid_until(answer, state)
 
 
 async def _grant_ask_valid_until(answer, state: FSMContext):
@@ -3164,8 +3216,14 @@ async def _grant_ask_valid_until(answer, state: FSMContext):
 async def _grant_ask_price(answer, state: FSMContext):
     current_base_price = db.get_sanctum()["price"]
     await state.set_state(GrantAccessStates.waiting_price)
+    target = (await state.get_data()).get("target_user_id")
+    membership = db.get_sanctum_membership(target) if target else None
+    locked = (
+        f"Сейчас за ним закреплена: {html.escape(_strip_html_tags(membership['price']))}.\n\n"
+        if membership and membership["price"] else ""
+    )
     await answer(
-        "Какая цена закреплена за этим человеком?\n\n"
+        f"Какая цена закреплена за этим человеком?\n\n{locked}"
         f"Пришлите сумму (например: 2222 грн) - для действующих подписчиков со старой ценой это важно, "
         f"иначе при продлении подставится текущая базовая цена ({current_base_price}).\n\n"
         "Или отправьте «-», чтобы взять цену автоматически (его текущую закреплённую, если она уже есть, "
@@ -3219,8 +3277,38 @@ async def adm_grant_access_user_id(message: Message, state: FSMContext):
     except ValueError:
         await message.answer("ID должен быть числом. Попробуйте ещё раз или отправьте /cancel")
         return
-    await state.update_data(target_user_id=target_user_id)
-    await _grant_ask_valid_until(message.answer, state)
+    await _grant_after_target(message.answer, state, target_user_id)
+
+
+@router.callback_query(GrantAccessStates.waiting_user_id, F.data.startswith("adm_grant_pick_"))
+async def adm_grant_pick(callback: CallbackQuery, state: FSMContext):
+    if not await _require_permission(callback, "adm_grant_access"):
+        return
+    await _grant_after_target(callback.message.answer, state, int(callback.data[len("adm_grant_pick_"):]))
+    await callback.answer()
+
+
+@router.callback_query(GrantAccessStates.waiting_user_id, F.data == "adm_grant_others")
+async def adm_grant_others(callback: CallbackQuery, state: FSMContext):
+    """Подписчики бота, которых ещё нет в Sanctum (например, давние участники,
+    которых только предстоит внести)."""
+    if not await _require_permission(callback, "adm_grant_access"):
+        return
+    in_sanctum = {m["user_id"] for m in db.get_all_sanctum_memberships()}
+    others = [u for u in db.get_all_users_full() if u["user_id"] not in in_sanctum]
+    rows = [
+        [InlineKeyboardButton(text=f"{_user_display_name(u)} - ID {u['user_id']}"[:64],
+                              callback_data=f"adm_grant_pick_{u['user_id']}")]
+        for u in others[:GRANT_LIST_LIMIT]
+    ]
+    if not rows:
+        await callback.answer("Все подписчики бота уже есть в списке Sanctum", show_alert=True)
+        return
+    await callback.message.answer(
+        "Подписчики бота, которых ещё нет в Sanctum. Нажмите на нужного или пришлите его ID:",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=rows),
+    )
+    await callback.answer()
 
 
 @router.message(GrantAccessStates.waiting_valid_until)
