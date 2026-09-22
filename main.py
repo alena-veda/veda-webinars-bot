@@ -32,6 +32,7 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 import config
 import database as db
+import rituals
 
 TZ = ZoneInfo(config.TIMEZONE)
 
@@ -726,6 +727,7 @@ ADMIN_PERMISSION_SECTIONS = [
         ("adm_grant_access", "🔑 Выдать/продлить доступ VEDA SANCTUM"),
         ("adm_sanctum_list", "📋 Подписчики VEDA SANCTUM (убрать - прямо там)"),
         ("adm_reminder_texts", "✉️ Тексты напоминаний VEDA SANCTUM"),
+        ("adm_rituals", "🌙 Календарь ритуалов"),
     ]),
     ("🪜 Путь Восхождения и Люминаров", [
         ("adm_ascension_texts", "🪜 Тексты Пути Восхождения и Люминаров"),
@@ -1272,9 +1274,10 @@ async def show_sanctum(message: Message, user_id: int = None):
                 f"Хотите возобновить?\n{price_line}"
             )
             button_text = "Возобновить"
-        kb = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text=button_text, callback_data="sanctum_apply")]
-        ])
+        rows = [[InlineKeyboardButton(text=button_text, callback_data="sanctum_apply")]]
+        if valid_until and valid_until >= today:
+            rows.append([_ritual_calendar_btn()])
+        kb = InlineKeyboardMarkup(inline_keyboard=rows)
         await message.answer(text, reply_markup=kb, protect_content=_protect_for(user_id))
         return
 
@@ -1336,6 +1339,9 @@ async def sanctum_laws(callback: CallbackQuery):
         return
     price = _price_for_user(callback.from_user.id)
     text = s["laws_text"].replace("{price}", price)
+    ritual_line = db.get_setting("ritual_sanctum_line")
+    if ritual_line:
+        text += "\n\n" + ritual_line
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="Инициировать шаг", callback_data="sanctum_apply")]
     ])
@@ -1509,6 +1515,7 @@ def _info_menu_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="❓ Частые вопросы", callback_data="open_faq")],
         [InlineKeyboardButton(text="📜 Правила пространства", callback_data="open_rules")],
+        [_ritual_calendar_btn()],
     ])
 
 
@@ -1955,6 +1962,8 @@ async def show_profile(message: Message):
         kb_rows.append([meditation_btn])
     if membership and membership["intention_text"]:
         kb_rows.append([InlineKeyboardButton(text="✏️ Изменить намерение", callback_data="edit_intention")])
+    if _ritual_is_member(user_id):
+        kb_rows.append([_ritual_calendar_btn()])
 
     greeting = _personalize(db.get_setting("profile_greeting_text"), user_row)
     text = f"{greeting}\n\n" + "\n\n".join(blocks)
@@ -2085,8 +2094,14 @@ async def reg_confirm(callback: CallbackQuery):
     # (упорядочено 2026-09-03 - раньше сообщение о ступени/намерении уходило
     # РАНЬШЕ подтверждения оплаты, потому что _handle_ascension_transition
     # вызывался до этой отправки)
+    paid_kb = None
+    if reg["product_type"] == "sanctum" and is_first_sanctum_payment:
+        ritual_paid_line = db.get_setting("ritual_paid_line")
+        if ritual_paid_line:
+            text += "\n\n" + ritual_paid_line
+            paid_kb = InlineKeyboardMarkup(inline_keyboard=[[_ritual_calendar_btn()]])
     try:
-        await callback.bot.send_message(reg["user_id"], text)
+        await callback.bot.send_message(reg["user_id"], text, reply_markup=paid_kb)
     except Exception:
         logging.exception("Не удалось отправить подтверждение пользователю %s", reg["user_id"])
 
@@ -4374,7 +4389,10 @@ async def edit_field_value(message: Message, state: FSMContext):
     # разное каждый раз), а не фиксированное имя поля, поэтому его нельзя
     # перечислить в HTML_TRUSTED_FIELDS заранее — доверяем ему всегда,
     # раз исходный текст поста тоже сохранялся с HTML-разметкой при рассылке
-    html_trusted = (target, field) in HTML_TRUSTED_FIELDS or target == "feed_post"
+    html_trusted = (
+        (target, field) in HTML_TRUSTED_FIELDS or target == "feed_post" or target == "ritual_text"
+        or (target == "ritual_event" and field in ("meaning", "practice"))
+    )
     value = message.html_text if html_trusted else message.text
 
     if target == "webinar":
@@ -4497,6 +4515,9 @@ async def edit_field_value(message: Message, state: FSMContext):
             raw = f"https://t.me/{raw}"
         db.set_setting("admin_personal_chat_link", raw)
         await message.answer(f"Ссылка на личный чат обновлена ✅\n{raw}")
+    elif target in ("ritual_text", "ritual_event", "ritual_add"):
+        if await _ritual_edit_value(message, state, data, target, field, value):
+            return
     elif target == "admin_add":
         try:
             new_admin_id = int(value.strip())
@@ -5690,6 +5711,563 @@ async def photo_fallback(message: Message):
 
 # ---------- запуск ----------
 
+# ---------- календарь ритуалов (участники Санктума) ----------
+# Даты лежат в таблице ritual_events (см. rituals.py) и правятся в админ-панели;
+# бот сам ничего не считает "на лету". Участник = действующий доступ в Санктум
+# (для проверки экранов администраторы тоже видят полный вид).
+
+def _ritual_is_member(user_id: int) -> bool:
+    if db.is_admin(user_id):
+        return True
+    m = db.get_sanctum_membership(user_id)
+    if not m or m["status"] == "removed" or not m["valid_until"]:
+        return False
+    valid_until = _parse_date(m["valid_until"])
+    return bool(valid_until and valid_until >= _today())
+
+
+def _ritual_calendar_btn(text: str = "🌙 Календарь ритуалов") -> InlineKeyboardButton:
+    return InlineKeyboardButton(text=text, callback_data="rit_open")
+
+
+def _ritual_kb(ym: str, user_row) -> InlineKeyboardMarkup:
+    reminders_on = bool(user_row and user_row["ritual_reminders"])
+    opted_out = bool(user_row and user_row["ritual_optout"])
+    rows = []
+    if ym != "x":
+        rows.append([InlineKeyboardButton(text="📖 О практиках месяца", callback_data=f"rit_about_{ym}")])
+    rows.append([InlineKeyboardButton(
+        text="🔕 Не напоминать в день" if reminders_on else "🔔 Напоминать в день",
+        callback_data=f"rit_remind_{ym}",
+    )])
+    rows.append([InlineKeyboardButton(
+        text="🔔 Присылать календарь 1-го числа" if opted_out else "🔕 Больше не присылать календарь",
+        callback_data=f"rit_optout_{ym}",
+    )])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def _split_message(text: str, limit: int = 3900) -> list:
+    """Делит длинный текст по абзацам, чтобы уложиться в лимит Telegram."""
+    if len(text) <= limit:
+        return [text]
+    chunks, current = [], ""
+    for block in text.split("\n\n"):
+        if current and len(current) + len(block) + 2 > limit:
+            chunks.append(current)
+            current = block
+        else:
+            current = f"{current}\n\n{block}" if current else block
+    if current:
+        chunks.append(current)
+    return chunks
+
+
+async def _send_long(bot, chat_id: int, text: str, reply_markup=None):
+    chunks = _split_message(text)
+    for i, chunk in enumerate(chunks):
+        last = i == len(chunks) - 1
+        await bot.send_message(chat_id, chunk, reply_markup=reply_markup if last else None)
+
+
+def _ritual_two_months():
+    today = _today()
+    first = today.replace(day=1)
+    nxt = (first + timedelta(days=32)).replace(day=1)
+    return first.strftime("%Y-%m"), nxt.strftime("%Y-%m")
+
+
+@router.callback_query(F.data == "rit_open")
+async def ritual_open(callback: CallbackQuery):
+    user_id = callback.from_user.id
+    if not _ritual_is_member(user_id):
+        text = db.get_setting("ritual_teaser_text")
+        kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="⚜️ Что такое VEDA SANCTUM", callback_data="open_sanctum")],
+        ])
+        await callback.message.answer(text, reply_markup=kb, protect_content=_protect_for(user_id))
+        await callback.answer()
+        return
+    ym_now, ym_next = _ritual_two_months()
+    blocks = ["🌙 <b>Календарь ритуалов</b>"]
+    for ym in (ym_now, ym_next):
+        # в текущем месяце уже прошедшие даты не показываем
+        evs = [e for e in rituals.events_of_month(ym) if e["event_date"] >= _today().isoformat()]
+        body ="\n".join(rituals.fmt_line(e) for e in evs) if evs else "даты скоро появятся"
+        blocks.append(f"<b>{rituals.month_title(ym)}</b>\n{body}")
+    blocks.append("Время везде киевское.")
+    user_row = db.get_user(user_id)
+    await _send_long(callback.bot, callback.message.chat.id, "\n\n".join(blocks), _ritual_kb(ym_now, user_row))
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("rit_about_"))
+async def ritual_about(callback: CallbackQuery):
+    if not _ritual_is_member(callback.from_user.id):
+        await callback.answer("Этот раздел для участников VEDA SANCTUM", show_alert=True)
+        return
+    ym = callback.data[len("rit_about_"):]
+    text = rituals.about_text(ym)
+    if not text:
+        await callback.answer("На этот месяц пока нет дат", show_alert=True)
+        return
+    await _send_long(callback.bot, callback.message.chat.id, text)
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("rit_remind_"))
+async def ritual_toggle_remind(callback: CallbackQuery):
+    user_id = callback.from_user.id
+    if not _ritual_is_member(user_id):
+        await callback.answer("Этот раздел для участников VEDA SANCTUM", show_alert=True)
+        return
+    ym = callback.data[len("rit_remind_"):]
+    user_row = db.get_user(user_id)
+    new_value = 0 if (user_row and user_row["ritual_reminders"]) else 1
+    rituals.set_user_flag(user_id, "ritual_reminders", new_value)
+    try:
+        await callback.message.edit_reply_markup(reply_markup=_ritual_kb(ym, db.get_user(user_id)))
+    except Exception:
+        pass
+    await callback.answer(
+        "Напоминания включены: в день события утром придёт сообщение 🔔" if new_value
+        else "Напоминания выключены 🔕",
+        show_alert=True,
+    )
+
+
+@router.callback_query(F.data.startswith("rit_optout_"))
+async def ritual_toggle_optout(callback: CallbackQuery):
+    user_id = callback.from_user.id
+    if not _ritual_is_member(user_id):
+        await callback.answer("Этот раздел для участников VEDA SANCTUM", show_alert=True)
+        return
+    ym = callback.data[len("rit_optout_"):]
+    user_row = db.get_user(user_id)
+    new_value = 0 if (user_row and user_row["ritual_optout"]) else 1
+    rituals.set_user_flag(user_id, "ritual_optout", new_value)
+    try:
+        await callback.message.edit_reply_markup(reply_markup=_ritual_kb(ym, db.get_user(user_id)))
+    except Exception:
+        pass
+    await callback.answer(
+        "Хорошо, календарь 1-го числа больше не пришлю. Открыть его всегда можно в «Инфо» и в профиле."
+        if new_value else "Календарь снова будет приходить 1-го числа каждого месяца ✅",
+        show_alert=True,
+    )
+
+
+def _user_first_name_for_text(u) -> str:
+    return ((u["preferred_name"] or u["first_name"] or "") if u else "").strip()
+
+
+async def send_ritual_monthly(bot: Bot):
+    """1-го числа каждого месяца в 11:11 по Киеву: календарь на месяц всем
+    действующим участникам Санктума, кроме отказавшихся. ritual_last_month
+    защищает от повторной отправки, если задача сработает дважды."""
+    logging.info("[планировщик] send_ritual_monthly: старт")
+    ym = _today().strftime("%Y-%m")
+    if not rituals.events_of_month(ym):
+        logging.warning("Календарь ритуалов: на %s нет ни одной даты - рассылка пропущена", ym)
+        return
+    sent = 0
+    for u in rituals.active_members():
+        if u["ritual_optout"] or u["ritual_last_month"] == ym:
+            continue
+        text = rituals.month_text(ym, _user_first_name_for_text(u))
+        try:
+            await _send_long(bot, u["user_id"], text, _ritual_kb(ym, u))
+            rituals.set_user_flag(u["user_id"], "ritual_last_month", ym)
+            sent += 1
+        except Exception:
+            logging.exception("Не удалось отправить календарь ритуалов пользователю %s", u["user_id"])
+        await asyncio.sleep(0.05)
+    logging.info("[планировщик] send_ritual_monthly: завершено, отправлено %s", sent)
+
+
+async def send_ritual_daily(bot: Bot):
+    """Каждое утро: тем, кто включил «Напоминать в день», если сегодня в
+    календаре есть событие."""
+    logging.info("[планировщик] send_ritual_daily: старт")
+    today_iso = _today().isoformat()
+    evs = rituals.events_on(today_iso)
+    if not evs:
+        return
+    blocks = []
+    for e in evs:
+        emoji = rituals.KINDS.get(e["kind"], ("•", ""))[0]
+        title = e["title"] + (f" ({e['detail']})" if e["detail"] else "")
+        block = f"{emoji} <b>{title}</b>\n{rituals.meaning_of(e)}"
+        if (e["practice"] or "").strip():
+            block += f"\n\n{e['practice']}"
+        blocks.append(block)
+    kb = InlineKeyboardMarkup(inline_keyboard=[[_ritual_calendar_btn()]])
+    sent = 0
+    for u in rituals.active_members():
+        if not u["ritual_reminders"] or u["ritual_last_day"] == today_iso:
+            continue
+        header = (db.get_setting("ritual_day_text") or "").replace("{имя}", _user_first_name_for_text(u) or "друг")
+        try:
+            await _send_long(bot, u["user_id"], header + "\n\n" + "\n\n".join(blocks), kb)
+            rituals.set_user_flag(u["user_id"], "ritual_last_day", today_iso)
+            sent += 1
+        except Exception:
+            logging.exception("Не удалось отправить напоминание календаря пользователю %s", u["user_id"])
+        await asyncio.sleep(0.05)
+    logging.info("[планировщик] send_ritual_daily: завершено, отправлено %s", sent)
+
+
+# ---------- календарь ритуалов: админ-панель ----------
+
+RITUAL_ADMIN_BACK = [InlineKeyboardButton(text="⬅️ Календарь ритуалов", callback_data="adm_rituals")]
+
+
+def _ritual_admin_screen():
+    st = rituals.stats()
+    months = rituals.months_with_counts()
+    total = sum(m["n"] for m in months)
+    span = f"{months[0]['ym']} ... {months[-1]['ym']}" if months else "нет"
+    upcoming = rituals.events_between(_today().isoformat(), "2100-01-01")
+    nxt = rituals.fmt_line(upcoming[0], with_year=True) if upcoming else "нет"
+    announced = db.get_setting("ritual_announced_at") or "ещё не отправляли"
+    text = (
+        "🌙 <b>Календарь ритуалов</b>\n\n"
+        f"Дат в таблице: {total} (период: {span})\n"
+        f"Ближайшая: {nxt}\n\n"
+        f"Участников Санктума сейчас: {st['members']}\n"
+        f"Включили «напоминать в день»: {st['reminders']}\n"
+        f"Отказались от ежемесячного календаря: {st['optout']}\n"
+        f"Анонс участникам: {announced}\n\n"
+        "Ежемесячное сообщение уходит 1-го числа в 11:11 по Киеву, напоминания в день события - в 09:00. "
+        "Даты бот не считает сам: он берёт их из этой таблицы, поэтому любую можно поправить здесь."
+    )
+    if months and months[-1]["ym"] < (_today() + timedelta(days=120)).strftime("%Y-%m"):
+        text += "\n\n⚠️ Даты заканчиваются меньше чем через 4 месяца, пора вносить новые."
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="📅 Даты по месяцам", callback_data="adm_rit_months")],
+        [InlineKeyboardButton(text="➕ Добавить дату", callback_data="adm_rit_add")],
+        [InlineKeyboardButton(text="✏️ Тексты календаря", callback_data="adm_rit_texts")],
+        [InlineKeyboardButton(text="📨 Прислать мне пробное сообщение", callback_data="adm_rit_test")],
+        [InlineKeyboardButton(text="📣 Анонс календаря участникам", callback_data="adm_rit_announce")],
+        [InlineKeyboardButton(text="⬅️ Назад", callback_data="adm_back")],
+    ])
+    return text, kb
+
+
+@router.callback_query(F.data == "adm_rituals")
+async def adm_rituals(callback: CallbackQuery):
+    if not await _require_permission(callback, "adm_rituals"):
+        return
+    text, kb = _ritual_admin_screen()
+    await callback.message.edit_text(text, reply_markup=kb)
+    await callback.answer()
+
+
+@router.callback_query(F.data == "adm_rit_months")
+async def adm_rit_months(callback: CallbackQuery):
+    if not await _require_permission(callback, "adm_rituals"):
+        return
+    rows = [[InlineKeyboardButton(
+        text=f"{rituals.month_title(m['ym']).capitalize()} - {m['n']}", callback_data=f"adm_rit_m_{m['ym']}"
+    )] for m in rituals.months_with_counts()]
+    rows.append(RITUAL_ADMIN_BACK)
+    await callback.message.edit_text("Выберите месяц:", reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("adm_rit_m_"))
+async def adm_rit_month(callback: CallbackQuery):
+    if not await _require_permission(callback, "adm_rituals"):
+        return
+    ym = callback.data[len("adm_rit_m_"):]
+    rows = []
+    for e in rituals.events_of_month(ym):
+        d = datetime.strptime(e["event_date"], "%Y-%m-%d").strftime("%d.%m")
+        emoji = rituals.KINDS.get(e["kind"], ("•", ""))[0]
+        mark = " ✍️" if (e["practice"] or "").strip() else ""
+        rows.append([InlineKeyboardButton(text=f"{emoji} {d} {e['title']}{mark}", callback_data=f"adm_rit_e_{e['id']}")])
+    rows.append([InlineKeyboardButton(text="⬅️ К месяцам", callback_data="adm_rit_months")])
+    await callback.message.edit_text(
+        f"<b>{rituals.month_title(ym).capitalize()}</b>\nНажмите на дату, чтобы открыть или изменить. "
+        "✍️ - у даты есть Ваша практика.",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=rows),
+    )
+    await callback.answer()
+
+
+def _ritual_event_screen(event_id: int):
+    e = rituals.get_event(event_id)
+    if not e:
+        return "Такой даты уже нет.", InlineKeyboardMarkup(inline_keyboard=[RITUAL_ADMIN_BACK])
+    d = datetime.strptime(e["event_date"], "%Y-%m-%d").strftime("%d.%m.%Y")
+    kind_name = rituals.KINDS.get(e["kind"], ("", e["kind"]))[1]
+    text = (
+        f"{rituals.KINDS.get(e['kind'], ('•', ''))[0]} <b>{e['title']}</b>\n"
+        f"Тип: {kind_name}\nДата: {d}\n"
+        f"Уточнение: {e['detail'] or '(нет)'}\n\n"
+        f"<b>Смысл:</b> {rituals.meaning_of(e) or '(нет)'}"
+        f"{'' if e['meaning'] else ' (общий для типа)'}\n\n"
+        f"<b>Практика (Ваша):</b> {(e['practice'] or '').strip() or '(не заполнена, в сообщениях не показывается)'}"
+    )
+    ym = e["event_date"][:7]
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="✏️ Дату", callback_data=f"adm_rit_ef_{event_id}_event_date"),
+         InlineKeyboardButton(text="✏️ Название", callback_data=f"adm_rit_ef_{event_id}_title")],
+        [InlineKeyboardButton(text="✏️ Уточнение", callback_data=f"adm_rit_ef_{event_id}_detail"),
+         InlineKeyboardButton(text="✏️ Смысл", callback_data=f"adm_rit_ef_{event_id}_meaning")],
+        [InlineKeyboardButton(text="✍️ Практика", callback_data=f"adm_rit_ef_{event_id}_practice")],
+        [InlineKeyboardButton(text="🗑 Удалить дату", callback_data=f"adm_rit_del_{event_id}")],
+        [InlineKeyboardButton(text="⬅️ К месяцу", callback_data=f"adm_rit_m_{ym}")],
+    ])
+    return text, kb
+
+
+@router.callback_query(F.data.startswith("adm_rit_e_"))
+async def adm_rit_event(callback: CallbackQuery):
+    if not await _require_permission(callback, "adm_rituals"):
+        return
+    text, kb = _ritual_event_screen(int(callback.data[len("adm_rit_e_"):]))
+    await callback.message.edit_text(text, reply_markup=kb)
+    await callback.answer()
+
+
+RITUAL_FIELD_PROMPTS = {
+    "event_date": "Пришлите новую дату в формате ДД.ММ.ГГГГ (например, 25.10.2026):",
+    "title": "Пришлите новое название (например, «Экадаши Рама»):",
+    "detail": "Пришлите уточнение в скобках (например, «новолуние 09.11 в 09:02» или «у вайшнавов: 19.01»). "
+              "Отправьте «-», чтобы убрать:",
+    "meaning": "Пришлите короткий смысл именно этого дня. Отправьте «-», чтобы вернуть общий смысл типа:",
+    "practice": "Пришлите практику для этого дня - она будет показываться в ежемесячном сообщении и в "
+                "напоминании. Отправьте «-», чтобы убрать:",
+}
+
+
+@router.callback_query(F.data.startswith("adm_rit_ef_"))
+async def adm_rit_edit_field(callback: CallbackQuery, state: FSMContext):
+    if not await _require_permission(callback, "adm_rituals"):
+        return
+    rest = callback.data[len("adm_rit_ef_"):]
+    event_id_s, field = rest.split("_", 1)
+    if field not in rituals.EVENT_FIELDS or not rituals.get_event(int(event_id_s)):
+        await callback.answer("Не получилось открыть", show_alert=True)
+        return
+    e = rituals.get_event(int(event_id_s))
+    current = e[field] if field != "event_date" else datetime.strptime(e[field], "%Y-%m-%d").strftime("%d.%m.%Y")
+    await state.set_state(EditFieldStates.waiting_value)
+    await state.update_data(target="ritual_event", field=field, target_id=int(event_id_s))
+    await callback.message.answer(
+        f"Сейчас: {current or '(пусто)'}\n\n{RITUAL_FIELD_PROMPTS[field]}\n\n(или /cancel)",
+        parse_mode=None,
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("adm_rit_del_"))
+async def adm_rit_delete_ask(callback: CallbackQuery):
+    if not await _require_permission(callback, "adm_rituals"):
+        return
+    event_id = int(callback.data[len("adm_rit_del_"):])
+    e = rituals.get_event(event_id)
+    if not e:
+        await callback.answer("Уже удалено", show_alert=True)
+        return
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🗑 Да, удалить", callback_data=f"adm_rit_delok_{event_id}")],
+        [InlineKeyboardButton(text="⬅️ Нет, назад", callback_data=f"adm_rit_e_{event_id}")],
+    ])
+    await callback.message.edit_text(f"Удалить дату «{e['title']}» ({e['event_date']})?", reply_markup=kb)
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("adm_rit_delok_"))
+async def adm_rit_delete_do(callback: CallbackQuery):
+    if not await _require_permission(callback, "adm_rituals"):
+        return
+    event_id = int(callback.data[len("adm_rit_delok_"):])
+    e = rituals.get_event(event_id)
+    ym = e["event_date"][:7] if e else None
+    rituals.delete_event(event_id)
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="⬅️ К месяцу", callback_data=f"adm_rit_m_{ym}")] if ym else RITUAL_ADMIN_BACK
+    ])
+    await callback.message.edit_text("Дата удалена ✅", reply_markup=kb)
+    await callback.answer()
+
+
+@router.callback_query(F.data == "adm_rit_add")
+async def adm_rit_add(callback: CallbackQuery):
+    if not await _require_permission(callback, "adm_rituals"):
+        return
+    rows = [[InlineKeyboardButton(text=f"{emoji} {name}", callback_data=f"adm_rit_addk_{kind}")]
+            for kind, (emoji, name) in rituals.KINDS.items()]
+    rows.append(RITUAL_ADMIN_BACK)
+    await callback.message.edit_text("Какого типа новая дата?", reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("adm_rit_addk_"))
+async def adm_rit_add_kind(callback: CallbackQuery, state: FSMContext):
+    if not await _require_permission(callback, "adm_rituals"):
+        return
+    kind = callback.data[len("adm_rit_addk_"):]
+    if kind not in rituals.KINDS:
+        await callback.answer("Неизвестный тип", show_alert=True)
+        return
+    await state.set_state(EditFieldStates.waiting_value)
+    await state.update_data(target="ritual_add", field="date", kind=kind)
+    await callback.message.answer(
+        "Пришлите дату в формате ДД.ММ.ГГГГ (например, 25.10.2026)\n\n(или /cancel)", parse_mode=None
+    )
+    await callback.answer()
+
+
+async def _ritual_edit_value(message: Message, state: FSMContext, data: dict, target: str, field, value: str) -> bool:
+    """Ввод значений для календаря ритуалов из общего обработчика edit_field_value.
+    Возвращает True, если диалог продолжается (состояние сбрасывать нельзя)."""
+    if target == "ritual_text":
+        rituals_text_key = field
+        db.set_setting(rituals_text_key, value)
+        reply = f"Текст «{rituals.TEXT_LABELS.get(field, field)}» обновлён ✅"
+        for ph in ("{имя}", "{месяц}"):
+            word = ph.strip("{}")
+            if ph not in value and f"({word})" in value:
+                reply += f"\n\n⚠️ Вместо {ph} (фигурные скобки) написано ({word}) - оно не заменится."
+        await message.answer(reply, parse_mode=None)
+        return False
+
+    if target == "ritual_event":
+        event_id = data["target_id"]
+        raw = value.strip()
+        if field == "event_date":
+            try:
+                new_date = datetime.strptime(raw, "%d.%m.%Y").date().isoformat()
+            except ValueError:
+                await message.answer("Не получилось распознать дату. Формат: ДД.ММ.ГГГГ. Попробуйте ещё раз:")
+                return True
+            rituals.update_event(event_id, "event_date", new_date)
+        elif field == "title":
+            if not raw or raw == "-":
+                await message.answer("Название не может быть пустым. Пришлите текст:")
+                return True
+            rituals.update_event(event_id, "title", html.escape(raw))
+        elif field == "detail":
+            rituals.update_event(event_id, "detail", "" if raw == "-" else html.escape(raw))
+        else:  # meaning / practice: доверенный HTML (жирный и т.п. сохраняется)
+            rituals.update_event(event_id, field, "" if raw == "-" else value)
+        text, kb = _ritual_event_screen(event_id)
+        await message.answer("Обновлено ✅\n\n" + text, reply_markup=kb)
+        return False
+
+    if target == "ritual_add":
+        raw = value.strip()
+        if field == "date":
+            try:
+                new_date = datetime.strptime(raw, "%d.%m.%Y").date().isoformat()
+            except ValueError:
+                await message.answer("Не получилось распознать дату. Формат: ДД.ММ.ГГГГ. Попробуйте ещё раз:")
+                return True
+            await state.update_data(field="title", event_date=new_date)
+            default_title = rituals.KINDS[data["kind"]][1]
+            await message.answer(
+                f"Теперь название (например, «{default_title}»). Отправьте «-», чтобы взять «{default_title}»:",
+                parse_mode=None,
+            )
+            return True
+        title = rituals.KINDS[data["kind"]][1] if raw in ("", "-") else html.escape(raw)
+        new_id = rituals.add_event(data["event_date"], data["kind"], title)
+        text, kb = _ritual_event_screen(new_id)
+        await message.answer("Дата добавлена ✅ Уточнение, смысл и практику можно дописать ниже.\n\n" + text, reply_markup=kb)
+        return False
+    return False
+
+
+@router.callback_query(F.data == "adm_rit_texts")
+async def adm_rit_texts(callback: CallbackQuery):
+    if not await _require_permission(callback, "adm_rituals"):
+        return
+    rows = [[InlineKeyboardButton(text=f"✏️ {label[:48]}", callback_data=f"adm_rit_t_{key}")]
+            for key, label in rituals.TEXT_LABELS.items()]
+    rows.append(RITUAL_ADMIN_BACK)
+    await callback.message.edit_text(
+        "Какой текст изменить? (В смыслах и практиках можно использовать жирный шрифт.)",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=rows),
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("adm_rit_t_"))
+async def adm_rit_text_edit(callback: CallbackQuery, state: FSMContext):
+    if not await _require_permission(callback, "adm_rituals"):
+        return
+    key = callback.data[len("adm_rit_t_"):]
+    if key not in rituals.TEXT_LABELS:
+        await callback.answer("Не получилось открыть", show_alert=True)
+        return
+    await state.set_state(EditFieldStates.waiting_value)
+    await state.update_data(target="ritual_text", field=key)
+    await callback.message.answer(
+        f"Сейчас:\n\n{db.get_setting(key)}\n\nПришлите новый текст: {rituals.TEXT_LABELS[key]}.\n"
+        "(или /cancel)"
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data == "adm_rit_test")
+async def adm_rit_test(callback: CallbackQuery):
+    if not await _require_permission(callback, "adm_rituals"):
+        return
+    ym = _today().strftime("%Y-%m")
+    text = rituals.month_text(ym, _user_first_name_for_text(db.get_user(callback.from_user.id)))
+    if not text:
+        await callback.answer("На текущий месяц нет дат", show_alert=True)
+        return
+    await _send_long(callback.bot, callback.from_user.id, text, _ritual_kb(ym, db.get_user(callback.from_user.id)))
+    await callback.answer("Пробное сообщение отправлено Вам ✅")
+
+
+@router.callback_query(F.data == "adm_rit_announce")
+async def adm_rit_announce(callback: CallbackQuery):
+    if not await _require_permission(callback, "adm_rituals"):
+        return
+    count = len(rituals.active_members())
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=f"✅ Отправить {count} участникам", callback_data="adm_rit_announce_go")],
+        RITUAL_ADMIN_BACK,
+    ])
+    already = db.get_setting("ritual_announced_at")
+    note = f"\n\n⚠️ Анонс уже отправляли ({already}). Повторно отправлять не нужно." if already else ""
+    await callback.message.edit_text(
+        f"Разовый анонс придёт всем участникам Санктума с действующим доступом ({count} чел.).\n\n"
+        f"Текст (метку {{имя}} бот заменит именем):\n\n{db.get_setting('ritual_announce_text')}{note}",
+        reply_markup=kb,
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data == "adm_rit_announce_go")
+async def adm_rit_announce_go(callback: CallbackQuery):
+    if not await _require_permission(callback, "adm_rituals"):
+        return
+    template = db.get_setting("ritual_announce_text") or ""
+    kb = InlineKeyboardMarkup(inline_keyboard=[[_ritual_calendar_btn("🌙 Открыть календарь ритуалов")]])
+    await callback.answer("Отправляю...")
+    sent = failed = 0
+    for u in rituals.active_members():
+        text = template.replace("{имя}", _user_first_name_for_text(u) or "друг")
+        try:
+            await _send_long(callback.bot, u["user_id"], text, kb)
+            sent += 1
+        except Exception:
+            failed += 1
+            logging.exception("Не удалось отправить анонс календаря пользователю %s", u["user_id"])
+        await asyncio.sleep(0.05)
+    db.set_setting("ritual_announced_at", _today().strftime("%d.%m.%Y"))
+    await callback.message.edit_text(
+        f"Анонс отправлен: {sent} чел." + (f", не дошло: {failed}." if failed else "."),
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[RITUAL_ADMIN_BACK]),
+    )
+
+
 async def main():
     logging.basicConfig(
         level=logging.INFO,
@@ -5725,6 +6303,11 @@ async def main():
     scheduler.add_job(check_webinar_reminders, "interval", minutes=15, args=[bot])
     scheduler.add_job(check_intention_reminders, "cron", day="8,22", hour=11, args=[bot])
     scheduler.add_job(cleanup_feed_posts, "cron", hour=config.SANCTUM_REMINDER_HOUR, minute=45)
+    # календарь ритуалов: 1-го числа в 11:11 по Киеву - календарь на месяц; каждое
+    # утро в 09:00 - напоминания тем, кто включил "Напоминать в день"
+    scheduler.add_job(send_ritual_monthly, "cron", day=1, hour=11, minute=11, args=[bot],
+                      misfire_grace_time=6 * 3600)
+    scheduler.add_job(send_ritual_daily, "cron", hour=9, minute=0, args=[bot], misfire_grace_time=3 * 3600)
     # misfire_grace_time увеличен (по умолчанию у APScheduler он мал) — если
     # окно 03:00 всё-таки пропущено, задача ещё догонит себя сама в течение
     # нескольких часов, а не будет молча пропущена планировщиком совсем
