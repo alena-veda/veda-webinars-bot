@@ -6,7 +6,7 @@
 Drik Panchang (Киев). Экадаши показаны по смарта-традиции (как у Drik), если
 у вайшнавов день другой, это указано в поле "уточнение".
 """
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 
 import database as db
 
@@ -117,6 +117,14 @@ TEXT_LABELS = {
     "ritual_practice_navaratri": "практика на Навратри (на все даты сразу)",
     "ritual_practice_equinox": "практика на равноденствие (на все даты сразу)",
     "ritual_practice_solstice": "практика на солнцестояние (на все даты сразу)",
+}
+
+# одноразовое напоминание тем, кто увидел кнопку календаря (например, на
+# "Первом Касании"), но ни разу её не открыл - её решение 2026-09-22: не
+# рассчитывать только на то, что человек сам зайдёт в "Инфо" или в профиль
+NUDGE_DEFAULTS = {
+    "ritual_nudge_enabled": "1",
+    "ritual_nudge_days": "3",
 }
 
 # ---------- начальная таблица (одобрена Алёной 2026-09-21) ----------
@@ -267,12 +275,20 @@ def init_rituals():
         )
     """)
     for col in ("ritual_optout INTEGER DEFAULT 0", "ritual_reminders INTEGER DEFAULT 0",
-                "ritual_last_month TEXT", "ritual_last_day TEXT"):
+                "ritual_last_month TEXT", "ritual_last_day TEXT",
+                # для одноразового напоминания тем, кто увидел кнопку календаря
+                # (на "Первом Касании" и т.д.), но ни разу её не открыл (см.
+                # mark_ritual_intro_shown/mark_ritual_opened, check_reengagement в main.py)
+                "ritual_intro_shown_at TEXT", "ritual_opened_at TEXT",
+                "ritual_nudge_sent INTEGER DEFAULT 0"):
         try:
             c.execute(f"ALTER TABLE users ADD COLUMN {col}")
         except Exception:
             pass
     for key, value in TEXT_DEFAULTS.items():
+        if not c.execute("SELECT 1 FROM settings WHERE key = ?", (key,)).fetchone():
+            c.execute("INSERT INTO settings (key, value) VALUES (?, ?)", (key, value))
+    for key, value in NUDGE_DEFAULTS.items():
         if not c.execute("SELECT 1 FROM settings WHERE key = ?", (key,)).fetchone():
             c.execute("INSERT INTO settings (key, value) VALUES (?, ?)", (key, value))
     if not c.execute("SELECT 1 FROM settings WHERE key = 'ritual_seeded'").fetchone():
@@ -361,6 +377,53 @@ def set_user_flag(user_id, field, value):
     conn.execute(f"UPDATE users SET {field} = ? WHERE user_id = ?", (value, user_id))
     conn.commit()
     conn.close()
+
+
+def mark_ritual_intro_shown(user_id):
+    """Момент, когда человеку впервые показали кнопку календаря (например, на
+    "Первом Касании") - основа для одноразового напоминания ниже. Не
+    перезаписывается повторно, если вдруг уже был проставлен раньше."""
+    conn = db.get_conn()
+    conn.execute(
+        "UPDATE users SET ritual_intro_shown_at = ? WHERE user_id = ? AND ritual_intro_shown_at IS NULL",
+        (datetime.now().strftime("%Y-%m-%d %H:%M:%S"), user_id),
+    )
+    conn.commit()
+    conn.close()
+
+
+def mark_ritual_opened(user_id):
+    """Человек сам открыл календарь (с любого места) - напоминание про "не
+    открыл ни разу" ему больше не нужно."""
+    conn = db.get_conn()
+    conn.execute(
+        "UPDATE users SET ritual_opened_at = ? WHERE user_id = ?",
+        (datetime.now().strftime("%Y-%m-%d %H:%M:%S"), user_id),
+    )
+    conn.commit()
+    conn.close()
+
+
+def mark_ritual_nudge_sent(user_id):
+    conn = db.get_conn()
+    conn.execute("UPDATE users SET ritual_nudge_sent = 1 WHERE user_id = ?", (user_id,))
+    conn.commit()
+    conn.close()
+
+
+def get_users_due_for_ritual_nudge(days):
+    """Кому показали кнопку календаря давно (>= days дней назад), но человек
+    её ни разу не открыл, и напоминание ему ещё не отправлялось."""
+    cutoff = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d %H:%M:%S")
+    conn = db.get_conn()
+    rows = conn.execute(
+        "SELECT * FROM users WHERE ritual_intro_shown_at IS NOT NULL AND ritual_intro_shown_at <= ? "
+        "AND ritual_opened_at IS NULL AND (ritual_nudge_sent IS NULL OR ritual_nudge_sent = 0) "
+        "AND (blocked IS NULL OR blocked = 0) AND (self_departed IS NULL OR self_departed = 0)",
+        (cutoff,),
+    ).fetchall()
+    conn.close()
+    return rows
 
 
 def active_members():

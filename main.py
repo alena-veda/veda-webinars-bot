@@ -1041,6 +1041,10 @@ async def name_received(message: Message, state: FSMContext):
     kb_rows.append([_ritual_calendar_btn()])
     kb = InlineKeyboardMarkup(inline_keyboard=kb_rows)
     await _send_with_optional_photo(message.bot, message.from_user.id, _personalize(text, user_row), photo, kb)
+    # запоминаем момент показа - если человек ни разу не откроет календарь ни
+    # отсюда, ни из "Инфо", ни из профиля, через ritual_nudge_days придёт
+    # одно (не повторяющееся) напоминание (см. check_reengagement)
+    rituals.mark_ritual_intro_shown(message.from_user.id)
 
 
 @router.message(Command("cancel"))
@@ -1965,8 +1969,11 @@ async def show_profile(message: Message):
         kb_rows.append([meditation_btn])
     if membership and membership["intention_text"]:
         kb_rows.append([InlineKeyboardButton(text="✏️ Изменить намерение", callback_data="edit_intention")])
-    if _ritual_is_member(user_id):
-        kb_rows.append([_ritual_calendar_btn()])
+    # кнопка календаря - для всех, не только для участников Sanctum: профиль -
+    # то место, куда люди возвращаются сами, регулярно (проверить свой
+    # прогресс), в отличие от "Инфо"; не-участник увидит тот же тизер, что и
+    # из "Инфо" (её решение 2026-09-22)
+    kb_rows.append([_ritual_calendar_btn()])
 
     greeting = _personalize(db.get_setting("profile_greeting_text"), user_row)
     text = f"{greeting}\n\n" + "\n\n".join(blocks)
@@ -4521,6 +4528,16 @@ async def edit_field_value(message: Message, state: FSMContext):
     elif target in ("ritual_text", "ritual_event", "ritual_add"):
         if await _ritual_edit_value(message, state, data, target, field, value):
             return
+    elif target == "ritual_nudge_days":
+        try:
+            n = int(value.strip())
+            if n <= 0:
+                raise ValueError
+        except ValueError:
+            await message.answer("Нужно целое число больше нуля (например, 3). Попробуйте ещё раз:")
+            return
+        db.set_setting("ritual_nudge_days", str(n))
+        await message.answer(f"Обновлено ✅ Теперь напоминание уйдёт через {n} дн. после показа кнопки.")
     elif target == "admin_add":
         try:
             new_admin_id = int(value.strip())
@@ -5526,6 +5543,31 @@ async def check_reengagement(bot: Bot):
                     "Не удалось отправить напоминание \"посмотрел, не начал\" пользователю %s", user_row["user_id"]
                 )
             db.mark_sanctum_nudge_sent(user_row["user_id"])
+
+    # одноразовое напоминание про календарь ритуалов - человеку показали
+    # кнопку (например, на "Первом Касании"), но он ни разу её не открыл, ни
+    # оттуда, ни из "Инфо", ни из профиля. Отправляется РОВНО ОДИН РАЗ на
+    # человека, независимо от того, участник он Sanctum или нет; если к этому
+    # моменту он уже стал участником - ему это уже не нужно (у него есть
+    # ежемесячная рассылка и всё остальное), просто отмечаем и не беспокоим.
+    if (db.get_setting("ritual_nudge_enabled") or "1") == "1":
+        nudge_days = int(db.get_setting("ritual_nudge_days") or "3")
+        ritual_teaser_kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="⚜️ Что такое VEDA SANCTUM", callback_data="open_sanctum")],
+            [InlineKeyboardButton(text="Оформить подписку", callback_data="sanctum_apply")],
+        ])
+        for user_row in rituals.get_users_due_for_ritual_nudge(nudge_days):
+            if _ritual_is_member(user_row["user_id"]):
+                rituals.mark_ritual_nudge_sent(user_row["user_id"])
+                continue
+            text = db.get_setting("ritual_teaser_text") or ""
+            try:
+                await bot.send_message(user_row["user_id"], text, reply_markup=ritual_teaser_kb)
+            except Exception:
+                logging.exception(
+                    "Не удалось отправить напоминание о календаре ритуалов пользователю %s", user_row["user_id"]
+                )
+            rituals.mark_ritual_nudge_sent(user_row["user_id"])
     logging.info("[планировщик] check_reengagement: завершено")
 
 
@@ -5783,6 +5825,9 @@ def _ritual_two_months():
 @router.callback_query(F.data == "rit_open")
 async def ritual_open(callback: CallbackQuery):
     user_id = callback.from_user.id
+    # человек сам открыл календарь - откуда угодно; одноразовое напоминание
+    # "ни разу не открыл" ему больше не понадобится (см. check_reengagement)
+    rituals.mark_ritual_opened(user_id)
     if not _ritual_is_member(user_id):
         text = db.get_setting("ritual_teaser_text")
         # "sanctum_apply" - тот же самый обработчик, что и на экране законов
@@ -5937,6 +5982,8 @@ def _ritual_admin_screen():
     upcoming = rituals.events_between(_today().isoformat(), "2100-01-01")
     nxt = rituals.fmt_line(upcoming[0], with_year=True) if upcoming else "нет"
     announced = db.get_setting("ritual_announced_at") or "ещё не отправляли"
+    nudge_on = (db.get_setting("ritual_nudge_enabled") or "1") == "1"
+    nudge_days = db.get_setting("ritual_nudge_days") or "3"
     text = (
         "🌙 <b>Календарь ритуалов</b>\n\n"
         f"Дат в таблице: {total} (период: {span})\n"
@@ -5946,7 +5993,9 @@ def _ritual_admin_screen():
         f"Отказались от ежемесячного календаря: {st['optout']}\n"
         f"Анонс участникам: {announced}\n\n"
         "Ежемесячное сообщение уходит 1-го числа в 11:11 по Киеву, напоминания в день события - в 09:00. "
-        "Даты бот не считает сам: он берёт их из этой таблицы, поэтому любую можно поправить здесь."
+        "Даты бот не считает сам: он берёт их из этой таблицы, поэтому любую можно поправить здесь.\n\n"
+        f"Напоминание тем, кто увидел кнопку календаря, но ни разу её не открыл: "
+        f"{'включено' if nudge_on else 'выключено'}, через {nudge_days} дн. после показа, один раз на человека."
     )
     if months and months[-1]["ym"] < (_today() + timedelta(days=120)).strftime("%Y-%m"):
         text += "\n\n⚠️ Даты заканчиваются меньше чем через 4 месяца, пора вносить новые."
@@ -5956,9 +6005,40 @@ def _ritual_admin_screen():
         [InlineKeyboardButton(text="✏️ Тексты календаря", callback_data="adm_rit_texts")],
         [InlineKeyboardButton(text="📨 Прислать мне пробное сообщение", callback_data="adm_rit_test")],
         [InlineKeyboardButton(text="📣 Анонс календаря участникам", callback_data="adm_rit_announce")],
+        [InlineKeyboardButton(
+            text="🔕 Выключить напоминание «не открыл»" if nudge_on else "🔔 Включить напоминание «не открыл»",
+            callback_data="adm_rit_toggle_nudge",
+        )],
+        [InlineKeyboardButton(text="✏️ Через сколько дней напомнить", callback_data="adm_rit_nudge_days")],
         [InlineKeyboardButton(text="⬅️ Назад", callback_data="adm_back")],
     ])
     return text, kb
+
+
+@router.callback_query(F.data == "adm_rit_toggle_nudge")
+async def adm_rit_toggle_nudge(callback: CallbackQuery):
+    if not await _require_permission(callback, "adm_rituals"):
+        return
+    current = db.get_setting("ritual_nudge_enabled") or "1"
+    db.set_setting("ritual_nudge_enabled", "0" if current == "1" else "1")
+    text, kb = _ritual_admin_screen()
+    await callback.message.edit_text(text, reply_markup=kb)
+    await callback.answer()
+
+
+@router.callback_query(F.data == "adm_rit_nudge_days")
+async def adm_rit_nudge_days_start(callback: CallbackQuery, state: FSMContext):
+    if not await _require_permission(callback, "adm_rituals"):
+        return
+    await state.set_state(EditFieldStates.waiting_value)
+    await state.update_data(target="ritual_nudge_days", field=None)
+    current = db.get_setting("ritual_nudge_days") or "3"
+    await callback.message.answer(
+        f"Сейчас: {current} дн.\n\nПришлите новое число дней после показа кнопки, через которое напомнить "
+        "тем, кто её ни разу не открыл (например, 3):\n\n(или /cancel)",
+        parse_mode=None,
+    )
+    await callback.answer()
 
 
 @router.callback_query(F.data == "adm_rituals")
