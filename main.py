@@ -1030,13 +1030,16 @@ async def name_received(message: Message, state: FSMContext):
     user_row = db.get_user(message.from_user.id)
     text = db.get_setting(ASCENSION_TEXT_KEYS[1])
     photo = db.get_setting("ascension_level1_photo")
-    kb = None
+    kb_rows = []
     if user_row and user_row["referred_by"]:
         # кнопка на Sanctum здесь уместна именно для пришедших по ссылке —
         # закрывает обещание "подробнее далее" из особого приветствия
-        kb = InlineKeyboardMarkup(
-            inline_keyboard=[[InlineKeyboardButton(text="⚜️ Что такое VEDA SANCTUM", callback_data="open_sanctum")]]
-        )
+        kb_rows.append([InlineKeyboardButton(text="⚜️ Что такое VEDA SANCTUM", callback_data="open_sanctum")])
+    # календарь ритуалов - показываем на самом первом экране, который видит
+    # АБСОЛЮТНО каждый новый человек, чтобы не-участники узнавали о нём
+    # активно, а не только натыкались случайно через "Инфо"
+    kb_rows.append([_ritual_calendar_btn()])
+    kb = InlineKeyboardMarkup(inline_keyboard=kb_rows)
     await _send_with_optional_photo(message.bot, message.from_user.id, _personalize(text, user_row), photo, kb)
 
 
