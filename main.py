@@ -5898,8 +5898,9 @@ async def send_ritual_daily(bot: Bot):
         emoji = rituals.KINDS.get(e["kind"], ("•", ""))[0]
         title = e["title"] + (f" ({e['detail']})" if e["detail"] else "")
         block = f"{emoji} <b>{title}</b>\n{rituals.meaning_of(e)}"
-        if (e["practice"] or "").strip():
-            block += f"\n\n{e['practice']}"
+        practice = rituals.practice_of(e)
+        if practice:
+            block += f"\n\n{practice}"
         blocks.append(block)
     kb = InlineKeyboardMarkup(inline_keyboard=[[_ritual_calendar_btn()]])
     sent = 0
@@ -5984,7 +5985,7 @@ async def adm_rit_month(callback: CallbackQuery):
     for e in rituals.events_of_month(ym):
         d = datetime.strptime(e["event_date"], "%Y-%m-%d").strftime("%d.%m")
         emoji = rituals.KINDS.get(e["kind"], ("•", ""))[0]
-        mark = " ✍️" if (e["practice"] or "").strip() else ""
+        mark = " ✍️" if rituals.practice_of(e) else ""
         rows.append([InlineKeyboardButton(text=f"{emoji} {d} {e['title']}{mark}", callback_data=f"adm_rit_e_{e['id']}")])
     rows.append([InlineKeyboardButton(text="⬅️ К месяцам", callback_data="adm_rit_months")])
     await callback.message.edit_text(
@@ -6001,13 +6002,17 @@ def _ritual_event_screen(event_id: int):
         return "Такой даты уже нет.", InlineKeyboardMarkup(inline_keyboard=[RITUAL_ADMIN_BACK])
     d = datetime.strptime(e["event_date"], "%Y-%m-%d").strftime("%d.%m.%Y")
     kind_name = rituals.KINDS.get(e["kind"], ("", e["kind"]))[1]
+    own_practice = (e["practice"] or "").strip()
+    general_practice = (db.get_setting(f"ritual_practice_{e['kind']}") or "").strip()
     text = (
         f"{rituals.KINDS.get(e['kind'], ('•', ''))[0]} <b>{e['title']}</b>\n"
         f"Тип: {kind_name}\nДата: {d}\n"
         f"Уточнение: {e['detail'] or '(нет)'}\n\n"
         f"<b>Смысл:</b> {rituals.meaning_of(e) or '(нет)'}"
         f"{'' if e['meaning'] else ' (общий для типа)'}\n\n"
-        f"<b>Практика (Ваша):</b> {(e['practice'] or '').strip() or '(не заполнена, в сообщениях не показывается)'}"
+        f"<b>Практика для этой даты:</b> {own_practice or '(не задана - используется общая для типа, если есть)'}\n"
+        f"<b>Общая практика для «{kind_name}»:</b> {general_practice or '(не задана)'}\n"
+        f"<b>В сообщениях сейчас покажется:</b> {rituals.practice_of(e) or '(ничего - практика нигде не задана)'}"
     )
     ym = e["event_date"][:7]
     kb = InlineKeyboardMarkup(inline_keyboard=[
@@ -6037,8 +6042,8 @@ RITUAL_FIELD_PROMPTS = {
     "detail": "Пришлите уточнение в скобках (например, «новолуние 09.11 в 09:02» или «у вайшнавов: 19.01»). "
               "Отправьте «-», чтобы убрать:",
     "meaning": "Пришлите короткий смысл именно этого дня. Отправьте «-», чтобы вернуть общий смысл типа:",
-    "practice": "Пришлите практику для этого дня - она будет показываться в ежемесячном сообщении и в "
-                "напоминании. Отправьте «-», чтобы убрать:",
+    "practice": "Пришлите практику именно для ЭТОЙ даты - она заменит собой общую практику для этого типа "
+                "события (если она есть). Отправьте «-», чтобы убрать и снова показывать общую:",
 }
 
 

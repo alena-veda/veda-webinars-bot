@@ -83,6 +83,16 @@ TEXT_DEFAULTS = {
         "Поворот солнца. Самая длинная или самая короткая ночь года, время подвести итоги "
         "и задать направление на следующий цикл."
     ),
+    # практика по умолчанию пуста - показывается в сообщениях, только если Алёна её заполнит;
+    # действует сразу на ВСЕ даты этого типа (не нужно вносить в каждый месяц отдельно),
+    # а для отдельной даты всегда можно задать свою практику поверх общей (см. practice_of)
+    "ritual_practice_amavasya": "",
+    "ritual_practice_purnima": "",
+    "ritual_practice_ekadashi": "",
+    "ritual_practice_shivaratri": "",
+    "ritual_practice_navaratri": "",
+    "ritual_practice_equinox": "",
+    "ritual_practice_solstice": "",
 }
 
 TEXT_LABELS = {
@@ -93,13 +103,20 @@ TEXT_LABELS = {
     "ritual_announce_text": "разовый анонс календаря участникам (метка {имя})",
     "ritual_paid_line": "строка в сообщении «оплата подтверждена» для новых участников",
     "ritual_sanctum_line": "строка про календарь в экране «Войти в глубину»",
-    "ritual_meaning_amavasya": "смысл Амавасьи",
-    "ritual_meaning_purnima": "смысл Пурнимы",
-    "ritual_meaning_ekadashi": "общий смысл Экадаши",
-    "ritual_meaning_shivaratri": "смысл Маха-Шиваратри",
-    "ritual_meaning_navaratri": "общий смысл Навратри",
-    "ritual_meaning_equinox": "смысл равноденствия",
-    "ritual_meaning_solstice": "смысл солнцестояния",
+    "ritual_meaning_amavasya": "смысл Амавасьи (на все даты сразу)",
+    "ritual_meaning_purnima": "смысл Пурнимы (на все даты сразу)",
+    "ritual_meaning_ekadashi": "общий смысл Экадаши (на все даты сразу)",
+    "ritual_meaning_shivaratri": "смысл Маха-Шиваратри (на все даты сразу)",
+    "ritual_meaning_navaratri": "общий смысл Навратри (на все даты сразу)",
+    "ritual_meaning_equinox": "смысл равноденствия (на все даты сразу)",
+    "ritual_meaning_solstice": "смысл солнцестояния (на все даты сразу)",
+    "ritual_practice_amavasya": "практика на Амавасью (на все даты сразу)",
+    "ritual_practice_purnima": "практика на Пурниму (на все даты сразу)",
+    "ritual_practice_ekadashi": "практика на Экадаши (на все даты сразу)",
+    "ritual_practice_shivaratri": "практика на Маха-Шиваратри (на все даты сразу)",
+    "ritual_practice_navaratri": "практика на Навратри (на все даты сразу)",
+    "ritual_practice_equinox": "практика на равноденствие (на все даты сразу)",
+    "ritual_practice_solstice": "практика на солнцестояние (на все даты сразу)",
 }
 
 # ---------- начальная таблица (одобрена Алёной 2026-09-21) ----------
@@ -391,6 +408,13 @@ def meaning_of(ev):
     return ev["meaning"] or db.get_setting(f"ritual_meaning_{ev['kind']}") or ""
 
 
+def practice_of(ev):
+    """Практика для конкретной даты - если для НЕЁ САМОЙ ничего не задано, берёт общую
+    практику для этого типа события (одна и та же для всех Экадаши, всех Амавасий и т.д.) -
+    заполнять на каждый месяц заново не нужно, только если для какой-то даты нужна особая."""
+    return (ev["practice"] or "").strip() or (db.get_setting(f"ritual_practice_{ev['kind']}") or "").strip()
+
+
 def month_text(ym, name=None):
     """Ежемесячное сообщение: вступление, список дат, практики (если есть), подпись.
     None, если на месяц нет ни одной даты."""
@@ -400,9 +424,10 @@ def month_text(ym, name=None):
     intro = (db.get_setting("ritual_monthly_intro") or "").replace("{месяц}", month_title(ym))
     intro = intro.replace("{имя}", name or "друг")
     parts = [intro, "\n".join(fmt_line(e) for e in evs)]
-    practices = [e for e in evs if (e["practice"] or "").strip()]
+    practices = [(e, practice_of(e)) for e in evs]
+    practices = [(e, p) for e, p in practices if p]
     if practices:
-        parts.append("\n\n".join(f"<b>{e['title']}</b>\n{e['practice']}" for e in practices))
+        parts.append("\n\n".join(f"<b>{e['title']}</b>\n{p}" for e, p in practices))
     footer = db.get_setting("ritual_monthly_footer")
     if footer:
         parts.append(footer)
