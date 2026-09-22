@@ -5782,8 +5782,11 @@ async def ritual_open(callback: CallbackQuery):
     user_id = callback.from_user.id
     if not _ritual_is_member(user_id):
         text = db.get_setting("ritual_teaser_text")
+        # "sanctum_apply" - тот же самый обработчик, что и на экране законов
+        # (кнопка "Инициировать шаг") - ведёт сразу к оплате, минуя манифест
         kb = InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="⚜️ Что такое VEDA SANCTUM", callback_data="open_sanctum")],
+            [InlineKeyboardButton(text="Оформить подписку", callback_data="sanctum_apply")],
         ])
         await callback.message.answer(text, reply_markup=kb, protect_content=_protect_for(user_id))
         await callback.answer()
