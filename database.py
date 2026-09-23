@@ -214,6 +214,16 @@ def init_db():
         c.execute("ALTER TABLE webinars ADD COLUMN event_dt TEXT")
     except Exception:
         pass
+    try:
+        # ссылка на запись (YouTube и т.п.) — отдельно от invite_link (та ссылка
+        # для подключения ДО события, теряет смысл после); заполняется отдельно,
+        # обычно не сразу, а когда видео будет готово и выложено. Показывается
+        # в "Прошедшие" тем, кто оплатил именно этот вебинар, и всем действующим
+        # участникам VEDA SANCTUM (её решение 2026-09-23: доступ к записям —
+        # реальная выгода VEDA SANCTUM, а не просто уведомление)
+        c.execute("ALTER TABLE webinars ADD COLUMN video_link TEXT")
+    except Exception:
+        pass
 
     c.execute("""
         CREATE TABLE IF NOT EXISTS sanctum (
@@ -645,6 +655,12 @@ def init_db():
             "{имя}, начинаем через час - «{название}».\n\n"
             "{ссылка}"
             "До встречи! 💎"
+        ),
+        # уходит один раз, когда впервые заполняется ссылка на запись (video_link)
+        # у конкретного вебинара - и тем, кто оплатил именно его, и всем действующим
+        # участникам VEDA SANCTUM (см. adm_wb_video_notify_go, main.py)
+        "webinar_video_ready_text": (
+            "🎬 Готова запись «{тема}»:\n{ссылка}\n\nПриятного просмотра 🙏"
         ),
     }
     for key, value in _webinar_reminder_defaults.items():
@@ -1671,7 +1687,7 @@ def get_webinar(webinar_id):
 
 
 def update_webinar_field(webinar_id, field, value):
-    assert field in ("title", "description", "date_text", "price", "invite_link", "photo")
+    assert field in ("title", "description", "date_text", "price", "invite_link", "photo", "video_link")
     conn = get_conn()
     conn.execute(f"UPDATE webinars SET {field} = ? WHERE id = ?", (value, webinar_id))
     conn.commit()
@@ -1839,6 +1855,19 @@ def get_pending_registrations():
     ).fetchall()
     conn.close()
     return rows
+
+
+def get_confirmed_webinar_registrant_ids(webinar_id):
+    """Кто реально оплатил именно этот вебинар/практику/расстановку - для
+    уведомления о готовой записи (см. adm_wb_video_notify_go, main.py)."""
+    conn = get_conn()
+    rows = conn.execute(
+        "SELECT DISTINCT user_id FROM registrations WHERE product_type = 'webinar' "
+        "AND product_id = ? AND status = 'confirmed'",
+        (webinar_id,),
+    ).fetchall()
+    conn.close()
+    return [r["user_id"] for r in rows]
 
 
 # ---------- sanctum membership (подписка) ----------

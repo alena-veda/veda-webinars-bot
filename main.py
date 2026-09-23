@@ -131,11 +131,12 @@ FIELD_LABELS = {
     "date_text": "дата и время",
     "price": "цена",
     "invite_link": "ссылка",
+    "video_link": "ссылка на запись (YouTube и т.п.)",
     "intro_text": "текст-приглашение (сообщение 1, до кнопки «Войти в глубину»)",
     "laws_text": "текст с законами (сообщение 2, до кнопки «Инициировать шаг»; можно вставить {price} - подставится цена этого человека)",
 }
 
-CODE_TO_FIELD = {"t": "title", "d": "description", "dt": "date_text", "p": "price", "l": "invite_link"}
+CODE_TO_FIELD = {"t": "title", "d": "description", "dt": "date_text", "p": "price", "l": "invite_link", "v": "video_link"}
 
 # тип записи в разделе "Вебинары, Практики, Расстановки" — используется в
 # автоматических напоминаниях, чтобы подставить правильное слово вместо {тип}
@@ -1125,6 +1126,23 @@ async def wb_past_view(callback: CallbackQuery):
     # событии физически невозможно, показывать цену тоже не имеет смысла
     text = f"{w['title']}\n\n{w['description']}\n\n🗓 Прошёл: {w['date_text']}"
     kb_rows = []
+    # запись открыта тем, кто оплатил именно этот вебинар, и всем действующим
+    # участникам VEDA SANCTUM (её решение 2026-09-23 - реальная выгода Sanctum,
+    # _ritual_is_member здесь общая проверка "действующий участник или админ",
+    # используется не только календарём ритуалов)
+    if (w["video_link"] or "").strip():
+        has_video_access = (
+            _ritual_is_member(callback.from_user.id)
+            or callback.from_user.id in db.get_confirmed_webinar_registrant_ids(webinar_id)
+        )
+        if has_video_access:
+            kb_rows.append([InlineKeyboardButton(text="🎬 Смотреть запись", url=w["video_link"])])
+        else:
+            text += (
+                "\n\n🎬 Запись доступна участникам VEDA SANCTUM (это часть того, что даёт Sanctum) "
+                "или тем, кто оплатил именно этот вебинар."
+            )
+            kb_rows.append([InlineKeyboardButton(text="⚜️ Что такое VEDA SANCTUM", callback_data="open_sanctum")])
     qa_count = db.count_public_qa("webinar", webinar_id)
     if qa_count:
         kb_rows.append([InlineKeyboardButton(
@@ -2839,6 +2857,7 @@ async def _render_webinar_card(callback: CallbackQuery, webinar_id: int) -> bool
         f"Настоящая дата/время для напоминаний: {dt_status}\n"
         f"💳 {w['price']}\n"
         f"🔗 {w['invite_link'] or '-'}\n"
+        f"🎬 Запись: {w['video_link'] or '- (пока нет, можно добавить в любой момент, даже после события)'}\n"
         f"🖼 Фото: {photo_status}\n"
         f"❓ Вопросы от людей: {questions_status} (опубликовано ответов: {qa_count})\n\n"
         f"Статус: {status_text}"
@@ -2851,6 +2870,7 @@ async def _render_webinar_card(callback: CallbackQuery, webinar_id: int) -> bool
          InlineKeyboardButton(text="✏️ Цена", callback_data=f"adm_wbf_p_{webinar_id}")],
         [InlineKeyboardButton(text="✏️ Ссылка", callback_data=f"adm_wbf_l_{webinar_id}"),
          InlineKeyboardButton(text="🖼 Фото", callback_data=f"adm_photo_webinar_{webinar_id}")],
+        [InlineKeyboardButton(text="🎬 Ссылка на запись", callback_data=f"adm_wbf_v_{webinar_id}")],
         [InlineKeyboardButton(
             text=("📜 Перевести в прошедшие" if w["is_active"] else "🟢 Вернуть в активные"),
             callback_data=f"adm_wb_toggle_{webinar_id}",
@@ -3101,6 +3121,46 @@ async def adm_wb_type_set(callback: CallbackQuery):
     db.update_webinar_type(int(webinar_id_str), event_type)
     await callback.message.answer(f"Тип обновлён: {EVENT_TYPE_LABELS[event_type]} ✅")
     await callback.answer()
+
+
+@router.callback_query(F.data == "adm_wb_video_notify_skip")
+async def adm_wb_video_notify_skip(callback: CallbackQuery):
+    if not db.is_admin(callback.from_user.id):
+        await callback.answer("Только для администраторов", show_alert=True)
+        return
+    await callback.message.edit_text(
+        callback.message.text + "\n\n(рассылка не отправлена - ссылка всё равно уже сохранена)"
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("adm_wb_video_notify_"))
+async def adm_wb_video_notify_go(callback: CallbackQuery):
+    if not db.is_admin(callback.from_user.id):
+        await callback.answer("Только для администраторов", show_alert=True)
+        return
+    webinar_id = int(callback.data[len("adm_wb_video_notify_"):])
+    w = db.get_webinar(webinar_id)
+    if not w or not (w["video_link"] or "").strip():
+        await callback.answer("Ссылка на запись не найдена", show_alert=True)
+        return
+    template = db.get_setting("webinar_video_ready_text") or ""
+    text = template.replace("{тема}", w["title"] or "").replace("{ссылка}", w["video_link"])
+    recipients = set(db.get_confirmed_webinar_registrant_ids(webinar_id))
+    recipients |= {u["user_id"] for u in rituals.active_members()}
+    await callback.answer("Отправляю...")
+    sent = failed = 0
+    for uid in recipients:
+        try:
+            await callback.bot.send_message(uid, text)
+            sent += 1
+        except Exception:
+            failed += 1
+            logging.exception("Не удалось отправить уведомление о записи вебинара пользователю %s", uid)
+        await asyncio.sleep(0.05)
+    await callback.message.edit_text(
+        callback.message.text + f"\n\n📤 Разослано: {sent} чел." + (f", не дошло: {failed}." if failed else ".")
+    )
 
 
 # ---------- админ-панель: VEDA SANCTUM ----------
@@ -3655,6 +3715,7 @@ WEBINAR_REMINDER_TEXT_LABELS = {
     "webinar_reminder_5d_text": "текст напоминания за 5 дней",
     "webinar_reminder_24h_text": "текст напоминания за 24 часа",
     "webinar_reminder_1h_text": "текст напоминания за 1 час",
+    "webinar_video_ready_text": "текст «готова запись» (уходит, когда впервые заполняете ссылку на запись)",
 }
 
 
@@ -3665,6 +3726,7 @@ async def adm_webinar_reminder_texts(callback: CallbackQuery):
     d5 = db.get_setting("webinar_reminder_5d_text")
     d24 = db.get_setting("webinar_reminder_24h_text")
     d1 = db.get_setting("webinar_reminder_1h_text")
+    dv = db.get_setting("webinar_video_ready_text")
     text = (
         "<b>✉️ Тексты напоминаний о вебинарах</b>\n\n"
         "Отправляются автоматически всем, кто уже подтверждённо оплатил конкретный "
@@ -3674,15 +3736,20 @@ async def adm_webinar_reminder_texts(callback: CallbackQuery):
         f"За 5 дней:\n{html.escape(d5)}\n\n"
         f"За 24 часа:\n{html.escape(d24)}\n\n"
         f"За 1 час:\n{html.escape(d1)}\n\n"
+        f"«Готова запись» (уходит один раз, когда впервые заполняете ссылку на запись у "
+        f"вебинара - тем, кто его оплатил, и всем действующим участникам VEDA SANCTUM):\n"
+        f"{html.escape(dv)}\n\n"
         "Подсказка: <code>{имя}</code>, <code>{тип}</code> (вебинар/практика/расстановка), "
         "<code>{название}</code>, <code>{дата и время}</code> - бот сам подставит нужные "
         "значения. В тексте «за 1 час» ещё доступен <code>{ссылка}</code> - подставится "
-        "ссылка на подключение, если она заполнена у этого вебинара, иначе просто исчезнет."
+        "ссылка на подключение, если она заполнена у этого вебинара, иначе просто исчезнет. "
+        "В тексте «готова запись» доступны <code>{тема}</code> и <code>{ссылка}</code>."
     )
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="✏️ Текст «за 5 дней»", callback_data="adm_wrt_webinar_reminder_5d_text")],
         [InlineKeyboardButton(text="✏️ Текст «за 24 часа»", callback_data="adm_wrt_webinar_reminder_24h_text")],
         [InlineKeyboardButton(text="✏️ Текст «за 1 час»", callback_data="adm_wrt_webinar_reminder_1h_text")],
+        [InlineKeyboardButton(text="✏️ Текст «готова запись»", callback_data="adm_wrt_webinar_video_ready_text")],
         [InlineKeyboardButton(text="⬅️ Назад", callback_data="adm_back")],
     ])
     await callback.message.edit_text(text, reply_markup=kb)
@@ -3698,11 +3765,14 @@ async def adm_webinar_reminder_text_field_start(callback: CallbackQuery, state: 
     await state.set_state(EditFieldStates.waiting_value)
     await state.update_data(target="webinar_reminder_text", field=field)
     current = db.get_setting(field) or ""
-    hint = "<code>{имя}</code>, <code>{тип}</code>, <code>{название}</code>"
-    if field != "webinar_reminder_1h_text":
-        hint += ", <code>{дата и время}</code>"
+    if field == "webinar_video_ready_text":
+        hint = "<code>{тема}</code>, <code>{ссылка}</code>"
     else:
-        hint += ", <code>{ссылка}</code>"
+        hint = "<code>{имя}</code>, <code>{тип}</code>, <code>{название}</code>"
+        if field != "webinar_reminder_1h_text":
+            hint += ", <code>{дата и время}</code>"
+        else:
+            hint += ", <code>{ссылка}</code>"
     await callback.message.answer(
         f"Сейчас:\n{current}\n\nПришлите новый {WEBINAR_REMINDER_TEXT_LABELS[field]}.\n\nМожно вставить {hint}."
     )
@@ -4417,6 +4487,28 @@ async def edit_field_value(message: Message, state: FSMContext):
                 return
             db.update_webinar_datetime(data["target_id"], dt.isoformat(), _format_event_dt(dt))
             await message.answer("Дата и время обновлены ✅")
+        elif field == "video_link":
+            w_before = db.get_webinar(data["target_id"])
+            was_empty = not (w_before and (w_before["video_link"] or "").strip())
+            db.update_webinar_field(data["target_id"], field, value)
+            if was_empty and value.strip():
+                # ссылка появилась впервые - предлагаем разослать, а не молча сохраняем
+                recipients = set(db.get_confirmed_webinar_registrant_ids(data["target_id"]))
+                recipients |= {u["user_id"] for u in rituals.active_members()}
+                await message.answer(
+                    f"Ссылка на запись сохранена ✅\n\n"
+                    f"Прислать её сейчас всем, кто оплатил этот вебинар, и всем действующим "
+                    f"участникам VEDA SANCTUM ({len(recipients)} чел.)?",
+                    reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                        [InlineKeyboardButton(
+                            text=f"📤 Разослать ({len(recipients)})",
+                            callback_data=f"adm_wb_video_notify_{data['target_id']}",
+                        )],
+                        [InlineKeyboardButton(text="Не сейчас", callback_data="adm_wb_video_notify_skip")],
+                    ]),
+                )
+            else:
+                await message.answer("Обновлено ✅")
         else:
             db.update_webinar_field(data["target_id"], field, value)
             await message.answer("Обновлено ✅")
