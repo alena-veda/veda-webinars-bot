@@ -410,6 +410,24 @@ def _extend_sanctum_membership(user_id: int, price=None):
     return new_valid_until, resolved_price
 
 
+def _grant_luminar1_gift(user_id: int):
+    """Дар за ключ Люминар I - 2 полных календарных месяца в VEDA SANCTUM
+    (её решение 2026-09-24). Устроено вызовом _extend_sanctum_membership ДВАЖДЫ
+    подряд - это переиспользует уже проверенную логику "продление добавляется
+    ПОСЛЕ уже оплаченного периода, а не поверх него": если человек в момент
+    получения ключа уже оплатил текущий месяц сам, дар начнётся с 1 числа
+    следующего месяца и закроет собой два месяца целиком; если действующей
+    оплаты нет вовсе (или он никогда не был в Sanctum) - дар стартует сразу и
+    даёт остаток текущего месяца плюс один полный следующий. По истечении
+    дара человек попадает в те же самые автоматические напоминания о продлении
+    (check_sanctum_reminders/check_reengagement), что и любой платящий участник -
+    отдельного механизма для этого не нужно, valid_until общий для всех.
+    upsert_sanctum_membership сам снимает статус "убран" и любое обещание
+    оплатить позже, если они были - дар их полностью закрывает."""
+    _extend_sanctum_membership(user_id)
+    return _extend_sanctum_membership(user_id)
+
+
 # ---------- Путь Восхождения + Орден Люминаров ----------
 
 ASCENSION_LEVEL_NAMES = {
@@ -434,7 +452,7 @@ LUMINAR_RANK_NAMES = {1: "Люминар I", 2: "Люминар II", 3: "Люм�
 # I выдаётся автоматически (см. _credit_luminar_referral), II и III она дарит
 # лично, бот только описывает дар и сообщает ей о новом ранге
 LUMINAR_GIFT_DESCRIPTIONS = {
-    1: "месяц в VEDA SANCTUM в дар",
+    1: "2 месяца в VEDA SANCTUM в дар",
     2: "скидка 30% на личную сессию-терапию или распаковку личности",
     3: "2 часа личной глубинной сессии в дар - распаковка личности или энерготерапия, на выбор",
 }
@@ -662,9 +680,9 @@ async def _credit_luminar_referral(bot: Bot, referred_user_id: int):
     )
     if new_rank == 1:
         old_referrer_level = compute_ascension_level(referrer_id)
-        valid_until, _ = _extend_sanctum_membership(referrer_id)
+        valid_until, _ = _grant_luminar1_gift(referrer_id)
         new_referrer_level = compute_ascension_level(referrer_id)
-        gift_note = f"\n🎁 Автоматически подарен месяц в VEDA SANCTUM (до {valid_until.strftime('%d.%m.%Y')})."
+        gift_note = f"\n🎁 Автоматически подарены 2 месяца в VEDA SANCTUM (до {valid_until.strftime('%d.%m.%Y')})."
         await _handle_ascension_transition(bot, referrer_id, old_referrer_level, new_referrer_level)
 
     try:
@@ -2106,8 +2124,15 @@ async def reg_confirm(callback: CallbackQuery):
     new_level = None
     is_first_sanctum_payment = False
     if reg["product_type"] == "sanctum":
-        prior_membership = db.get_sanctum_membership(reg["user_id"])
-        is_first_sanctum_payment = not (prior_membership and prior_membership["valid_until"])
+        # НЕ по наличию valid_until у membership - оно могло появиться и без
+        # единой реальной оплаты (дар 2 месяца за ключ Люминар I, ручная выдача
+        # доступа администратором): тогда это первая НАСТОЯЩАЯ оплата, и
+        # реферал за неё всё равно должен засчитаться тому, кто её пригласил
+        prior_sanctum_payments = [
+            r for r in db.get_user_registrations(reg["user_id"])
+            if r["product_type"] == "sanctum" and r["status"] == "confirmed" and r["id"] != reg["id"]
+        ]
+        is_first_sanctum_payment = not prior_sanctum_payments
         old_level = compute_ascension_level(reg["user_id"])
         valid_until, locked_price = _extend_sanctum_membership(reg["user_id"], price=reg["price"])
         text += (
@@ -4239,12 +4264,19 @@ async def _render_user_detail(callback: CallbackQuery, user_id: int):
     else:
         status = "✅ активен"
     meditation_status = "✅ куплен" if u["bought_meditation_bot"] else "— пока не отмечен"
+    luminar_count = u["luminar_count"] or 0
+    luminar_rank = _luminar_rank(luminar_count)
+    if luminar_rank:
+        luminar_status = f"{LUMINAR_RANK_NAMES[luminar_rank]} ({luminar_count} приглашённых-оплативших)"
+    else:
+        luminar_status = f"пока нет ({luminar_count} из 5 до Люминара I)"
     text = (
         f"<b>{html.escape(_user_display_name(u))}</b>\n"
         f'ID: <a href="tg://user?id={u["user_id"]}">{u["user_id"]}</a>\n'
         f"С нами с: {joined}\n"
         f"Статус: {status}\n"
-        f"VEDA HEALING FLOW: {meditation_status}"
+        f"VEDA HEALING FLOW: {meditation_status}\n"
+        f"✨ Люминар: {luminar_status}"
     )
     block_label = "✅ Разблокировать" if u["blocked"] else "🚫 Заблокировать"
     meditation_label = "↩️ Снять отметку VEDA HEALING FLOW" if u["bought_meditation_bot"] else "🧘 Отметить покупку VEDA HEALING FLOW"

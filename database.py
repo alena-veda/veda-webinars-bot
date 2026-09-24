@@ -865,7 +865,7 @@ def init_db():
             "Вы стали Люминаром I - тем, кто от полноты приводит своих к Вратам.\n"
             "Это не заслуга ума.\n"
             "Это перелив: Вас коснулось - и через Вас коснулось других.\n"
-            "Ваш дар: месяц в Veda Sanctum.\n"
+            "Ваш дар: 2 месяца в Veda Sanctum.\n"
             "И этот свет открывает Вам ключ на ступень Исследователь Глубины."
         ),
         "luminar_2_text": (
@@ -885,6 +885,26 @@ def init_db():
         c.execute("SELECT value FROM settings WHERE key = ?", (key,))
         if not c.fetchone():
             c.execute("INSERT INTO settings (key, value) VALUES (?, ?)", (key, value))
+
+    # дар за Люминар I увеличен с 1 до 2 месяцев (её решение 2026-09-24) - если
+    # текст ещё не был правлен вручную (значение точно как в старом дефолте),
+    # обновляем его на новую формулировку; если она уже сама переписала текст,
+    # не трогаем
+    _old_luminar_1_text = (
+        "{имя}, Ваш свет притянул других к Истинному Знанию.\n"
+        "Вы стали Люминаром I - тем, кто от полноты приводит своих к Вратам.\n"
+        "Это не заслуга ума.\n"
+        "Это перелив: Вас коснулось - и через Вас коснулось других.\n"
+        "Ваш дар: месяц в Veda Sanctum.\n"
+        "И этот свет открывает Вам ключ на ступень Исследователь Глубины."
+    )
+    c.execute("SELECT value FROM settings WHERE key = 'luminar_1_text'")
+    _row = c.fetchone()
+    if _row and _row[0] == _old_luminar_1_text:
+        c.execute(
+            "UPDATE settings SET value = ? WHERE key = 'luminar_1_text'",
+            (_ascension_defaults["luminar_1_text"],),
+        )
 
     conn.commit()
     conn.close()
