@@ -1904,6 +1904,34 @@ def get_pending_registrations():
     return rows
 
 
+def count_registrations_by_status(status):
+    conn = get_conn()
+    n = conn.execute("SELECT COUNT(*) c FROM registrations WHERE status = ?", (status,)).fetchone()["c"]
+    conn.close()
+    return n
+
+
+def count_stalled_registrations(cutoff_datetime_str):
+    """Сколько заявок ждут чек дольше настроенного срока - в отличие от
+    get_stalled_registrations (main.py, автонапоминание) считает ВСЕ такие
+    заявки, а не только те, кому ещё не отправляли напоминание - для честного
+    снимка "сколько сейчас реально висит", а не "кому ещё нужно написать"."""
+    conn = get_conn()
+    n = conn.execute(
+        "SELECT COUNT(*) c FROM registrations WHERE status = 'awaiting_receipt' AND created_at <= ?",
+        (cutoff_datetime_str,),
+    ).fetchone()["c"]
+    conn.close()
+    return n
+
+
+def count_unreviewed_faq_suggestions():
+    conn = get_conn()
+    n = conn.execute("SELECT COUNT(*) c FROM faq_suggestions WHERE reviewed = 0").fetchone()["c"]
+    conn.close()
+    return n
+
+
 def get_confirmed_webinar_registrant_ids(webinar_id):
     """Кто реально оплатил именно этот вебинар/практику/расстановку - для
     уведомления о готовой записи (см. adm_wb_video_notify_go, main.py)."""

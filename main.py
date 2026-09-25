@@ -3,6 +3,7 @@ import calendar
 import html
 import json
 import logging
+import os
 import random
 import re
 import urllib.parse
@@ -754,6 +755,7 @@ def _divider(label: str) -> list:
 ADMIN_PERMISSION_SECTIONS = [
     ("📊 Обзор", [
         ("adm_analytics", "📊 Аналитика"),
+        ("adm_health", "🩺 Состояние сейчас"),
     ]),
     ("🗓 Вебинары, практики, расстановки", [
         ("adm_webinars", "🗓 Вебинары"),
@@ -2655,6 +2657,120 @@ async def adm_analytics_webinars(callback: CallbackQuery):
         lines.append(f"• {title or '(без названия)'} - ✅{confirmed} ⏳{pending} ❌{declined}")
 
     await callback.message.answer("\n".join(lines))
+    await callback.answer()
+
+
+# ---------- админ-панель: состояние сейчас (2026-09-25) ----------
+# Одна кнопка, один экран - краткая сводка того, что обычно узнавалось только
+# через полный ручной аудит: ошибки за сутки, зависшие оплаты, что ждёт её
+# решения, возраст резервной копии, и отдельно - что из контента ещё не
+# заполнено (это не "ошибки", а просто напоминания, поэтому в своём блоке).
+# Чтение bot.log каждый раз - тихо и безопасно: файл только читается, каждая
+# строка разбирается по отдельности, ошибка на одной строке не прерывает счёт.
+
+def _count_recent_log_errors(hours: int = 24) -> int | None:
+    """None, если файла bot.log не нашлось (не должно случаться в реальной
+    работе - только если бота запустили из другой папки)."""
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "bot.log")
+    if not os.path.isfile(path):
+        return None
+    cutoff = datetime.now(TZ) - timedelta(hours=hours)
+    count = 0
+    try:
+        with open(path, encoding="utf-8", errors="ignore") as f:
+            for line in f:
+                if " ERROR " not in line:
+                    continue
+                try:
+                    ts = datetime.strptime(line[:19], "%Y-%m-%d %H:%M:%S").replace(tzinfo=TZ)
+                except ValueError:
+                    continue
+                if ts >= cutoff:
+                    count += 1
+    except OSError:
+        return None
+    return count
+
+
+def _health_screen_text() -> str:
+    now = datetime.now(TZ)
+    problems = []
+    ok_lines = []
+
+    error_count = _count_recent_log_errors(24)
+    if error_count is None:
+        problems.append("❔ Файл bot.log не найден рядом с ботом - проверить, откуда он запущен.")
+    elif error_count == 0:
+        ok_lines.append("Ошибок за последние сутки не было")
+    else:
+        problems.append(f"⚠️ Ошибок за последние сутки: {error_count}. Подробности - в файле bot.log.")
+
+    stall_hours = int(db.get_setting("stall_hours") or "24")
+    stall_cutoff = (now - timedelta(hours=stall_hours)).strftime("%Y-%m-%d %H:%M:%S")
+    n_stalled = db.count_stalled_registrations(stall_cutoff)
+    if n_stalled:
+        problems.append(f"⏳ Зависших оплат (ждут чек дольше {stall_hours} ч.): {n_stalled}. Раздел «⏳ Зависшие заявки».")
+    else:
+        ok_lines.append("Зависших оплат нет")
+
+    n_pending = db.count_registrations_by_status("awaiting_confirmation")
+    if n_pending:
+        problems.append(f"🧾 Заявок ждут Вашего решения (чек уже прислали): {n_pending}. Раздел «🧾 Заявки на подтверждение».")
+    else:
+        ok_lines.append("Заявок, ждущих подтверждения, нет")
+
+    backup_age = db.get_latest_backup_age_hours()
+    if backup_age is None:
+        problems.append("💾 Резервных копий базы ещё не было ни одной.")
+    elif backup_age > 30:
+        problems.append(f"💾 Последняя резервная копия - {backup_age / 24:.1f} дн. назад, это дольше обычного.")
+    else:
+        ok_lines.append("Резервная копия свежая")
+
+    n_faq = db.count_unreviewed_faq_suggestions()
+    if n_faq:
+        problems.append(f"💡 Непросмотренных вопросов для FAQ: {n_faq}. Раздел «💡 Вопросы от людей для FAQ».")
+
+    months = rituals.months_with_counts()
+    if months and months[-1]["ym"] < (_today() + timedelta(days=120)).strftime("%Y-%m"):
+        problems.append("🌙 Даты календаря ритуалов заканчиваются меньше чем через 4 месяца - пора досчитать новые.")
+
+    # содержимое, которое она ещё не заполнила - не "ошибка", а напоминание
+    todo = []
+    if not db.get_setting("meditation_bot_link"):
+        todo.append("ссылка на бот VEDA HEALING FLOW (пока пусто - из-за этого молчит и рассылка «пришёл и пропал»)")
+    for n in (1, 2, 3):
+        if not db.get_setting(f"luminar_{n}_photo"):
+            todo.append(f"фото для поздравления Люминар {['I','II','III'][n-1]}")
+    if not db.get_setting("ascension_level2_voice"):
+        todo.append("голосовое сообщение на переход ступени «Искра» (видеокружок уже загружен)")
+
+    text = f"🩺 <b>Состояние сейчас</b>\n<i>проверено {now.strftime('%d.%m.%Y %H:%M')}</i>\n\n"
+    if not problems:
+        text += "✅ Всё в порядке, ничего срочного не найдено.\n\n"
+    else:
+        text += "\n".join(problems) + "\n\n"
+    if ok_lines:
+        text += "В порядке: " + ", ".join(ok_lines) + ".\n\n"
+    if todo:
+        text += "📝 Не забыть заполнить:\n" + "\n".join(f"• {t}" for t in todo)
+    return text.strip()
+
+
+@router.callback_query(F.data == "adm_health")
+async def adm_health(callback: CallbackQuery):
+    if not await _require_permission(callback, "adm_health"):
+        return
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🔄 Проверить заново", callback_data="adm_health")],
+        [InlineKeyboardButton(text="⬅️ Назад", callback_data="adm_back")],
+    ])
+    try:
+        await callback.message.edit_text(_health_screen_text(), reply_markup=kb)
+    except TelegramBadRequest:
+        # "message is not modified" - если нажали "Проверить заново", а за это
+        # время ничего не изменилось; не ошибка, просто нечего перерисовывать
+        pass
     await callback.answer()
 
 
