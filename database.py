@@ -436,6 +436,16 @@ def init_db():
         c.execute("ALTER TABLE sanctum_membership ADD COLUMN stage_reset_done INTEGER DEFAULT 0")
     except Exception:
         pass
+    try:
+        # пожизненный бесплатный доступ (дар Люминара III, её решение 2026-09-25) -
+        # только пометка ДЛЯ ОТОБРАЖЕНИЯ ("пожизненно" вместо даты); само "никогда
+        # не истекает" обеспечивает valid_until в далёком будущем (см.
+        # grant_lifetime_sanctum) - так все существующие проверки "активен ли
+        # сейчас" (напоминания, календарь ритуалов, доступ к записям вебинаров)
+        # срабатывают верно сами, без правки в каждом месте
+        c.execute("ALTER TABLE sanctum_membership ADD COLUMN lifetime_free INTEGER DEFAULT 0")
+    except Exception:
+        pass
 
     for admin_id in INITIAL_ADMIN_IDS:
         c.execute(
@@ -877,6 +887,7 @@ def init_db():
         "luminar_3_text": (
             "{имя}, Вы стали Люминаром III - светилом, подсвечивающим путь в круг близких по духу.\n"
             "Тридцать Душ обрели это место через Вас.\n"
+            "Отныне Ваш доступ в VEDA SANCTUM - пожизненный и бесплатный.\n"
             "Ваш дар: 2 часа личной глубинной сессии со мной - распаковка личности или энерготерапия, "
             "на Ваш выбор."
         ),
@@ -904,6 +915,22 @@ def init_db():
         c.execute(
             "UPDATE settings SET value = ? WHERE key = 'luminar_1_text'",
             (_ascension_defaults["luminar_1_text"],),
+        )
+
+    # дар за Люминар III дополнен пожизненным бесплатным доступом в VEDA SANCTUM
+    # (её решение 2026-09-25), тот же принцип - трогаем только нетронутый текст
+    _old_luminar_3_text = (
+        "{имя}, Вы стали Люминаром III - светилом, подсвечивающим путь в круг близких по духу.\n"
+        "Тридцать Душ обрели это место через Вас.\n"
+        "Ваш дар: 2 часа личной глубинной сессии со мной - распаковка личности или энерготерапия, "
+        "на Ваш выбор."
+    )
+    c.execute("SELECT value FROM settings WHERE key = 'luminar_3_text'")
+    _row = c.fetchone()
+    if _row and _row[0] == _old_luminar_3_text:
+        c.execute(
+            "UPDATE settings SET value = ? WHERE key = 'luminar_3_text'",
+            (_ascension_defaults["luminar_3_text"],),
         )
 
     conn.commit()
@@ -2086,8 +2113,38 @@ def upsert_sanctum_membership(user_id, valid_until, price):
         "ON CONFLICT(user_id) DO UPDATE SET valid_until = excluded.valid_until, price = excluded.price, "
         "status = 'active', promise_date = NULL, promise_reminder_sent_for = NULL, "
         "accumulated_days = excluded.accumulated_days, winback_sent = 0, "
-        "removed_at = NULL, lastchance_sent = 0, stage_reset_done = 0",
+        "removed_at = NULL, lastchance_sent = 0, stage_reset_done = 0, lifetime_free = 0",
         (user_id, valid_until, price, total_days),
+    )
+    conn.commit()
+    conn.close()
+
+
+LIFETIME_VALID_UNTIL = "9999-12-31"
+
+
+def grant_lifetime_sanctum(user_id, price):
+    """Пожизненный бесплатный доступ (дар Люминара III) - valid_until в далёком
+    будущем, lifetime_free=1 только для отображения ("пожизненно" вместо даты).
+    accumulated_days НАРОЧНО не пересчитывается через обычную арифметику
+    "добавленных дней" (как в upsert_sanctum_membership) - иначе разница между
+    сегодня и 9999 годом дала бы астрономическое число дней; просто оставляем
+    как было. Снимает статус "убран" и любое обещание оплатить позже, как и
+    обычная оплата."""
+    conn = get_conn()
+    existing = conn.execute(
+        "SELECT accumulated_days FROM sanctum_membership WHERE user_id = ?", (user_id,)
+    ).fetchone()
+    accumulated = existing["accumulated_days"] if existing and existing["accumulated_days"] else 0
+    conn.execute(
+        "INSERT INTO sanctum_membership "
+        "(user_id, valid_until, price, status, promise_date, promise_reminder_sent_for, accumulated_days, "
+        "winback_sent, removed_at, lastchance_sent, stage_reset_done, lifetime_free) "
+        "VALUES (?, ?, ?, 'active', NULL, NULL, ?, 0, NULL, 0, 0, 1) "
+        "ON CONFLICT(user_id) DO UPDATE SET valid_until = excluded.valid_until, price = excluded.price, "
+        "status = 'active', promise_date = NULL, promise_reminder_sent_for = NULL, winback_sent = 0, "
+        "removed_at = NULL, lastchance_sent = 0, stage_reset_done = 0, lifetime_free = 1",
+        (user_id, LIFETIME_VALID_UNTIL, price, accumulated),
     )
     conn.commit()
     conn.close()
@@ -2163,7 +2220,7 @@ def get_memberships_expiring_on(target_date, reminder_column):
 def get_all_sanctum_memberships():
     conn = get_conn()
     rows = conn.execute("""
-        SELECT sm.user_id, sm.valid_until, sm.price, sm.status, sm.promise_date,
+        SELECT sm.user_id, sm.valid_until, sm.price, sm.status, sm.promise_date, sm.lifetime_free,
                u.username, u.first_name, u.preferred_name
         FROM sanctum_membership sm
         LEFT JOIN users u ON u.user_id = sm.user_id

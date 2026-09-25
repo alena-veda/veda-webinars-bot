@@ -410,6 +410,14 @@ def _extend_sanctum_membership(user_id: int, price=None):
     return new_valid_until, resolved_price
 
 
+def _grant_luminar3_lifetime(user_id: int):
+    """Пожизненный бесплатный доступ в VEDA SANCTUM - дар Люминара III (её
+    решение 2026-09-25): тот, кто привёл 30 человек в платный Sanctum, сам
+    в нём больше никогда не платит. Цена сохраняется просто для порядка в
+    карточке (реального значения не имеет - платить больше не придётся)."""
+    db.grant_lifetime_sanctum(user_id, _price_for_user(user_id))
+
+
 def _grant_luminar1_gift(user_id: int):
     """Дар за ключ Люминар I - 2 полных календарных месяца в VEDA SANCTUM
     (её решение 2026-09-24). Устроено вызовом _extend_sanctum_membership ДВАЖДЫ
@@ -684,6 +692,12 @@ async def _credit_luminar_referral(bot: Bot, referred_user_id: int):
         new_referrer_level = compute_ascension_level(referrer_id)
         gift_note = f"\n🎁 Автоматически подарены 2 месяца в VEDA SANCTUM (до {valid_until.strftime('%d.%m.%Y')})."
         await _handle_ascension_transition(bot, referrer_id, old_referrer_level, new_referrer_level)
+    elif new_rank == 3:
+        old_referrer_level = compute_ascension_level(referrer_id)
+        _grant_luminar3_lifetime(referrer_id)
+        new_referrer_level = compute_ascension_level(referrer_id)
+        gift_note = "\n🏆 Автоматически предоставлен пожизненный бесплатный доступ в VEDA SANCTUM."
+        await _handle_ascension_transition(bot, referrer_id, old_referrer_level, new_referrer_level)
 
     try:
         await _send_with_optional_photo(
@@ -698,8 +712,12 @@ async def _credit_luminar_referral(bot: Bot, referred_user_id: int):
 
     referrer_name = _user_display_name(referrer)
     today_str = _today().strftime("%d.%m.%Y")
-    if new_rank != 1:
+    if new_rank == 2:
         gift_note = f"\n🎁 Дар (выдаётся Вами лично): {gift_desc}."
+    elif new_rank == 3:
+        # к автоматическому пожизненному доступу (см. выше) добавляется ещё и
+        # личный дар - сессия, которую Вы даёте лично, как и раньше
+        gift_note += f"\n🎁 Дар (выдаётся Вами лично): {gift_desc}."
     for admin_id in db.get_all_admin_ids():
         try:
             await bot.send_message(
@@ -1293,6 +1311,14 @@ async def show_sanctum(message: Message, user_id: int = None):
     if membership and membership["status"] != "removed" and membership["valid_until"]:
         valid_until = _parse_date(membership["valid_until"])
         price = membership["price"] or s["price"]
+        if membership["lifetime_free"]:
+            text = (
+                f"⚜️ {html.escape(SANCTUM_FULL_NAME)}\n\n"
+                "🏆 Ваш доступ пожизненный и бесплатный - дар за ключ Люминар III."
+            )
+            kb = InlineKeyboardMarkup(inline_keyboard=[[_ritual_calendar_btn()]])
+            await message.answer(text, reply_markup=kb, protect_content=_protect_for(user_id))
+            return
         if valid_until and valid_until >= today:
             text = (
                 f"⚜️ {html.escape(SANCTUM_FULL_NAME)}\n\n"
@@ -1397,6 +1423,10 @@ async def sanctum_apply(callback: CallbackQuery, state: FSMContext):
     s = db.get_sanctum()
     if s["price"] == db.PLACEHOLDER_PRICE or not _payment_ready("payment_purpose_sanctum"):
         await callback.answer(NOT_READY_MESSAGE, show_alert=True)
+        return
+    membership = db.get_sanctum_membership(callback.from_user.id)
+    if membership and membership["lifetime_free"] and membership["status"] != "removed":
+        await callback.answer("У Вас уже пожизненный доступ в VEDA SANCTUM 🏆 Платить не нужно.", show_alert=True)
         return
     # реально начал оформление - "поведенческое" напоминание (см. show_sanctum,
     # check_reengagement) больше не нужно
@@ -1899,7 +1929,9 @@ async def show_profile(message: Message):
     sanctum_button = None
     if membership and membership["status"] != "removed" and membership["valid_until"]:
         valid_until = _parse_date(membership["valid_until"])
-        if valid_until and valid_until >= today:
+        if membership["lifetime_free"]:
+            sanctum_lines.append("🏆 Доступ пожизненный и бесплатный - дар за ключ Люминар III.")
+        elif valid_until and valid_until >= today:
             sanctum_lines.append(
                 db.get_setting("profile_sanctum_active_text").replace("{дата}", valid_until.strftime('%d.%m.%Y'))
             )
@@ -3265,15 +3297,20 @@ def _grant_pick_kb() -> InlineKeyboardMarkup:
     rows = []
     for m in db.get_all_sanctum_memberships()[:GRANT_LIST_LIMIT]:
         valid_until = _parse_date(m["valid_until"]) if m["valid_until"] else None
-        if m["status"] == "removed":
+        if m["lifetime_free"]:
+            mark = "🏆"
+        elif m["status"] == "removed":
             mark = "🚫"
         elif valid_until and valid_until >= today:
             mark = "✅"
         else:
             mark = "❌"
-        date_text = valid_until.strftime("%d.%m.%Y") if valid_until else "-"
-        price = _strip_html_tags(m["price"] or "-")
-        label = f"{mark} {_member_short_name(m)} - до {date_text} - {price}"
+        if m["lifetime_free"]:
+            label = f"{mark} {_member_short_name(m)} - пожизненно, бесплатно"
+        else:
+            date_text = valid_until.strftime("%d.%m.%Y") if valid_until else "-"
+            price = _strip_html_tags(m["price"] or "-")
+            label = f"{mark} {_member_short_name(m)} - до {date_text} - {price}"
         rows.append([InlineKeyboardButton(text=label[:64], callback_data=f"adm_grant_pick_{m['user_id']}")])
     rows.append([InlineKeyboardButton(text="➕ Другой подписчик бота (ещё не в Sanctum)", callback_data="adm_grant_others")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
@@ -3298,7 +3335,12 @@ async def _grant_after_target(answer, state: FSMContext, target_user_id: int):
     u = db.get_user(target_user_id)
     name = html.escape(_user_display_name(u)) if u else "(карточки в боте нет)"
     membership = db.get_sanctum_membership(target_user_id)
-    if membership and membership["valid_until"]:
+    if membership and membership["lifetime_free"] and membership["status"] != "removed":
+        now_line = (
+            "Сейчас: 🏆 пожизненный бесплатный доступ (дар Люминара III). "
+            "Если продолжите, дальше указанная дата ЗАМЕНИТ пожизненный доступ на обычный, ограниченный по времени."
+        )
+    elif membership and membership["valid_until"]:
         vu = _parse_date(membership["valid_until"])
         status = " (убран)" if membership["status"] == "removed" else ""
         now_line = (
@@ -3531,7 +3573,9 @@ async def adm_sanctum_list(callback: CallbackQuery):
         valid_until = _parse_date(m["valid_until"])
         name = f"@{m['username']}" if m["username"] else (m["preferred_name"] or m["first_name"] or str(m["user_id"]))
 
-        if m["status"] == "removed":
+        if m["lifetime_free"]:
+            status = "🏆 пожизненно"
+        elif m["status"] == "removed":
             status = "🚫 удалён"
         elif valid_until is None:
             status = "❔"
@@ -3542,19 +3586,25 @@ async def adm_sanctum_list(callback: CallbackQuery):
         else:
             status = "✅ активна"
 
-        date_text = valid_until.strftime("%d.%m.%Y") if valid_until else "-"
-        price = m["price"] or "-"
-        # сравниваем без учёта форматирования (жирный/ссылки) — иначе одна и та же
-        # цена, оформленная по-разному, ошибочно считалась бы "разной"
-        rate_tag = "🆕 новая цена" if _strip_html_tags(price) == _strip_html_tags(current_base_price) else "🕰 старая цена"
         full = db.get_sanctum_membership(m["user_id"])
         acc_days = (full["accumulated_days"] or 0) if full else 0
         level = compute_ascension_level(m["user_id"])
         id_link = f'<a href="tg://user?id={m["user_id"]}">ID {m["user_id"]}</a>'
-        line = (
-            f"{status} - {html.escape(name)} ({id_link}) - до {date_text} - {price} ({rate_tag})\n"
-            f"   🪜 {ASCENSION_LEVEL_NAMES[level]} - в поле по оплатам: {acc_days} дн. (~{acc_days / 30:.1f} мес.)"
-        )
+        if m["lifetime_free"]:
+            line = (
+                f"{status} - {html.escape(name)} ({id_link}) - дар Люминара III, платить больше не нужно\n"
+                f"   🪜 {ASCENSION_LEVEL_NAMES[level]} - в поле по оплатам: {acc_days} дн. (~{acc_days / 30:.1f} мес.)"
+            )
+        else:
+            date_text = valid_until.strftime("%d.%m.%Y") if valid_until else "-"
+            price = m["price"] or "-"
+            # сравниваем без учёта форматирования (жирный/ссылки) — иначе одна и та же
+            # цена, оформленная по-разному, ошибочно считалась бы "разной"
+            rate_tag = "🆕 новая цена" if _strip_html_tags(price) == _strip_html_tags(current_base_price) else "🕰 старая цена"
+            line = (
+                f"{status} - {html.escape(name)} ({id_link}) - до {date_text} - {price} ({rate_tag})\n"
+                f"   🪜 {ASCENSION_LEVEL_NAMES[level]} - в поле по оплатам: {acc_days} дн. (~{acc_days / 30:.1f} мес.)"
+            )
         if m["promise_date"]:
             promise = _parse_date(m["promise_date"])
             if promise:
