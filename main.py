@@ -1599,6 +1599,7 @@ def _info_menu_kb() -> InlineKeyboardMarkup:
 @router.callback_query(F.data == "open_bot_guide")
 async def open_bot_guide_cb(callback: CallbackQuery):
     kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="💌 Личное обращение", callback_data="contact_admin")],
         [InlineKeyboardButton(text="⬅️ Назад", callback_data="info_menu_back")],
     ])
     await callback.message.answer(db.get_setting("bot_guide_text"), reply_markup=kb, protect_content=_protect_for(callback.from_user.id))
