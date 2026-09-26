@@ -792,6 +792,7 @@ ADMIN_PERMISSION_SECTIONS = [
         ("adm_faq_suggestion_invite", "✏️ Текст приглашения «Предложить вопрос»"),
         ("adm_faq_suggestion_confirm", "✏️ Текст подтверждения (вопрос принят)"),
         ("adm_rules", "📜 Текст «Правила пространства»"),
+        ("adm_bot_guide", "🧭 Текст «Как пользоваться ботом»"),
     ]),
     ("💳 Оплаты", [
         ("adm_payment", "💳 Реквизиты оплаты"),
@@ -1414,7 +1415,7 @@ async def sanctum_laws(callback: CallbackQuery):
     if ritual_line:
         text += "\n\n" + ritual_line
     kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="Инициировать шаг", callback_data="sanctum_apply")]
+        [InlineKeyboardButton(text="Инициировать шаг оплаты", callback_data="sanctum_apply")]
     ])
     await callback.message.answer(text, reply_markup=kb, protect_content=_protect_for(callback.from_user.id))
     await callback.answer()
@@ -1590,8 +1591,18 @@ def _info_menu_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="❓ Частые вопросы", callback_data="open_faq")],
         [InlineKeyboardButton(text="📜 Правила пространства", callback_data="open_rules")],
+        [InlineKeyboardButton(text="🧭 Как пользоваться", callback_data="open_bot_guide")],
         [_ritual_calendar_btn()],
     ])
+
+
+@router.callback_query(F.data == "open_bot_guide")
+async def open_bot_guide_cb(callback: CallbackQuery):
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="⬅️ Назад", callback_data="info_menu_back")],
+    ])
+    await callback.message.answer(db.get_setting("bot_guide_text"), reply_markup=kb, protect_content=_protect_for(callback.from_user.id))
+    await callback.answer()
 
 
 @router.message(F.text == BTN_INFO)
@@ -3795,6 +3806,7 @@ HTML_TRUSTED_FIELDS = {
     ("faq_suggestion_invite", "faq_suggestion_invite_text"),
     ("faq_suggestion_confirm", "faq_suggestion_confirm_text"),
     ("rules", "rules_text"),
+    ("bot_guide", "bot_guide_text"),
     ("welcome_text", "welcome_text"),
     ("meditation_text", "meditation_text"),
     ("meditation_coming_soon", "meditation_coming_soon_text"),
@@ -4218,6 +4230,20 @@ async def adm_rules(callback: CallbackQuery, state: FSMContext):
     await callback.message.answer(
         f"Текущий текст «Правила пространства»:\n\n{current}\n\n"
         f"Пришлите новый текст (он показывается по кнопке «{html.escape(BTN_INFO)}» → «📜 Правила пространства»):"
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data == "adm_bot_guide")
+async def adm_bot_guide(callback: CallbackQuery, state: FSMContext):
+    if not await _require_permission(callback, "adm_bot_guide"):
+        return
+    current = db.get_setting("bot_guide_text")
+    await state.set_state(EditFieldStates.waiting_value)
+    await state.update_data(target="bot_guide", field="bot_guide_text")
+    await callback.message.answer(
+        f"Текущий текст «Как пользоваться ботом»:\n\n{current}\n\n"
+        f"Пришлите новый текст (он показывается по кнопке «{html.escape(BTN_INFO)}» → «🧭 Как пользоваться»):"
     )
     await callback.answer()
 
@@ -4786,6 +4812,9 @@ async def edit_field_value(message: Message, state: FSMContext):
     elif target == "rules":
         db.set_setting("rules_text", value)
         await message.answer("Текст «Правила пространства» обновлён ✅")
+    elif target == "bot_guide":
+        db.set_setting("bot_guide_text", value)
+        await message.answer("Текст «Как пользоваться ботом» обновлён ✅")
     elif target == "welcome_text":
         db.set_setting("welcome_text", value)
         await message.answer("Текст приветствия обновлён ✅")
