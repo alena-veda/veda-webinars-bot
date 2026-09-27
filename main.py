@@ -782,6 +782,7 @@ ADMIN_PERMISSION_SECTIONS = [
         ("adm_intentions_list", "🕯 Намерения участников"),
         ("adm_profile_texts", "✨ Тексты «Мой профиль»"),
         ("adm_personal_link", "💌 Ссылка на личный чат с Alena Veda"),
+        ("adm_luminar_manual", "✨ Установить ранг Люминара вручную"),
     ]),
     ("🧘 VEDA HEALING FLOW", [
         ("adm_meditation_text", "✏️ Текст VEDA HEALING FLOW"),
@@ -884,6 +885,11 @@ class GrantAccessStates(StatesGroup):
     waiting_valid_until = State()
     waiting_price = State()
     waiting_accumulated_months = State()
+
+
+class LuminarManualStates(StatesGroup):
+    waiting_user_id = State()
+    waiting_rank = State()
 
 
 class PromiseStates(StatesGroup):
@@ -4387,6 +4393,137 @@ async def adm_personal_link(callback: CallbackQuery, state: FSMContext):
         "напоминании о намерении, во всех трёх поздравлениях с рангом Люминара и в сообщениях с реквизитами "
         "оплаты (вебинары и VEDA SANCTUM)."
     )
+    await callback.answer()
+
+
+# ---------- админ-панель: ранг Люминара вручную (2026-09-27) ----------
+# Нужна для случаев, когда рефералы прошли не через бота, или чтобы вручную
+# скорректировать/вернуть ранг (например, после того как "🚫 Убрать" снял
+# пожизненный доступ Люминара III - автоматически он больше не вернётся,
+# порог 30 уже был однажды пройден и повторно не сработает).
+
+LUMINAR_MANUAL_THRESHOLDS = {0: 0, 1: 5, 2: 10, 3: 30}
+
+
+@router.callback_query(F.data == "adm_luminar_manual")
+async def adm_luminar_manual_start(callback: CallbackQuery, state: FSMContext):
+    if not await _require_permission(callback, "adm_luminar_manual"):
+        return
+    await state.set_state(LuminarManualStates.waiting_user_id)
+    await callback.message.answer(
+        "Кому вручную установить ранг Люминара? Пришлите Telegram ID человека "
+        "(или /cancel для отмены).\n\n"
+        "Человек должен был хотя бы раз нажать /start в этом боте - иначе бот не сможет ему написать."
+    )
+    await callback.answer()
+
+
+@router.message(LuminarManualStates.waiting_user_id)
+async def adm_luminar_manual_user(message: Message, state: FSMContext):
+    text = await _require_text(message)
+    if text is None:
+        return
+    try:
+        target_user_id = int(text.strip())
+    except ValueError:
+        await message.answer("ID должен быть числом. Попробуйте ещё раз или отправьте /cancel:")
+        return
+    u = db.get_user(target_user_id)
+    if not u:
+        await message.answer(
+            "Такого человека нет среди подписчиков бота - он должен хотя бы раз нажать /start. "
+            "Попробуйте другой ID или отправьте /cancel:"
+        )
+        return
+    current_count = u["luminar_count"] or 0
+    current_rank = _luminar_rank(current_count)
+    m = db.get_sanctum_membership(target_user_id)
+    lifetime_note = " (сейчас с пожизненным доступом в Sanctum)" if m and m["lifetime_free"] else ""
+    await state.set_state(LuminarManualStates.waiting_rank)
+    await state.update_data(target_user_id=target_user_id)
+    rank_label = LUMINAR_RANK_NAMES.get(current_rank, "нет ранга")
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="Нет ранга", callback_data="adm_lm_rank_0")],
+        [InlineKeyboardButton(text="Люминар I (5)", callback_data="adm_lm_rank_1")],
+        [InlineKeyboardButton(text="Люминар II (10)", callback_data="adm_lm_rank_2")],
+        [InlineKeyboardButton(text="Люминар III (30, пожизненный доступ)", callback_data="adm_lm_rank_3")],
+        [InlineKeyboardButton(text="Отмена", callback_data="adm_lm_cancel")],
+    ])
+    await message.answer(
+        f"{html.escape(_user_display_name(u))} (ID {target_user_id}).\n"
+        f"Сейчас: {rank_label}, приглашённых-оплативших: {current_count}{lifetime_note}.\n\n"
+        "Какой ранг установить? Если ранг повышается - придёт то же поздравление и тот же дар, "
+        "что и при настоящем достижении (для I - 2 месяца в Sanctum, для III - пожизненный доступ). "
+        "Если ранг понижается - счётчик уменьшится, но уже выданный доступ в Sanctum сам по себе НЕ "
+        "отзывается - для этого используйте «🚫 Убрать» в списке подписчиков отдельно.",
+        reply_markup=kb,
+    )
+
+
+@router.callback_query(LuminarManualStates.waiting_rank, F.data == "adm_lm_cancel")
+async def adm_luminar_manual_cancel(callback: CallbackQuery, state: FSMContext):
+    await state.clear()
+    await callback.message.edit_text("Отменено.")
+    await callback.answer()
+
+
+@router.callback_query(LuminarManualStates.waiting_rank, F.data.startswith("adm_lm_rank_"))
+async def adm_luminar_manual_apply(callback: CallbackQuery, state: FSMContext):
+    if not await _require_permission(callback, "adm_luminar_manual"):
+        return
+    new_rank = int(callback.data[len("adm_lm_rank_"):])
+    data = await state.get_data()
+    target_user_id = data["target_user_id"]
+    await state.clear()
+
+    u = db.get_user(target_user_id)
+    if not u:
+        await callback.message.edit_text("Этого человека больше нет среди подписчиков бота.")
+        await callback.answer()
+        return
+
+    old_rank = _luminar_rank(u["luminar_count"] or 0)
+    old_level = compute_ascension_level(target_user_id)
+    db.set_luminar_count(target_user_id, LUMINAR_MANUAL_THRESHOLDS[new_rank])
+    new_level = compute_ascension_level(target_user_id)
+
+    result_lines = [f"Готово ✅ Ранг установлен: {LUMINAR_RANK_NAMES.get(new_rank, 'нет ранга')}."]
+
+    if new_rank > old_rank:
+        # тот же дар, что и при настоящем достижении - для согласованности с
+        # автоматической системой (см. _credit_luminar_referral)
+        gift_note = ""
+        if new_rank == 1:
+            valid_until, _ = _grant_luminar1_gift(target_user_id)
+            gift_note = f" Подарены 2 месяца в Sanctum (до {valid_until.strftime('%d.%m.%Y')})."
+        elif new_rank == 3:
+            _grant_luminar3_lifetime(target_user_id)
+            gift_note = " Предоставлен пожизненный доступ в Sanctum."
+        result_lines.append("Дар выдан:" + gift_note if gift_note else "Дар для этого ранга Вы дарите лично.")
+
+        template = db.get_setting(f"luminar_{new_rank}_text") or ""
+        if template:
+            user_message = (
+                template.replace("{имя}", (u["preferred_name"] or u["first_name"] or "друг"))
+                .replace("{число}", str(LUMINAR_MANUAL_THRESHOLDS[new_rank]))
+                .replace("{дар}", LUMINAR_GIFT_DESCRIPTIONS.get(new_rank, ""))
+            )
+            try:
+                await _send_with_optional_photo(
+                    callback.bot, target_user_id, user_message, db.get_setting(f"luminar_{new_rank}_photo"),
+                    reply_markup=_personal_link_kb("💌 Написать Алёне лично"),
+                )
+                result_lines.append("Человек уведомлён.")
+            except Exception:
+                logging.exception("Не удалось уведомить о ранге Люминара (ручная установка) пользователя %s", target_user_id)
+                result_lines.append("⚠️ Уведомить не получилось (возможно, ещё не запускал бота).")
+    elif new_rank < old_rank:
+        result_lines.append("Ранг понижен, счётчик обновлён. Доступ в Sanctum (если был) не тронут.")
+    else:
+        result_lines.append("Ранг не изменился.")
+
+    await _handle_ascension_transition(callback.bot, target_user_id, old_level, new_level)
+    await callback.message.edit_text("\n".join(result_lines))
     await callback.answer()
 
 

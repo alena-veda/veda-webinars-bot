@@ -2133,6 +2133,16 @@ def set_accumulated_days(user_id, days: int):
     conn.close()
 
 
+def set_luminar_count(user_id, count):
+    """Установить число приглашённых-оплативших напрямую - для ручной
+    корректировки ранга Люминара администратором (см. adm_luminar_manual,
+    main.py), а не через реальные рефералы. count не может быть отрицательным."""
+    conn = get_conn()
+    conn.execute("UPDATE users SET luminar_count = ? WHERE user_id = ?", (max(0, count), user_id))
+    conn.commit()
+    conn.close()
+
+
 def increment_luminar_count(user_id):
     """Засчитывает ещё одного реально вошедшего и оплатившего человека
     пригласившему — возвращает новый счётчик (нужен вызывающей стороне,
