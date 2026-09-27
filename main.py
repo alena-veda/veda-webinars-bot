@@ -730,8 +730,9 @@ async def _credit_luminar_referral(bot: Bot, referred_user_id: int):
         try:
             await bot.send_message(
                 admin_id,
-                f"✨ {html.escape(referrer_name)} (ID {referrer_id}) получил(а) {LUMINAR_RANK_NAMES[new_rank]} "
-                f"{today_str} - всего приглашённых-оплативших: {new_count}.{gift_note}",
+                f'✨ {html.escape(referrer_name)} (<a href="tg://user?id={referrer_id}">ID {referrer_id}</a>) '
+                f"получил(а) {LUMINAR_RANK_NAMES[new_rank]} {today_str} - всего приглашённых-оплативших: "
+                f"{new_count}.{gift_note}",
             )
         except Exception:
             logging.exception("Не удалось уведомить админа %s о новом ранге Люминара", admin_id)
@@ -2115,13 +2116,13 @@ async def _process_receipt_photo(message: Message, reg_id) -> bool:
     db.attach_receipt(reg_id, file_id)
     await message.answer("Спасибо! Чек отправлен на проверку, я сообщу Вам о результате 🙏")
 
-    user = message.from_user
-    username_part = f"@{user.username}" if user.username else "(без username)"
-    context_note = _sanctum_payment_context(user.id) if reg["product_type"] == "sanctum" else ""
+    user_row = db.get_user(message.from_user.id)
+    name_part = html.escape(_user_display_name(user_row)) if user_row else "(имя неизвестно)"
+    id_link = f'<a href="tg://user?id={message.from_user.id}">ID {message.from_user.id}</a>'
+    context_note = _sanctum_payment_context(message.from_user.id) if reg["product_type"] == "sanctum" else ""
     caption = (
         "🆕 Новая оплата на проверку\n\n"
-        f"Пользователь: {username_part}\n"
-        f"ID: {user.id}\n"
+        f"Пользователь: {name_part} ({id_link})\n"
         f"Продукт: {reg['product_title']}\n"
         f"Сумма: {reg['price']}"
         f"{context_note}"
@@ -2820,6 +2821,24 @@ async def adm_health(callback: CallbackQuery):
     await callback.answer()
 
 
+async def send_weekly_health_digest(bot: Bot):
+    """Еженедельная сводка "Состояние сейчас" - её решение 2026-09-27: не
+    ждать, пока сама зайдёт и проверит, а получать это раз в неделю сама
+    собой, каждое воскресенье вечером. Уходит всем администраторам, у кого
+    есть право adm_health (сейчас - только владельцу, если не выдано ещё
+    кому-то)."""
+    logging.info("[планировщик] send_weekly_health_digest: старт")
+    text = "🗓 <b>Еженедельная сводка</b>\n\n" + _health_screen_text()
+    for admin_id in db.get_all_admin_ids():
+        if not db.has_permission(admin_id, "adm_health"):
+            continue
+        try:
+            await bot.send_message(admin_id, text)
+        except Exception:
+            logging.exception("Не удалось отправить еженедельную сводку администратору %s", admin_id)
+    logging.info("[планировщик] send_weekly_health_digest: завершено")
+
+
 # ---------- админ-панель: автовозврат "потерянных" людей ----------
 
 REENGAGE_FIELD_LABELS = {
@@ -3514,7 +3533,7 @@ async def _grant_after_target(answer, state: FSMContext, target_user_id: int):
         )
     else:
         now_line = "Сейчас в VEDA SANCTUM его нет."
-    await answer(f"Выбран: <b>{name}</b> (ID {target_user_id}).\n{now_line}")
+    await answer(f'Выбран: <b>{name}</b> (<a href="tg://user?id={target_user_id}">ID {target_user_id}</a>).\n{now_line}')
     await _grant_ask_valid_until(answer, state)
 
 
@@ -4474,7 +4493,7 @@ async def adm_luminar_manual_user(message: Message, state: FSMContext):
         [InlineKeyboardButton(text="Отмена", callback_data="adm_lm_cancel")],
     ])
     await message.answer(
-        f"{html.escape(_user_display_name(u))} (ID {target_user_id}).\n"
+        f'{html.escape(_user_display_name(u))} (<a href="tg://user?id={target_user_id}">ID {target_user_id}</a>).\n'
         f"Сейчас: {rank_label}, приглашённых-оплативших: {current_count}{lifetime_note}.\n\n"
         "Можно ввести точное число приглашённых (если знаете его - например, привёл не через ссылку бота), "
         "или сразу выбрать готовый ранг кнопкой ниже. Если ранг повышается - придёт то же поздравление и "
@@ -4919,7 +4938,8 @@ async def admin_perm_done(callback: CallbackQuery, state: FSMContext):
     else:
         labels = "(ничего не выбрано - у этого администратора пока нет доступа ни к одному разделу)"
     known = db.get_user(target_admin_id)
-    who = f"{html.escape(_user_display_name(known))} (ID {target_admin_id})" if known else f"ID {target_admin_id}"
+    id_link = f'<a href="tg://user?id={target_admin_id}">ID {target_admin_id}</a>'
+    who = f"{html.escape(_user_display_name(known))} ({id_link})" if known else id_link
     await callback.message.edit_text(f"Права обновлены ✅\n\nДоступно администратору {who}:\n{labels}{notified}")
     await callback.answer()
 
@@ -5130,7 +5150,8 @@ async def edit_field_value(message: Message, state: FSMContext):
             target_admin_id=new_admin_id, selected_perms=list(DEFAULT_HELPER_PERMISSIONS), new_admin=True
         )
         known = db.get_user(new_admin_id)
-        who = f"{html.escape(_user_display_name(known))} (ID {new_admin_id})" if known else f"ID {new_admin_id}"
+        id_link = f'<a href="tg://user?id={new_admin_id}">ID {new_admin_id}</a>'
+        who = f"{html.escape(_user_display_name(known))} ({id_link})" if known else id_link
         warn = "" if known else (
             "\n\n⚠️ Этот человек ещё ни разу не запускал бота - написать ему я пока не смогу. "
             "Пусть нажмёт /start, и тогда откроет панель командой /admin."
@@ -5394,10 +5415,13 @@ async def adm_pending(callback: CallbackQuery):
         return
     await callback.answer()
     for reg in pending:
+        user_row = db.get_user(reg["user_id"])
+        name_part = html.escape(_user_display_name(user_row)) if user_row else "(имя неизвестно)"
+        id_link = f'<a href="tg://user?id={reg["user_id"]}">ID {reg["user_id"]}</a>'
         context_note = _sanctum_payment_context(reg["user_id"]) if reg["product_type"] == "sanctum" else ""
         caption = (
             "🆕 Заявка на проверку\n\n"
-            f"ID пользователя: {reg['user_id']}\n"
+            f"Пользователь: {name_part} ({id_link})\n"
             f"Продукт: {reg['product_title']}\n"
             f"Сумма: {reg['price']}"
             f"{context_note}"
@@ -6983,6 +7007,12 @@ async def main():
     scheduler.add_job(send_ritual_monthly, "cron", day=1, hour=11, minute=11, args=[bot],
                       misfire_grace_time=6 * 3600)
     scheduler.add_job(send_ritual_daily, "cron", hour=9, minute=0, args=[bot], misfire_grace_time=3 * 3600)
+    # еженедельная сводка "Состояние сейчас" - каждое воскресенье в 19:00 по Киеву
+    # (её решение 2026-09-27); время легко поменять здесь же
+    scheduler.add_job(
+        send_weekly_health_digest, "cron", day_of_week="sun", hour=19, minute=0, args=[bot],
+        misfire_grace_time=6 * 3600,
+    )
     # misfire_grace_time увеличен (по умолчанию у APScheduler он мал) — если
     # окно 03:00 всё-таки пропущено, задача ещё догонит себя сама в течение
     # нескольких часов, а не будет молча пропущена планировщиком совсем
