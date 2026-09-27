@@ -1623,7 +1623,10 @@ async def open_bot_guide_cb(callback: CallbackQuery):
         [InlineKeyboardButton(text="💌 Личное обращение", callback_data="contact_admin")],
         [InlineKeyboardButton(text="⬅️ Назад", callback_data="info_menu_back")],
     ])
-    await callback.message.answer(db.get_setting("bot_guide_text"), reply_markup=kb, protect_content=_protect_for(callback.from_user.id))
+    await _send_long(
+        callback.bot, callback.message.chat.id, db.get_setting("bot_guide_text"), reply_markup=kb,
+        protect_content=_protect_for(callback.from_user.id),
+    )
     await callback.answer()
 
 
@@ -1646,7 +1649,13 @@ async def open_faq_cb(callback: CallbackQuery):
         [InlineKeyboardButton(text="📜 Правила пространства", callback_data="open_rules")],
         [InlineKeyboardButton(text="⬅️ Назад", callback_data="info_menu_back")],
     ])
-    await callback.message.answer(text, reply_markup=kb, protect_content=_protect_for(callback.from_user.id))
+    # текст растёт со временем (Вы сами добавляете вопросы) - если когда-нибудь
+    # превысит предел Telegram на одно сообщение (4096 символов), бот сам
+    # аккуратно разобьёт его на несколько сообщений подряд, а не упадёт с ошибкой
+    await _send_long(
+        callback.bot, callback.message.chat.id, text, reply_markup=kb,
+        protect_content=_protect_for(callback.from_user.id),
+    )
     await callback.answer()
 
 
@@ -1674,7 +1683,10 @@ async def open_rules_cb(callback: CallbackQuery):
         [InlineKeyboardButton(text="❓ Частые вопросы", callback_data="open_faq")],
         [InlineKeyboardButton(text="⬅️ Назад", callback_data="info_menu_back")],
     ])
-    await callback.message.answer(text, reply_markup=kb, protect_content=_protect_for(callback.from_user.id))
+    await _send_long(
+        callback.bot, callback.message.chat.id, text, reply_markup=kb,
+        protect_content=_protect_for(callback.from_user.id),
+    )
     await callback.answer()
 
 
@@ -6401,11 +6413,25 @@ def _ritual_kb(ym: str, user_row) -> InlineKeyboardMarkup:
 
 
 def _split_message(text: str, limit: int = 3900) -> list:
-    """Делит длинный текст по абзацам, чтобы уложиться в лимит Telegram."""
+    """Делит длинный текст по абзацам, чтобы уложиться в лимит Telegram. Если
+    внутри есть один сплошной "абзац" (без пустых строк-разделителей) сам по
+    себе длиннее лимита - режет его дополнительно жёстко по длине, иначе
+    такой кусок ушёл бы одним слишком длинным сообщением и не отправился бы."""
     if len(text) <= limit:
         return [text]
     chunks, current = [], ""
     for block in text.split("\n\n"):
+        while len(block) > limit:
+            # сам абзац длиннее лимита - режем его по месту переноса строки
+            # рядом с границей, а если и переносов нет - жёстко по символам
+            cut = block.rfind("\n", 0, limit)
+            if cut <= 0:
+                cut = limit
+            piece, block = block[:cut], block[cut:].lstrip("\n")
+            if current:
+                chunks.append(current)
+                current = ""
+            chunks.append(piece)
         if current and len(current) + len(block) + 2 > limit:
             chunks.append(current)
             current = block
@@ -6416,11 +6442,13 @@ def _split_message(text: str, limit: int = 3900) -> list:
     return chunks
 
 
-async def _send_long(bot, chat_id: int, text: str, reply_markup=None):
+async def _send_long(bot, chat_id: int, text: str, reply_markup=None, protect_content=False):
     chunks = _split_message(text)
     for i, chunk in enumerate(chunks):
         last = i == len(chunks) - 1
-        await bot.send_message(chat_id, chunk, reply_markup=reply_markup if last else None)
+        await bot.send_message(
+            chat_id, chunk, reply_markup=reply_markup if last else None, protect_content=protect_content
+        )
 
 
 def _ritual_two_months():
