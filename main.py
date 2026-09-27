@@ -399,6 +399,13 @@ def _extend_sanctum_membership(user_id: int, price=None):
     today = _today()
     membership = db.get_sanctum_membership(user_id)
     current_valid_until = _parse_date(membership["valid_until"]) if membership else None
+    # защита от переполнения даты: пожизненный доступ (дар Люминара III) хранит
+    # valid_until в 9999 году; set_sanctum_status уже сбрасывает её при ручном
+    # удалении, но это - второй, независимый барьер на случай, если где-то ещё
+    # останется такая же "зависшая" дата - без него date + timedelta(1 день)
+    # от 31.12.9999 упало бы с OverflowError
+    if current_valid_until and current_valid_until.year >= 9000:
+        current_valid_until = None
 
     if current_valid_until and current_valid_until >= today:
         base = current_valid_until + timedelta(days=1)

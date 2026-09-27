@@ -2203,11 +2203,29 @@ def set_sanctum_status(user_id, status):
     if status == "removed":
         # запоминаем дату ухода и заново открываем цепочку "последний шанс" /
         # "обнуление" именно для этого случая
-        cur = conn.execute(
-            "UPDATE sanctum_membership SET status = 'removed', removed_at = ?, lastchance_sent = 0, "
-            "stage_reset_done = 0 WHERE user_id = ?",
-            (datetime.now().strftime("%Y-%m-%d"), user_id),
-        )
+        today_str = datetime.now().strftime("%Y-%m-%d")
+        # реальный найденный случай (2026-09-27): у пожизненного доступа (дар
+        # Люминара III) valid_until стоит в 9999 году "просто чтобы был активен
+        # всегда" - при ручном удалении эта дата иначе так и осталась бы висеть
+        # в прошлом статусе "убран", и при следующей оплате арифметика дат
+        # (текущая дата + 1 день от 9999-12-31) вызывала бы переполнение и
+        # падение бота. Поэтому убрать вручную - значит убрать по-настоящему:
+        # valid_until сбрасывается на сегодня, lifetime_free снимается
+        row = conn.execute(
+            "SELECT lifetime_free FROM sanctum_membership WHERE user_id = ?", (user_id,)
+        ).fetchone()
+        if row and row["lifetime_free"]:
+            cur = conn.execute(
+                "UPDATE sanctum_membership SET status = 'removed', removed_at = ?, lastchance_sent = 0, "
+                "stage_reset_done = 0, valid_until = ?, lifetime_free = 0 WHERE user_id = ?",
+                (today_str, today_str, user_id),
+            )
+        else:
+            cur = conn.execute(
+                "UPDATE sanctum_membership SET status = 'removed', removed_at = ?, lastchance_sent = 0, "
+                "stage_reset_done = 0 WHERE user_id = ?",
+                (today_str, user_id),
+            )
     else:
         cur = conn.execute(
             "UPDATE sanctum_membership SET status = 'active', removed_at = NULL WHERE user_id = ?", (user_id,)
