@@ -3177,7 +3177,10 @@ async def _wb_add_ask_type(answer, state: FSMContext):
 
 async def _wb_add_ask_description(answer, state: FSMContext):
     await state.set_state(WebinarAddStates.description)
-    await answer("Введите описание:", reply_markup=_wb_add_back_kb("event_type"))
+    await answer(
+        "Введите описание (то, что люди увидят в карточке, когда откроют это в разделе «Вебинары»):",
+        reply_markup=_wb_add_back_kb("event_type"),
+    )
 
 
 async def _wb_add_ask_date(answer, state: FSMContext):
