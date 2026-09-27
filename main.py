@@ -890,6 +890,7 @@ class GrantAccessStates(StatesGroup):
 class LuminarManualStates(StatesGroup):
     waiting_user_id = State()
     waiting_rank = State()
+    waiting_exact_count = State()
 
 
 class PromiseStates(StatesGroup):
@@ -1104,6 +1105,12 @@ async def name_received(message: Message, state: FSMContext):
 async def cmd_cancel(message: Message, state: FSMContext):
     await state.clear()
     await message.answer("Отменено.", reply_markup=main_menu_kb(message.from_user.id))
+    # администратора после отмены возвращаем сразу в панель, а не просто в
+    # обычное меню - именно туда он и хотел вернуться, отменяя правку
+    # (её решение 2026-09-27: "/cancel" должен реально возвращать на главный
+    # список кнопок админки, а не заставлять открывать его заново)
+    if db.is_admin(message.from_user.id):
+        await message.answer("Админ-панель:", reply_markup=admin_panel_kb(message.from_user.id))
 
 
 @router.message(IntentionStates.waiting_text)
@@ -2518,7 +2525,12 @@ async def admin_panel_entry(message: Message):
     # может ещё не быть (см. _notify_new_admin), а команда работает сразу
     if not db.is_admin(message.from_user.id):
         return
-    await message.answer("Админ-панель:", reply_markup=admin_panel_kb(message.from_user.id))
+    await message.answer(
+        "Админ-панель:\n\n"
+        "Если начнёте что-то менять (текст, фото, число) и передумаете на полпути - просто отправьте "
+        "команду /cancel, она отменит ввод и вернёт сюда же, в этот список.",
+        reply_markup=admin_panel_kb(message.from_user.id),
+    )
 
 
 async def _notify_new_admin(bot: Bot, admin_id: int) -> bool:
@@ -3778,9 +3790,17 @@ async def adm_sanctum_list(callback: CallbackQuery):
         for m in active_members:
             name = f"@{m['username']}" if m["username"] else (m["preferred_name"] or m["first_name"] or str(m["user_id"]))
             rows.append([InlineKeyboardButton(text=f"🚫 Убрать {name}", callback_data=f"adm_sanctum_kick_{m['user_id']}")])
+        rows.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="adm_back")])
         await callback.message.answer(
             "Нажмите, чтобы убрать человека из VEDA SANCTUM:",
             reply_markup=InlineKeyboardMarkup(inline_keyboard=rows),
+        )
+    else:
+        await callback.message.answer(
+            "Действующих подписчиков сейчас нет.",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="⬅️ Назад", callback_data="adm_back")]
+            ]),
         )
     await callback.answer()
 
@@ -4443,6 +4463,7 @@ async def adm_luminar_manual_user(message: Message, state: FSMContext):
     await state.update_data(target_user_id=target_user_id)
     rank_label = LUMINAR_RANK_NAMES.get(current_rank, "нет ранга")
     kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="✏️ Ввести точное число приглашённых", callback_data="adm_lm_exact")],
         [InlineKeyboardButton(text="Нет ранга", callback_data="adm_lm_rank_0")],
         [InlineKeyboardButton(text="Люминар I (5)", callback_data="adm_lm_rank_1")],
         [InlineKeyboardButton(text="Люминар II (10)", callback_data="adm_lm_rank_2")],
@@ -4452,8 +4473,9 @@ async def adm_luminar_manual_user(message: Message, state: FSMContext):
     await message.answer(
         f"{html.escape(_user_display_name(u))} (ID {target_user_id}).\n"
         f"Сейчас: {rank_label}, приглашённых-оплативших: {current_count}{lifetime_note}.\n\n"
-        "Какой ранг установить? Если ранг повышается - придёт то же поздравление и тот же дар, "
-        "что и при настоящем достижении (для I - 2 месяца в Sanctum, для III - пожизненный доступ). "
+        "Можно ввести точное число приглашённых (если знаете его - например, привёл не через ссылку бота), "
+        "или сразу выбрать готовый ранг кнопкой ниже. Если ранг повышается - придёт то же поздравление и "
+        "тот же дар, что и при настоящем достижении (для I - 2 месяца в Sanctum, для III - пожизненный доступ). "
         "Если ранг понижается - счётчик уменьшится, но уже выданный доступ в Sanctum сам по себе НЕ "
         "отзывается - для этого используйте «🚫 Убрать» в списке подписчиков отдельно.",
         reply_markup=kb,
@@ -4467,27 +4489,33 @@ async def adm_luminar_manual_cancel(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
 
 
-@router.callback_query(LuminarManualStates.waiting_rank, F.data.startswith("adm_lm_rank_"))
-async def adm_luminar_manual_apply(callback: CallbackQuery, state: FSMContext):
-    if not await _require_permission(callback, "adm_luminar_manual"):
-        return
-    new_rank = int(callback.data[len("adm_lm_rank_"):])
-    data = await state.get_data()
-    target_user_id = data["target_user_id"]
-    await state.clear()
+@router.callback_query(LuminarManualStates.waiting_rank, F.data == "adm_lm_exact")
+async def adm_luminar_manual_exact_start(callback: CallbackQuery, state: FSMContext):
+    await state.set_state(LuminarManualStates.waiting_exact_count)
+    await callback.message.answer(
+        "Пришлите точное число приглашённых-оплативших для этого человека (например, 7) "
+        "(или /cancel для отмены).\n\n"
+        "Ранг определится по этому числу автоматически: 5+ - Люминар I, 10+ - Люминар II, 30+ - Люминар III."
+    )
+    await callback.answer()
 
+
+async def _apply_luminar_manual(bot: Bot, target_user_id: int, new_count: int) -> list:
+    """Общая логика для обоих способов ручной установки - через кнопку ранга
+    и через точное число: считает старый/новый ранг, выдаёт тот же дар и то
+    же поздравление, что и настоящая автоматическая система, пересчитывает
+    ступень Пути. Возвращает готовые строки итогового сообщения."""
     u = db.get_user(target_user_id)
     if not u:
-        await callback.message.edit_text("Этого человека больше нет среди подписчиков бота.")
-        await callback.answer()
-        return
+        return ["Этого человека больше нет среди подписчиков бота."]
 
     old_rank = _luminar_rank(u["luminar_count"] or 0)
     old_level = compute_ascension_level(target_user_id)
-    db.set_luminar_count(target_user_id, LUMINAR_MANUAL_THRESHOLDS[new_rank])
+    db.set_luminar_count(target_user_id, new_count)
+    new_rank = _luminar_rank(new_count)
     new_level = compute_ascension_level(target_user_id)
 
-    result_lines = [f"Готово ✅ Ранг установлен: {LUMINAR_RANK_NAMES.get(new_rank, 'нет ранга')}."]
+    result_lines = [f"Готово ✅ Счётчик: {new_count}. Ранг: {LUMINAR_RANK_NAMES.get(new_rank, 'нет ранга')}."]
 
     if new_rank > old_rank:
         # тот же дар, что и при настоящем достижении - для согласованности с
@@ -4505,12 +4533,12 @@ async def adm_luminar_manual_apply(callback: CallbackQuery, state: FSMContext):
         if template:
             user_message = (
                 template.replace("{имя}", (u["preferred_name"] or u["first_name"] or "друг"))
-                .replace("{число}", str(LUMINAR_MANUAL_THRESHOLDS[new_rank]))
+                .replace("{число}", str(new_count))
                 .replace("{дар}", LUMINAR_GIFT_DESCRIPTIONS.get(new_rank, ""))
             )
             try:
                 await _send_with_optional_photo(
-                    callback.bot, target_user_id, user_message, db.get_setting(f"luminar_{new_rank}_photo"),
+                    bot, target_user_id, user_message, db.get_setting(f"luminar_{new_rank}_photo"),
                     reply_markup=_personal_link_kb("💌 Написать Алёне лично"),
                 )
                 result_lines.append("Человек уведомлён.")
@@ -4520,9 +4548,40 @@ async def adm_luminar_manual_apply(callback: CallbackQuery, state: FSMContext):
     elif new_rank < old_rank:
         result_lines.append("Ранг понижен, счётчик обновлён. Доступ в Sanctum (если был) не тронут.")
     else:
-        result_lines.append("Ранг не изменился.")
+        result_lines.append("Ранг не изменился, счётчик обновлён.")
 
-    await _handle_ascension_transition(callback.bot, target_user_id, old_level, new_level)
+    await _handle_ascension_transition(bot, target_user_id, old_level, new_level)
+    return result_lines
+
+
+@router.message(LuminarManualStates.waiting_exact_count)
+async def adm_luminar_manual_exact_apply(message: Message, state: FSMContext):
+    text = await _require_text(message)
+    if text is None:
+        return
+    try:
+        new_count = int(text.strip())
+        if new_count < 0:
+            raise ValueError
+    except ValueError:
+        await message.answer("Нужно целое число от 0 и больше (например, 7). Попробуйте ещё раз или отправьте /cancel:")
+        return
+    data = await state.get_data()
+    target_user_id = data["target_user_id"]
+    await state.clear()
+    result_lines = await _apply_luminar_manual(message.bot, target_user_id, new_count)
+    await message.answer("\n".join(result_lines))
+
+
+@router.callback_query(LuminarManualStates.waiting_rank, F.data.startswith("adm_lm_rank_"))
+async def adm_luminar_manual_apply(callback: CallbackQuery, state: FSMContext):
+    if not await _require_permission(callback, "adm_luminar_manual"):
+        return
+    new_rank = int(callback.data[len("adm_lm_rank_"):])
+    data = await state.get_data()
+    target_user_id = data["target_user_id"]
+    await state.clear()
+    result_lines = await _apply_luminar_manual(callback.bot, target_user_id, LUMINAR_MANUAL_THRESHOLDS[new_rank])
     await callback.message.edit_text("\n".join(result_lines))
     await callback.answer()
 
@@ -5348,6 +5407,10 @@ async def adm_pending(callback: CallbackQuery):
             await callback.message.answer_photo(reg["receipt_file_id"], caption=caption, reply_markup=kb)
         else:
             await callback.message.answer(caption, reply_markup=kb)
+    await callback.message.answer(
+        "⬆️ Все заявки, ждущие проверки, показаны выше.",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Назад", callback_data="adm_back")]]),
+    )
 
 
 @router.callback_query(F.data == "adm_stalled")
