@@ -2738,6 +2738,15 @@ def _health_screen_text() -> str:
     else:
         ok_lines.append("Заявок, ждущих подтверждения, нет")
 
+    n_attention = len(db.get_sanctum_needs_attention(now.strftime("%Y-%m-%d")))
+    if n_attention:
+        problems.append(
+            f"❗ Просрочили оплату Sanctum и не назвали дату: {n_attention} чел. "
+            f"Раздел «📋 Подписчики VEDA SANCTUM» → «❗ Показать список»."
+        )
+    else:
+        ok_lines.append("Просроченных без даты оплаты нет")
+
     backup_age = db.get_latest_backup_age_hours()
     if backup_age is None:
         problems.append("💾 Резервных копий базы ещё не было ни одной.")
@@ -3703,6 +3712,15 @@ async def adm_sanctum_list(callback: CallbackQuery):
         await callback.answer()
         return
 
+    n_attention = len(db.get_sanctum_needs_attention(today.isoformat()))
+    await callback.message.answer(
+        f"❗ Просрочили и не назвали дату оплаты: {n_attention} чел." if n_attention
+        else "✅ Просроченных без даты оплаты сейчас нет.",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text=f"❗ Показать список ({n_attention})", callback_data="adm_sanctum_attention")]
+        ]) if n_attention else None,
+    )
+
     lines = [f"<b>📋 Подписчики {html.escape(SANCTUM_FULL_NAME)}</b>\n"]
     for m in members:
         valid_until = _parse_date(m["valid_until"])
@@ -3758,6 +3776,42 @@ async def adm_sanctum_list(callback: CallbackQuery):
             "Нажмите, чтобы убрать человека из VEDA SANCTUM:",
             reply_markup=InlineKeyboardMarkup(inline_keyboard=rows),
         )
+    await callback.answer()
+
+
+@router.callback_query(F.data == "adm_sanctum_attention")
+async def adm_sanctum_attention(callback: CallbackQuery):
+    """Отдельный, отфильтрованный список - только те, кто просрочил оплату и
+    НЕ назвал дату (или назвал, но она уже прошла без оплаты) - её решение
+    2026-09-27, чтобы такие люди не терялись в общем списке подписчиков по
+    мере роста базы."""
+    if not await _require_permission(callback, "adm_sanctum_list"):
+        return
+    today = _today()
+    people = db.get_sanctum_needs_attention(today.isoformat())
+    text = (
+        "❗ <b>Просрочили оплату и не назвали дату</b>\n\n"
+        "Действующий доступ закончился, человек не убран вручную, и в боте не отмечено "
+        "ни одной ещё не наступившей даты «Оплачу позже».\n\n"
+    )
+    rows = []
+    if not people:
+        text += "✅ Таких людей сейчас нет."
+    else:
+        lines = []
+        for m in people:
+            name = f"@{m['username']}" if m["username"] else (m["preferred_name"] or m["first_name"] or str(m["user_id"]))
+            valid_until = _parse_date(m["valid_until"])
+            overdue_days = (today - valid_until).days if valid_until else "?"
+            id_link = f'<a href="tg://user?id={m["user_id"]}">ID {m["user_id"]}</a>'
+            line = f"• {html.escape(name)} ({id_link}) - просрочено {overdue_days} дн., цена {m['price'] or '-'}"
+            if m["promise_date"]:
+                line += f" (обещал оплатить {_fmt_date(_parse_date(m['promise_date']))} - дата уже прошла)"
+            lines.append(line)
+            rows.append([InlineKeyboardButton(text=f"🚫 Убрать {name}", callback_data=f"adm_sanctum_kick_{m['user_id']}")])
+        text += "\n".join(lines)
+    rows.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="adm_sanctum_list")])
+    await callback.message.answer(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
     await callback.answer()
 
 

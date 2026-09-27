@@ -1192,6 +1192,27 @@ def get_sanctum_expired_user_ids(today_iso):
     return [r["user_id"] for r in rows]
 
 
+def get_sanctum_needs_attention(today_iso):
+    """Кто просрочил оплату VEDA SANCTUM, не убран вручную, и при этом НЕ
+    назвал дату оплаты (либо назвал, но эта дата уже прошла без оплаты) -
+    её решение 2026-09-27: отдельный список, чтобы не пропустить таких людей
+    в общем списке подписчиков по мере роста базы. Полные строки users +
+    membership - для имени, ID, цены и даты."""
+    conn = get_conn()
+    rows = conn.execute("""
+        SELECT sm.user_id, sm.valid_until, sm.price, sm.promise_date,
+               u.username, u.first_name, u.preferred_name
+        FROM sanctum_membership sm
+        JOIN users u ON u.user_id = sm.user_id
+        WHERE sm.valid_until < ?
+        AND (sm.status IS NULL OR sm.status != 'removed')
+        AND (sm.promise_date IS NULL OR sm.promise_date < ?)
+        ORDER BY sm.valid_until ASC
+    """, (today_iso, today_iso)).fetchall()
+    conn.close()
+    return rows
+
+
 def get_sanctum_removed_user_ids():
     conn = get_conn()
     rows = conn.execute("SELECT user_id FROM sanctum_membership WHERE status = 'removed'").fetchall()
