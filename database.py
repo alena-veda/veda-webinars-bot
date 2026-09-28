@@ -226,6 +226,15 @@ def init_db():
         pass
 
     c.execute("""
+        CREATE TABLE IF NOT EXISTS webinar_reviews (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            webinar_id INTEGER NOT NULL,
+            text TEXT NOT NULL,
+            created_at TEXT
+        )
+    """)
+
+    c.execute("""
         CREATE TABLE IF NOT EXISTS sanctum (
             id INTEGER PRIMARY KEY CHECK (id = 1),
             price TEXT,
@@ -1970,6 +1979,43 @@ def count_unreviewed_faq_suggestions():
     n = conn.execute("SELECT COUNT(*) c FROM faq_suggestions WHERE reviewed = 0").fetchone()["c"]
     conn.close()
     return n
+
+
+def add_webinar_review(webinar_id, text):
+    """Отзыв, привязанный к конкретному вебинару/практике/расстановке -
+    добавляется в любой момент, независимо от того, когда он реально пришёл
+    (её решение 2026-09-27: отзывы часто приходят через день-два-три после
+    события, а не сразу)."""
+    conn = get_conn()
+    conn.execute(
+        "INSERT INTO webinar_reviews (webinar_id, text, created_at) VALUES (?, ?, ?)",
+        (webinar_id, text, _now()),
+    )
+    conn.commit()
+    conn.close()
+
+
+def get_webinar_reviews(webinar_id):
+    conn = get_conn()
+    rows = conn.execute(
+        "SELECT * FROM webinar_reviews WHERE webinar_id = ? ORDER BY id ASC", (webinar_id,)
+    ).fetchall()
+    conn.close()
+    return rows
+
+
+def count_webinar_reviews(webinar_id):
+    conn = get_conn()
+    n = conn.execute("SELECT COUNT(*) c FROM webinar_reviews WHERE webinar_id = ?", (webinar_id,)).fetchone()["c"]
+    conn.close()
+    return n
+
+
+def delete_webinar_review(review_id):
+    conn = get_conn()
+    conn.execute("DELETE FROM webinar_reviews WHERE id = ?", (review_id,))
+    conn.commit()
+    conn.close()
 
 
 def get_confirmed_webinar_registrant_ids(webinar_id):

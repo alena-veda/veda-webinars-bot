@@ -1208,6 +1208,11 @@ async def wb_past_view(callback: CallbackQuery):
         kb_rows.append([InlineKeyboardButton(
             text=f"💬 Вопросы и ответы ({qa_count})", callback_data=f"wq_public_webinar_{webinar_id}"
         )])
+    review_count = db.count_webinar_reviews(webinar_id)
+    if review_count:
+        kb_rows.append([InlineKeyboardButton(
+            text=f"⭐ Отзывы ({review_count})", callback_data=f"wb_reviews_{webinar_id}"
+        )])
     kb_rows.append([InlineKeyboardButton(text="⬅️ К прошедшим", callback_data="wb_past_list")])
     kb = InlineKeyboardMarkup(inline_keyboard=kb_rows)
     if w["photo"]:
@@ -1243,6 +1248,11 @@ async def _send_webinar_card(message: Message, webinar_id: int, viewer_id: int) 
             kb_rows.append([InlineKeyboardButton(
                 text=f"💬 Вопросы и ответы ({qa_count})", callback_data=f"wq_public_webinar_{webinar_id}"
             )])
+    review_count = db.count_webinar_reviews(webinar_id)
+    if review_count:
+        kb_rows.append([InlineKeyboardButton(
+            text=f"⭐ Отзывы ({review_count})", callback_data=f"wb_reviews_{webinar_id}"
+        )])
     kb_rows.append([InlineKeyboardButton(text="⬅️ К списку вебинаров", callback_data="wb_list_back")])
     kb = InlineKeyboardMarkup(inline_keyboard=kb_rows)
     if w["photo"]:
@@ -3109,7 +3119,8 @@ async def _render_webinar_card(callback: CallbackQuery, webinar_id: int) -> bool
         f"🔗 {w['invite_link'] or '-'}\n"
         f"🎬 Запись: {w['video_link'] or '- (пока нет, можно добавить в любой момент, даже после события)'}\n"
         f"🖼 Фото: {photo_status}\n"
-        f"❓ Вопросы от людей: {questions_status} (опубликовано ответов: {qa_count})\n\n"
+        f"❓ Вопросы от людей: {questions_status} (опубликовано ответов: {qa_count})\n"
+        f"⭐ Отзывов: {db.count_webinar_reviews(webinar_id)}\n\n"
         f"Статус: {status_text}"
     )
     kb = InlineKeyboardMarkup(inline_keyboard=[
@@ -3120,7 +3131,8 @@ async def _render_webinar_card(callback: CallbackQuery, webinar_id: int) -> bool
          InlineKeyboardButton(text="✏️ Цена", callback_data=f"adm_wbf_p_{webinar_id}")],
         [InlineKeyboardButton(text="✏️ Ссылка", callback_data=f"adm_wbf_l_{webinar_id}"),
          InlineKeyboardButton(text="🖼 Фото", callback_data=f"adm_photo_webinar_{webinar_id}")],
-        [InlineKeyboardButton(text="🎬 Ссылка на запись", callback_data=f"adm_wbf_v_{webinar_id}")],
+        [InlineKeyboardButton(text="🎬 Ссылка на запись", callback_data=f"adm_wbf_v_{webinar_id}"),
+         InlineKeyboardButton(text="⭐ Отзывы", callback_data=f"adm_wb_reviews_{webinar_id}")],
         [InlineKeyboardButton(
             text=("📜 Перевести в прошедшие" if w["is_active"] else "🟢 Вернуть в активные"),
             callback_data=f"adm_wb_toggle_{webinar_id}",
@@ -3185,6 +3197,82 @@ async def adm_wb_delete(callback: CallbackQuery):
     db.delete_webinar(webinar_id)
     await _render_webinars_list(callback)
     await callback.answer("Вебинар удалён")
+
+
+# ---------- отзывы, привязанные к конкретному вебинару (2026-09-27) ----------
+# Можно добавлять в любой момент, независимо от того, когда отзыв реально
+# пришёл ей лично - хоть в день события, хоть через неделю. Видны ВСЕМ, кто
+# открывает карточку (и активную, и прошедшую) - это социальное доказательство,
+# а не платный контент вроде записи, поэтому доступа она не ограничивает.
+
+async def _render_webinar_reviews_admin(callback: CallbackQuery, webinar_id: int):
+    w = db.get_webinar(webinar_id)
+    if not w:
+        await callback.answer("Вебинар не найден", show_alert=True)
+        return
+    reviews = db.get_webinar_reviews(webinar_id)
+    text = f"⭐ <b>Отзывы - «{_strip_html_tags(w['title'])}»</b>\n\n"
+    rows = []
+    if not reviews:
+        text += "Пока ни одного отзыва не добавлено."
+    else:
+        for r in reviews:
+            text += f"— {r['text']}\n\n"
+            rows.append([InlineKeyboardButton(text=f"🗑 Удалить отзыв #{r['id']}", callback_data=f"adm_wbrev_del_{r['id']}_{webinar_id}")])
+    rows.append([InlineKeyboardButton(text="➕ Добавить отзыв", callback_data=f"adm_wbrev_add_{webinar_id}")])
+    rows.append([InlineKeyboardButton(text="⬅️ К вебинару", callback_data=f"adm_wb_edit_{webinar_id}")])
+    await _send_long(callback.bot, callback.message.chat.id, text, reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("adm_wb_reviews_"))
+async def adm_wb_reviews(callback: CallbackQuery):
+    if not db.is_admin(callback.from_user.id):
+        await callback.answer("Только для администраторов", show_alert=True)
+        return
+    webinar_id = int(callback.data[len("adm_wb_reviews_"):])
+    await _render_webinar_reviews_admin(callback, webinar_id)
+
+
+@router.callback_query(F.data.startswith("adm_wbrev_add_"))
+async def adm_wbrev_add_start(callback: CallbackQuery, state: FSMContext):
+    if not db.is_admin(callback.from_user.id):
+        await callback.answer("Только для администраторов", show_alert=True)
+        return
+    webinar_id = int(callback.data[len("adm_wbrev_add_"):])
+    await state.set_state(EditFieldStates.waiting_value)
+    await state.update_data(target="webinar_review_add", target_id=webinar_id)
+    await callback.message.answer(
+        "Пришлите текст отзыва (можно с жирным шрифтом и т.п. - разметка сохранится). Он появится под "
+        "этим вебинаром и в «Прошедшие», и на активной карточке, если она ещё открыта для записи. "
+        "Не важно, когда именно отзыв пришёл к Вам - можно добавлять в любой момент.\n\n(или /cancel)",
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("adm_wbrev_del_"))
+async def adm_wbrev_delete(callback: CallbackQuery):
+    if not db.is_admin(callback.from_user.id):
+        await callback.answer("Только для администраторов", show_alert=True)
+        return
+    review_id_str, webinar_id_str = callback.data[len("adm_wbrev_del_"):].split("_")
+    db.delete_webinar_review(int(review_id_str))
+    await _render_webinar_reviews_admin(callback, int(webinar_id_str))
+    await callback.answer("Отзыв удалён")
+
+
+@router.callback_query(F.data.startswith("wb_reviews_"))
+async def wb_reviews_view(callback: CallbackQuery):
+    """Отзывы, видимые всем - и на активной карточке, и на прошедшей."""
+    webinar_id = int(callback.data[len("wb_reviews_"):])
+    w = db.get_webinar(webinar_id)
+    reviews = db.get_webinar_reviews(webinar_id)
+    if not w or not reviews:
+        await callback.answer("Отзывов пока нет", show_alert=True)
+        return
+    text = f"⭐ <b>Отзывы о «{w['title']}»</b>\n\n" + "\n\n".join(f"— {r['text']}" for r in reviews)
+    await _send_long(callback.bot, callback.message.chat.id, text, protect_content=_protect_for(callback.from_user.id))
+    await callback.answer()
 
 
 def _wb_add_back_kb(target_step: str) -> InlineKeyboardMarkup:
@@ -4989,6 +5077,7 @@ async def edit_field_value(message: Message, state: FSMContext):
     html_trusted = (
         (target, field) in HTML_TRUSTED_FIELDS or target == "feed_post" or target == "ritual_text"
         or (target == "ritual_event" and field in ("meaning", "practice"))
+        or target == "webinar_review_add"
     )
     value = message.html_text if html_trusted else message.text
 
@@ -5175,6 +5264,13 @@ async def edit_field_value(message: Message, state: FSMContext):
             reply_markup=_admin_perm_picker_kb(DEFAULT_HELPER_PERMISSIONS),
         )
         return
+    elif target == "webinar_review_add":
+        webinar_id = data["target_id"]
+        db.add_webinar_review(webinar_id, value)
+        w = db.get_webinar(webinar_id)
+        await message.answer(
+            f"Отзыв добавлен ✅ Он уже виден всем под «{_strip_html_tags(w['title']) if w else 'этим вебинаром'}»."
+        )
     await state.clear()
 
 
