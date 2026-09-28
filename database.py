@@ -1027,6 +1027,33 @@ def init_db():
         if not c.fetchone():
             c.execute("INSERT INTO settings (key, value) VALUES (?, ?)", (key, value))
 
+    # ---------- аудит текстов 2026-09-28: остальные экраны «Вебинары» ----------
+    _webinar_screen_defaults = {
+        "webinars_past_empty_text": "Прошедших пока нет.",
+        "webinars_past_header_text": "📜 Прошедшие вебинары, практики, расстановки:",
+        "webinar_unavailable_past_text": "Эта запись больше недоступна.",
+        "webinar_video_locked_line": (
+            "\n\n🎬 Запись доступна участникам VEDA SANCTUM (это часть того, что даёт Sanctum) "
+            "или тем, кто оплатил именно этот вебинар."
+        ),
+        "webinar_unavailable_text": "Этот вебинар больше недоступен",
+        "webinar_pending_request_text": (
+            "У Вас уже есть заявка на «{название}» - она ожидает проверки, "
+            "я подтвержу её в ближайшее время 🙏"
+        ),
+        "webinar_payment_instructions_text": (
+            "Отлично! Для участия в «{название}» переведите {цена}.\n\n"
+            "{реквизиты}\n\n"
+            "После оплаты пришлите сюда, в VEDAME SPACE, скриншот Вашего чека 📸"
+        ),
+        "webinar_reviews_empty_text": "Отзывов пока нет",
+        "webinar_reviews_header_text": "⭐ Отзывы о «{название}»",
+    }
+    for key, value in _webinar_screen_defaults.items():
+        c.execute("SELECT value FROM settings WHERE key = ?", (key,))
+        if not c.fetchone():
+            c.execute("INSERT INTO settings (key, value) VALUES (?, ?)", (key, value))
+
     # дар за Люминар I увеличен с 1 до 2 месяцев (её решение 2026-09-24) - если
     # текст ещё не был правлен вручную (значение точно как в старом дефолте),
     # обновляем его на новую формулировку; если она уже сама переписала текст,

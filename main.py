@@ -769,6 +769,7 @@ ADMIN_PERMISSION_SECTIONS = [
     ("🗓 Вебинары, практики, расстановки", [
         ("adm_webinars", "🗓 Вебинары"),
         ("adm_webinar_reminder_texts", "✉️ Тексты напоминаний о вебинарах"),
+        ("adm_webinar_screens_texts", "🗓 Тексты экрана «Вебинары»"),
     ]),
     ("⚜️ VEDA SANCTUM", [
         ("adm_sanctum", "⚜️ Настройки VEDA SANCTUM"),
@@ -1168,13 +1169,13 @@ async def show_webinars(message: Message):
 async def wb_past_list(callback: CallbackQuery):
     past = db.get_past_webinars()
     if not past:
-        await callback.answer("Прошедших пока нет.", show_alert=True)
+        await callback.answer(db.get_setting("webinars_past_empty_text"), show_alert=True)
         return
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text=_strip_html_tags(w["title"]), callback_data=f"wb_past_view_{w['id']}")]
         for w in past
     ])
-    await callback.message.answer("📜 Прошедшие вебинары, практики, расстановки:", reply_markup=kb)
+    await callback.message.answer(db.get_setting("webinars_past_header_text"), reply_markup=kb)
     await callback.answer()
 
 
@@ -1183,7 +1184,7 @@ async def wb_past_view(callback: CallbackQuery):
     webinar_id = int(callback.data[len("wb_past_view_"):])
     w = db.get_webinar(webinar_id)
     if not w or w["is_active"] or not w["title"]:
-        await callback.answer("Эта запись больше недоступна.", show_alert=True)
+        await callback.answer(db.get_setting("webinar_unavailable_past_text"), show_alert=True)
         return
     # прошедший вид: тема и описание остаются (это и есть "витрина" тем, которые
     # уже разбирались), а цена и регистрация скрыты — участие в прошедшем
@@ -1202,10 +1203,7 @@ async def wb_past_view(callback: CallbackQuery):
         if has_video_access:
             kb_rows.append([InlineKeyboardButton(text="🎬 Смотреть запись", url=w["video_link"])])
         else:
-            text += (
-                "\n\n🎬 Запись доступна участникам VEDA SANCTUM (это часть того, что даёт Sanctum) "
-                "или тем, кто оплатил именно этот вебинар."
-            )
+            text += db.get_setting("webinar_video_locked_line")
             kb_rows.append([InlineKeyboardButton(text="⚜️ Что такое VEDA SANCTUM", callback_data="open_sanctum")])
     qa_count = db.count_public_qa("webinar", webinar_id)
     if qa_count:
@@ -1287,7 +1285,7 @@ async def wb_view(callback: CallbackQuery, state: FSMContext):
         return
     ok = await _send_webinar_card(callback.message, webinar_id, callback.from_user.id)
     if not ok:
-        await callback.answer("Этот вебинар больше недоступен", show_alert=True)
+        await callback.answer(db.get_setting("webinar_unavailable_text"), show_alert=True)
         return
     await callback.answer()
 
@@ -1297,7 +1295,7 @@ async def wb_reg(callback: CallbackQuery, state: FSMContext):
     webinar_id = int(callback.data.split("_")[-1])
     w = db.get_webinar(webinar_id)
     if not w or not w["is_active"] or not w["title"] or not w["price"]:
-        await callback.answer("Этот вебинар больше недоступен", show_alert=True)
+        await callback.answer(db.get_setting("webinar_unavailable_text"), show_alert=True)
         return
     if not _payment_ready("payment_purpose_webinar"):
         await callback.answer(_not_ready_message(), show_alert=True)
@@ -1308,10 +1306,8 @@ async def wb_reg(callback: CallbackQuery, state: FSMContext):
     # напоминания подряд про один и тот же вебинар)
     existing = db.get_pending_registration(callback.from_user.id, "webinar", webinar_id)
     if existing and existing["status"] == "awaiting_confirmation":
-        await callback.message.answer(
-            f"У Вас уже есть заявка на «{w['title']}» - она ожидает проверки, "
-            "я подтвержу её в ближайшее время 🙏"
-        )
+        text = db.get_setting("webinar_pending_request_text").replace("{название}", w["title"])
+        await callback.message.answer(text)
         await callback.answer()
         return
     reg_id = existing["id"] if existing else db.create_registration(
@@ -1319,12 +1315,13 @@ async def wb_reg(callback: CallbackQuery, state: FSMContext):
     )
     await state.set_state(ReceiptStates.waiting_receipt)
     await state.update_data(reg_id=reg_id)
-    await callback.message.answer(
-        f"Отлично! Для участия в «{w['title']}» переведите {w['price']}.\n\n"
-        f"{_payment_block('payment_purpose_webinar')}\n\n"
-        "После оплаты пришлите сюда, в VEDAME SPACE, скриншот Вашего чека 📸",
-        reply_markup=_personal_link_kb("💌 Написать Алёне лично"),
+    text = (
+        db.get_setting("webinar_payment_instructions_text")
+        .replace("{название}", w["title"])
+        .replace("{цена}", w["price"])
+        .replace("{реквизиты}", _payment_block("payment_purpose_webinar"))
     )
+    await callback.message.answer(text, reply_markup=_personal_link_kb("💌 Написать Алёне лично"))
     await callback.answer()
 
 
@@ -3292,10 +3289,11 @@ async def wb_reviews_view(callback: CallbackQuery):
     w = db.get_webinar(webinar_id)
     reviews = db.get_webinar_reviews(webinar_id)
     if not w or not reviews:
-        await callback.answer("Отзывов пока нет", show_alert=True)
+        await callback.answer(db.get_setting("webinar_reviews_empty_text"), show_alert=True)
         return
     protect = _protect_for(callback.from_user.id)
-    await callback.message.answer(f"⭐ <b>Отзывы о «{w['title']}»</b>", protect_content=protect)
+    header = db.get_setting("webinar_reviews_header_text").replace("{название}", w["title"])
+    await callback.message.answer(header, protect_content=protect)
     for r in reviews:
         if r["photo"]:
             await callback.message.answer_photo(r["photo"], caption=r["text"] or None, protect_content=protect)
@@ -4067,8 +4065,6 @@ HTML_TRUSTED_FIELDS = {
     ("webinar_reminder_text", "webinar_reminder_5d_text"),
     ("webinar_reminder_text", "webinar_reminder_24h_text"),
     ("webinar_reminder_text", "webinar_reminder_1h_text"),
-    ("webinar_reminder_text", "webinars_intro_text"),
-    ("webinar_reminder_text", "webinars_empty_text"),
     ("ascension_text", "ascension_level1_text"),
     ("ascension_text", "ascension_level2_text"),
     ("ascension_text", "ascension_level1_brief_text"),
@@ -4295,8 +4291,6 @@ WEBINAR_REMINDER_TEXT_LABELS = {
     "webinar_reminder_24h_text": "текст напоминания за 24 часа",
     "webinar_reminder_1h_text": "текст напоминания за 1 час",
     "webinar_video_ready_text": "текст «готова запись» (уходит, когда впервые заполняете ссылку на запись)",
-    "webinars_intro_text": "текст над списком предстоящих вебинаров",
-    "webinars_empty_text": "текст, когда предстоящих вебинаров пока нет",
 }
 
 
@@ -4308,10 +4302,8 @@ async def adm_webinar_reminder_texts(callback: CallbackQuery):
     d24 = db.get_setting("webinar_reminder_24h_text")
     d1 = db.get_setting("webinar_reminder_1h_text")
     dv = db.get_setting("webinar_video_ready_text")
-    wi = db.get_setting("webinars_intro_text")
-    we = db.get_setting("webinars_empty_text")
     text = (
-        "<b>✉️ Тексты напоминаний и экрана «Вебинары»</b>\n\n"
+        "<b>✉️ Тексты напоминаний о вебинарах</b>\n\n"
         "Отправляются автоматически всем, кто уже подтверждённо оплатил конкретный "
         "вебинар/практику/расстановку - за 5 дней и за 24 часа до начала (с кнопкой "
         "«Подробнее о вебинаре», её удобно пересылать) и за 1 час до начала (только "
@@ -4326,19 +4318,13 @@ async def adm_webinar_reminder_texts(callback: CallbackQuery):
         "<code>{название}</code>, <code>{дата и время}</code> - бот сам подставит нужные "
         "значения. В тексте «за 1 час» ещё доступен <code>{ссылка}</code> - подставится "
         "ссылка на подключение, если она заполнена у этого вебинара, иначе просто исчезнет. "
-        "В тексте «готова запись» доступны <code>{тема}</code> и <code>{ссылка}</code>.\n\n"
-        "Плюс два текста самого экрана «📅 Вебинары» (то, что человек видит сразу при нажатии "
-        "этой кнопки главного меню):\n"
-        f"Над списком вебинаров:\n{html.escape(wi)}\n\n"
-        f"Когда вебинаров пока нет:\n{html.escape(we)}"
+        "В тексте «готова запись» доступны <code>{тема}</code> и <code>{ссылка}</code>."
     )
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="✏️ Текст «за 5 дней»", callback_data="adm_wrt_webinar_reminder_5d_text")],
         [InlineKeyboardButton(text="✏️ Текст «за 24 часа»", callback_data="adm_wrt_webinar_reminder_24h_text")],
         [InlineKeyboardButton(text="✏️ Текст «за 1 час»", callback_data="adm_wrt_webinar_reminder_1h_text")],
         [InlineKeyboardButton(text="✏️ Текст «готова запись»", callback_data="adm_wrt_webinar_video_ready_text")],
-        [InlineKeyboardButton(text="✏️ Текст над списком вебинаров", callback_data="adm_wrt_webinars_intro_text")],
-        [InlineKeyboardButton(text="✏️ Текст «вебинаров пока нет»", callback_data="adm_wrt_webinars_empty_text")],
         [InlineKeyboardButton(text="⬅️ Назад", callback_data="adm_back")],
     ])
     await callback.message.edit_text(text, reply_markup=kb)
@@ -4354,13 +4340,6 @@ async def adm_webinar_reminder_text_field_start(callback: CallbackQuery, state: 
     await state.set_state(EditFieldStates.waiting_value)
     await state.update_data(target="webinar_reminder_text", field=field)
     current = db.get_setting(field) or ""
-    if field in ("webinars_intro_text", "webinars_empty_text"):
-        await callback.message.answer(
-            f"Сейчас:\n{current}\n\nПришлите новый {WEBINAR_REMINDER_TEXT_LABELS[field]}. "
-            "Подстановок здесь нет - текст всегда один и тот же."
-        )
-        await callback.answer()
-        return
     if field == "webinar_video_ready_text":
         hint = "<code>{тема}</code>, <code>{ссылка}</code>"
     else:
@@ -4372,6 +4351,66 @@ async def adm_webinar_reminder_text_field_start(callback: CallbackQuery, state: 
     await callback.message.answer(
         f"Сейчас:\n{current}\n\nПришлите новый {WEBINAR_REMINDER_TEXT_LABELS[field]}.\n\nМожно вставить {hint}."
     )
+    await callback.answer()
+
+
+# ---------- админ-панель: тексты экранов «Вебинары» (аудит 2026-09-28) ----------
+
+WEBINAR_SCREEN_TEXT_LABELS = {
+    "webinars_intro_text": "текст над списком предстоящих вебинаров",
+    "webinars_empty_text": "текст, когда предстоящих вебинаров пока нет",
+    "webinars_past_empty_text": "всплывающая подсказка, если прошедших пока нет",
+    "webinars_past_header_text": "заголовок над списком прошедших",
+    "webinar_unavailable_past_text": "если открыли прошедший вебинар, которого уже нет (удалён)",
+    "webinar_video_locked_line": "строка про доступ к записи для тех, кому она пока не открыта",
+    "webinar_unavailable_text": "всплывающая подсказка, если вебинар стал недоступен (удалён/скрыт)",
+    "webinar_pending_request_text": "если уже есть заявка на этот вебинар, ожидающая проверки",
+    "webinar_payment_instructions_text": "сообщение с реквизитами оплаты вебинара",
+    "webinar_reviews_empty_text": "всплывающая подсказка, если отзывов у вебинара пока нет",
+    "webinar_reviews_header_text": "заголовок над списком отзывов конкретного вебинара",
+}
+
+WEBINAR_SCREEN_TEXT_PLACEHOLDERS = {
+    "webinar_pending_request_text": ["{название}"],
+    "webinar_payment_instructions_text": ["{название}", "{цена}", "{реквизиты}"],
+    "webinar_reviews_header_text": ["{название}"],
+}
+
+
+@router.callback_query(F.data == "adm_webinar_screens_texts")
+async def adm_webinar_screens_texts(callback: CallbackQuery):
+    if not await _require_permission(callback, "adm_webinar_screens_texts"):
+        return
+    text = (
+        "<b>🗓 Тексты экрана «Вебинары»</b>\n\n"
+        "Это не напоминания (они в соседнем разделе), а сами экраны: список предстоящих и "
+        "прошедших, карточка одного вебинара, реквизиты оплаты, отзывы.\n\n"
+        "Нажмите на нужный текст ниже, чтобы отредактировать."
+    )
+    rows = [
+        [InlineKeyboardButton(text=f"✏️ {label}", callback_data=f"adm_wst_{key}")]
+        for key, label in WEBINAR_SCREEN_TEXT_LABELS.items()
+    ]
+    rows.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="adm_back")])
+    await callback.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("adm_wst_"))
+async def adm_webinar_screen_text_field_start(callback: CallbackQuery, state: FSMContext):
+    if not db.is_admin(callback.from_user.id):
+        await callback.answer("Только для администраторов", show_alert=True)
+        return
+    field = callback.data[len("adm_wst_"):]
+    current = db.get_setting(field) or ""
+    await state.set_state(EditFieldStates.waiting_value)
+    await state.update_data(target="webinar_screen_text", field=field)
+    prompt = f"Сейчас:\n{current}\n\nПришлите новый текст - {WEBINAR_SCREEN_TEXT_LABELS[field]}:"
+    placeholders = WEBINAR_SCREEN_TEXT_PLACEHOLDERS.get(field)
+    if placeholders:
+        ph_hint = ", ".join(f"<code>{html.escape(p)}</code>" for p in placeholders)
+        prompt += f"\n\nВажно: именно фигурные скобки - {ph_hint} (не круглые), иначе не подставится."
+    await callback.message.answer(prompt)
     await callback.answer()
 
 
@@ -5260,7 +5299,7 @@ async def edit_field_value(message: Message, state: FSMContext):
     html_trusted = (
         (target, field) in HTML_TRUSTED_FIELDS or target == "feed_post" or target == "ritual_text"
         or (target == "ritual_event" and field in ("meaning", "practice"))
-        or target in ("sanctum_screen_text", "payment_flow_text")
+        or target in ("sanctum_screen_text", "payment_flow_text", "webinar_screen_text")
     )
     value = message.html_text if html_trusted else message.text
 
@@ -5409,6 +5448,9 @@ async def edit_field_value(message: Message, state: FSMContext):
             raw = f"https://t.me/{raw}"
         db.set_setting("admin_personal_chat_link", raw)
         await message.answer(f"Ссылка на личный чат обновлена ✅\n{raw}")
+    elif target == "webinar_screen_text":
+        db.set_setting(field, value)
+        await message.answer(f"«{WEBINAR_SCREEN_TEXT_LABELS[field]}» обновлён ✅")
     elif target == "sanctum_screen_text":
         db.set_setting(field, value)
         await message.answer(f"«{SANCTUM_SCREEN_TEXT_LABELS[field]}» обновлён ✅")
