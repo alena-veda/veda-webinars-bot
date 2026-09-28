@@ -877,6 +877,10 @@ class EditFieldStates(StatesGroup):
     waiting_value = State()
 
 
+class WebinarReviewStates(StatesGroup):
+    waiting_content = State()
+
+
 class AdminPermStates(StatesGroup):
     picking = State()
 
@@ -3211,17 +3215,28 @@ async def _render_webinar_reviews_admin(callback: CallbackQuery, webinar_id: int
         await callback.answer("Вебинар не найден", show_alert=True)
         return
     reviews = db.get_webinar_reviews(webinar_id)
-    text = f"⭐ <b>Отзывы - «{_strip_html_tags(w['title'])}»</b>\n\n"
-    rows = []
+    await callback.message.answer(f"⭐ <b>Отзывы - «{_strip_html_tags(w['title'])}»</b>")
     if not reviews:
-        text += "Пока ни одного отзыва не добавлено."
+        await callback.message.answer("Пока ни одного отзыва не добавлено.")
     else:
+        # каждый отзыв - отдельным сообщением (не одним общим текстом), потому что
+        # отзыв может быть картинкой (скриншотом), а не текстом - её решение
+        # 2026-09-28: у неё много отзывов именно скриншотами
         for r in reviews:
-            text += f"— {r['text']}\n\n"
-            rows.append([InlineKeyboardButton(text=f"🗑 Удалить отзыв #{r['id']}", callback_data=f"adm_wbrev_del_{r['id']}_{webinar_id}")])
-    rows.append([InlineKeyboardButton(text="➕ Добавить отзыв", callback_data=f"adm_wbrev_add_{webinar_id}")])
-    rows.append([InlineKeyboardButton(text="⬅️ К вебинару", callback_data=f"adm_wb_edit_{webinar_id}")])
-    await _send_long(callback.bot, callback.message.chat.id, text, reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
+            kb = InlineKeyboardMarkup(inline_keyboard=[[
+                InlineKeyboardButton(text="🗑 Удалить этот отзыв", callback_data=f"adm_wbrev_del_{r['id']}_{webinar_id}")
+            ]])
+            if r["photo"]:
+                await callback.message.answer_photo(r["photo"], caption=r["text"] or None, reply_markup=kb)
+            else:
+                await callback.message.answer(r["text"], reply_markup=kb)
+    await callback.message.answer(
+        "⬆️ Все отзывы показаны выше.",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="➕ Добавить отзыв", callback_data=f"adm_wbrev_add_{webinar_id}")],
+            [InlineKeyboardButton(text="⬅️ К вебинару", callback_data=f"adm_wb_edit_{webinar_id}")],
+        ]),
+    )
     await callback.answer()
 
 
@@ -3240,14 +3255,36 @@ async def adm_wbrev_add_start(callback: CallbackQuery, state: FSMContext):
         await callback.answer("Только для администраторов", show_alert=True)
         return
     webinar_id = int(callback.data[len("adm_wbrev_add_"):])
-    await state.set_state(EditFieldStates.waiting_value)
-    await state.update_data(target="webinar_review_add", target_id=webinar_id)
+    await state.set_state(WebinarReviewStates.waiting_content)
+    await state.update_data(webinar_id=webinar_id)
     await callback.message.answer(
-        "Пришлите текст отзыва (можно с жирным шрифтом и т.п. - разметка сохранится). Он появится под "
-        "этим вебинаром и в «Прошедшие», и на активной карточке, если она ещё открыта для записи. "
-        "Не важно, когда именно отзыв пришёл к Вам - можно добавлять в любой момент.\n\n(или /cancel)",
+        "Пришлите отзыв - текстом, фото (например, скриншот переписки) или фото с подписью. "
+        "Разметка (жирный шрифт и т.п.) сохранится. Он появится под этим вебинаром и в «Прошедшие», "
+        "и на активной карточке, если она ещё открыта для записи. Не важно, когда именно отзыв "
+        "пришёл к Вам - можно добавлять в любой момент.\n\n(или /cancel)",
     )
     await callback.answer()
+
+
+@router.message(WebinarReviewStates.waiting_content)
+async def adm_wbrev_content_received(message: Message, state: FSMContext):
+    data = await state.get_data()
+    webinar_id = data["webinar_id"]
+    if message.photo:
+        photo = message.photo[-1].file_id
+        text = message.html_text or ""
+    elif message.text:
+        photo = None
+        text = message.html_text or ""
+    else:
+        await message.answer("Пришлите, пожалуйста, текст отзыва или фото (можно с подписью) 🙏")
+        return
+    db.add_webinar_review(webinar_id, text, photo)
+    await state.clear()
+    w = db.get_webinar(webinar_id)
+    await message.answer(
+        f"Отзыв добавлен ✅ Он уже виден всем под «{_strip_html_tags(w['title']) if w else 'этим вебинаром'}»."
+    )
 
 
 @router.callback_query(F.data.startswith("adm_wbrev_del_"))
@@ -3270,8 +3307,13 @@ async def wb_reviews_view(callback: CallbackQuery):
     if not w or not reviews:
         await callback.answer("Отзывов пока нет", show_alert=True)
         return
-    text = f"⭐ <b>Отзывы о «{w['title']}»</b>\n\n" + "\n\n".join(f"— {r['text']}" for r in reviews)
-    await _send_long(callback.bot, callback.message.chat.id, text, protect_content=_protect_for(callback.from_user.id))
+    protect = _protect_for(callback.from_user.id)
+    await callback.message.answer(f"⭐ <b>Отзывы о «{w['title']}»</b>", protect_content=protect)
+    for r in reviews:
+        if r["photo"]:
+            await callback.message.answer_photo(r["photo"], caption=r["text"] or None, protect_content=protect)
+        else:
+            await callback.message.answer(r["text"], protect_content=protect)
     await callback.answer()
 
 
@@ -5077,7 +5119,6 @@ async def edit_field_value(message: Message, state: FSMContext):
     html_trusted = (
         (target, field) in HTML_TRUSTED_FIELDS or target == "feed_post" or target == "ritual_text"
         or (target == "ritual_event" and field in ("meaning", "practice"))
-        or target == "webinar_review_add"
     )
     value = message.html_text if html_trusted else message.text
 
@@ -5264,13 +5305,6 @@ async def edit_field_value(message: Message, state: FSMContext):
             reply_markup=_admin_perm_picker_kb(DEFAULT_HELPER_PERMISSIONS),
         )
         return
-    elif target == "webinar_review_add":
-        webinar_id = data["target_id"]
-        db.add_webinar_review(webinar_id, value)
-        w = db.get_webinar(webinar_id)
-        await message.answer(
-            f"Отзыв добавлен ✅ Он уже виден всем под «{_strip_html_tags(w['title']) if w else 'этим вебинаром'}»."
-        )
     await state.clear()
 
 

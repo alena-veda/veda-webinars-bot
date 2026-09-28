@@ -233,6 +233,13 @@ def init_db():
             created_at TEXT
         )
     """)
+    try:
+        # отзыв картинкой (скриншот переписки и т.п.) — file_id фото в Telegram;
+        # text при этом может быть пустой строкой (подписи нет), но не NULL —
+        # так же, как в feed_posts, столбец остаётся NOT NULL
+        c.execute("ALTER TABLE webinar_reviews ADD COLUMN photo TEXT")
+    except Exception:
+        pass
 
     c.execute("""
         CREATE TABLE IF NOT EXISTS sanctum (
@@ -1981,15 +1988,16 @@ def count_unreviewed_faq_suggestions():
     return n
 
 
-def add_webinar_review(webinar_id, text):
+def add_webinar_review(webinar_id, text, photo=None):
     """Отзыв, привязанный к конкретному вебинару/практике/расстановке -
     добавляется в любой момент, независимо от того, когда он реально пришёл
     (её решение 2026-09-27: отзывы часто приходят через день-два-три после
-    события, а не сразу)."""
+    события, а не сразу). Текстом, фото со подписью или просто фото
+    (её решение 2026-09-28: много отзывов приходят ей скриншотами)."""
     conn = get_conn()
     conn.execute(
-        "INSERT INTO webinar_reviews (webinar_id, text, created_at) VALUES (?, ?, ?)",
-        (webinar_id, text, _now()),
+        "INSERT INTO webinar_reviews (webinar_id, text, photo, created_at) VALUES (?, ?, ?, ?)",
+        (webinar_id, text or "", photo, _now()),
     )
     conn.commit()
     conn.close()
