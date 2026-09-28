@@ -1144,10 +1144,7 @@ async def show_webinars(message: Message):
     past_row = [InlineKeyboardButton(text=f"📜 Прошедшие ({past_count})", callback_data="wb_past_list")]
 
     if not webinars:
-        text = (
-            "Пока нет по графику предстоящих или открытых вебинаров.\n"
-            "Наблюдайте за информацией в этом пространстве или загляните позже в раздел «Вебинары, практики, расстановки»🌿"
-        )
+        text = db.get_setting("webinars_empty_text")
         kb = InlineKeyboardMarkup(inline_keyboard=[past_row]) if past_count else None
         await message.answer(text, reply_markup=kb)
         return
@@ -1161,7 +1158,7 @@ async def show_webinars(message: Message):
     ]
     if past_count:
         rows.append(past_row)
-    await message.answer("Ближайшие вебинары:", reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
+    await message.answer(db.get_setting("webinars_intro_text"), reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
 
 
 @router.callback_query(F.data == "wb_past_list")
@@ -4079,6 +4076,8 @@ HTML_TRUSTED_FIELDS = {
     ("webinar_reminder_text", "webinar_reminder_5d_text"),
     ("webinar_reminder_text", "webinar_reminder_24h_text"),
     ("webinar_reminder_text", "webinar_reminder_1h_text"),
+    ("webinar_reminder_text", "webinars_intro_text"),
+    ("webinar_reminder_text", "webinars_empty_text"),
     ("ascension_text", "ascension_level1_text"),
     ("ascension_text", "ascension_level2_text"),
     ("ascension_text", "ascension_level1_brief_text"),
@@ -4171,6 +4170,8 @@ WEBINAR_REMINDER_TEXT_LABELS = {
     "webinar_reminder_24h_text": "текст напоминания за 24 часа",
     "webinar_reminder_1h_text": "текст напоминания за 1 час",
     "webinar_video_ready_text": "текст «готова запись» (уходит, когда впервые заполняете ссылку на запись)",
+    "webinars_intro_text": "текст над списком предстоящих вебинаров",
+    "webinars_empty_text": "текст, когда предстоящих вебинаров пока нет",
 }
 
 
@@ -4182,8 +4183,10 @@ async def adm_webinar_reminder_texts(callback: CallbackQuery):
     d24 = db.get_setting("webinar_reminder_24h_text")
     d1 = db.get_setting("webinar_reminder_1h_text")
     dv = db.get_setting("webinar_video_ready_text")
+    wi = db.get_setting("webinars_intro_text")
+    we = db.get_setting("webinars_empty_text")
     text = (
-        "<b>✉️ Тексты напоминаний о вебинарах</b>\n\n"
+        "<b>✉️ Тексты напоминаний и экрана «Вебинары»</b>\n\n"
         "Отправляются автоматически всем, кто уже подтверждённо оплатил конкретный "
         "вебинар/практику/расстановку - за 5 дней и за 24 часа до начала (с кнопкой "
         "«Подробнее о вебинаре», её удобно пересылать) и за 1 час до начала (только "
@@ -4198,13 +4201,19 @@ async def adm_webinar_reminder_texts(callback: CallbackQuery):
         "<code>{название}</code>, <code>{дата и время}</code> - бот сам подставит нужные "
         "значения. В тексте «за 1 час» ещё доступен <code>{ссылка}</code> - подставится "
         "ссылка на подключение, если она заполнена у этого вебинара, иначе просто исчезнет. "
-        "В тексте «готова запись» доступны <code>{тема}</code> и <code>{ссылка}</code>."
+        "В тексте «готова запись» доступны <code>{тема}</code> и <code>{ссылка}</code>.\n\n"
+        "Плюс два текста самого экрана «📅 Вебинары» (то, что человек видит сразу при нажатии "
+        "этой кнопки главного меню):\n"
+        f"Над списком вебинаров:\n{html.escape(wi)}\n\n"
+        f"Когда вебинаров пока нет:\n{html.escape(we)}"
     )
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="✏️ Текст «за 5 дней»", callback_data="adm_wrt_webinar_reminder_5d_text")],
         [InlineKeyboardButton(text="✏️ Текст «за 24 часа»", callback_data="adm_wrt_webinar_reminder_24h_text")],
         [InlineKeyboardButton(text="✏️ Текст «за 1 час»", callback_data="adm_wrt_webinar_reminder_1h_text")],
         [InlineKeyboardButton(text="✏️ Текст «готова запись»", callback_data="adm_wrt_webinar_video_ready_text")],
+        [InlineKeyboardButton(text="✏️ Текст над списком вебинаров", callback_data="adm_wrt_webinars_intro_text")],
+        [InlineKeyboardButton(text="✏️ Текст «вебинаров пока нет»", callback_data="adm_wrt_webinars_empty_text")],
         [InlineKeyboardButton(text="⬅️ Назад", callback_data="adm_back")],
     ])
     await callback.message.edit_text(text, reply_markup=kb)
@@ -4220,6 +4229,13 @@ async def adm_webinar_reminder_text_field_start(callback: CallbackQuery, state: 
     await state.set_state(EditFieldStates.waiting_value)
     await state.update_data(target="webinar_reminder_text", field=field)
     current = db.get_setting(field) or ""
+    if field in ("webinars_intro_text", "webinars_empty_text"):
+        await callback.message.answer(
+            f"Сейчас:\n{current}\n\nПришлите новый {WEBINAR_REMINDER_TEXT_LABELS[field]}. "
+            "Подстановок здесь нет - текст всегда один и тот же."
+        )
+        await callback.answer()
+        return
     if field == "webinar_video_ready_text":
         hint = "<code>{тема}</code>, <code>{ссылка}</code>"
     else:
