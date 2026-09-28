@@ -212,7 +212,8 @@ def _payment_ready(purpose_key: str) -> bool:
     )
 
 
-NOT_READY_MESSAGE = "Извините, регистрация сюда пока недоступна. Загляните чуть позже 🙏"
+def _not_ready_message() -> str:
+    return db.get_setting("not_ready_text")
 
 
 def _end_of_month(d):
@@ -774,6 +775,7 @@ ADMIN_PERMISSION_SECTIONS = [
         ("adm_grant_access", "🔑 Выдать/продлить доступ VEDA SANCTUM"),
         ("adm_sanctum_list", "📋 Подписчики VEDA SANCTUM (убрать - прямо там)"),
         ("adm_reminder_texts", "✉️ Тексты напоминаний VEDA SANCTUM"),
+        ("adm_sanctum_screens_texts", "✏️ Тексты экранов VEDA SANCTUM"),
         ("adm_rituals", "🌙 Календарь ритуалов"),
     ]),
     ("🪜 Путь Восхождения и Люминаров", [
@@ -807,6 +809,7 @@ ADMIN_PERMISSION_SECTIONS = [
         ("adm_payment", "💳 Реквизиты оплаты"),
         ("adm_pending", "🧾 Заявки на подтверждение"),
         ("adm_stalled", "⏳ Зависшие заявки (чек ещё не прислали)"),
+        ("adm_payment_flow_texts", "✏️ Тексты оплаты и чека"),
     ]),
     ("📢 Контент пространства", [
         ("adm_broadcast", "📢 Сделать рассылку"),
@@ -1297,7 +1300,7 @@ async def wb_reg(callback: CallbackQuery, state: FSMContext):
         await callback.answer("Этот вебинар больше недоступен", show_alert=True)
         return
     if not _payment_ready("payment_purpose_webinar"):
-        await callback.answer(NOT_READY_MESSAGE, show_alert=True)
+        await callback.answer(_not_ready_message(), show_alert=True)
         return
 
     # если у человека уже есть незавершённая заявка именно на этот вебинар —
@@ -1335,7 +1338,7 @@ async def show_sanctum(message: Message, user_id: int = None):
     user_id = user_id or message.from_user.id
     s = db.get_sanctum()
     if s["intro_text"] == db.PLACEHOLDER_SANCTUM_INTRO or s["price"] == db.PLACEHOLDER_PRICE:
-        await message.answer(f"✨ Информация о канале {html.escape(SANCTUM_FULL_NAME)} скоро появится здесь. Загляните позже 🙏")
+        await message.answer(db.get_setting("sanctum_placeholder_text"))
         return
 
     # уже существующего подписчика (активного или с истёкшей подпиской) не
@@ -1347,19 +1350,15 @@ async def show_sanctum(message: Message, user_id: int = None):
         valid_until = _parse_date(membership["valid_until"])
         price = membership["price"] or s["price"]
         if membership["lifetime_free"]:
-            text = (
-                f"⚜️ {html.escape(SANCTUM_FULL_NAME)}\n\n"
-                "🏆 Ваш доступ пожизненный и бесплатный - дар за ключ Люминар III."
-            )
+            text = db.get_setting("sanctum_lifetime_text")
             kb = InlineKeyboardMarkup(inline_keyboard=[[_ritual_calendar_btn()]])
             await message.answer(text, reply_markup=kb, protect_content=_protect_for(user_id))
             return
         if valid_until and valid_until >= today:
             text = (
-                f"⚜️ {html.escape(SANCTUM_FULL_NAME)}\n\n"
-                f"Ваш доступ активен до {valid_until.strftime('%d.%m.%Y')}.\n\n"
-                f"Хотите продлить заранее на следующий месяц? Стоимость: {price} "
-                "(закреплена за Вами, как за опытным участником Sanctum)."
+                db.get_setting("sanctum_active_text")
+                .replace("{дата}", valid_until.strftime("%d.%m.%Y"))
+                .replace("{цена}", price)
             )
             button_text = "Продлить"
         else:
@@ -1367,15 +1366,16 @@ async def show_sanctum(message: Message, user_id: int = None):
             deadline = _price_lock_deadline(membership)
             if deadline and not _price_lock_expired(membership):
                 price_line = (
-                    f"Стоимость подписки в месяц: {price} - Ваша прежняя цена сохраняется "
-                    f"до {_fmt_date(deadline)}."
+                    db.get_setting("sanctum_price_locked_line")
+                    .replace("{цена}", price)
+                    .replace("{дата_до}", _fmt_date(deadline))
                 )
             else:
-                price_line = f"Стоимость подписки в месяц: {_price_for_user(user_id)}."
+                price_line = db.get_setting("sanctum_price_current_line").replace("{цена}", _price_for_user(user_id))
             text = (
-                f"⚜️ {html.escape(SANCTUM_FULL_NAME)}\n\n"
-                f"Ваш доступ закончился{date_part}.\n\n"
-                f"Хотите возобновить?\n{price_line}"
+                db.get_setting("sanctum_expired_text")
+                .replace("{дата_часть}", date_part)
+                .replace("{строка_цены}", price_line)
             )
             button_text = "Возобновить"
         rows = [[InlineKeyboardButton(text=button_text, callback_data="sanctum_apply")]]
@@ -1439,7 +1439,7 @@ async def open_level_message_cb(callback: CallbackQuery):
 async def sanctum_laws(callback: CallbackQuery):
     s = db.get_sanctum()
     if s["laws_text"] == db.PLACEHOLDER_SANCTUM_LAWS:
-        await callback.answer(NOT_READY_MESSAGE, show_alert=True)
+        await callback.answer(_not_ready_message(), show_alert=True)
         return
     price = _price_for_user(callback.from_user.id)
     text = s["laws_text"].replace("{price}", price)
@@ -1457,11 +1457,11 @@ async def sanctum_laws(callback: CallbackQuery):
 async def sanctum_apply(callback: CallbackQuery, state: FSMContext):
     s = db.get_sanctum()
     if s["price"] == db.PLACEHOLDER_PRICE or not _payment_ready("payment_purpose_sanctum"):
-        await callback.answer(NOT_READY_MESSAGE, show_alert=True)
+        await callback.answer(_not_ready_message(), show_alert=True)
         return
     membership = db.get_sanctum_membership(callback.from_user.id)
     if membership and membership["lifetime_free"] and membership["status"] != "removed":
-        await callback.answer("У Вас уже пожизненный доступ в VEDA SANCTUM 🏆 Платить не нужно.", show_alert=True)
+        await callback.answer(db.get_setting("sanctum_already_lifetime_text"), show_alert=True)
         return
     # реально начал оформление - "поведенческое" напоминание (см. show_sanctum,
     # check_reengagement) больше не нужно
@@ -1472,10 +1472,7 @@ async def sanctum_apply(callback: CallbackQuery, state: FSMContext):
     # на человека, а не новая при каждом нажатии кнопки
     existing = db.get_pending_registration(callback.from_user.id, "sanctum", None)
     if existing and existing["status"] == "awaiting_confirmation":
-        await callback.message.answer(
-            f"У Вас уже есть заявка в {html.escape(SANCTUM_FULL_NAME)} - она ожидает проверки, "
-            "я подтвержу её в ближайшее время 🙏"
-        )
+        await callback.message.answer(db.get_setting("sanctum_pending_request_text"))
         await callback.answer()
         return
     reg_id = existing["id"] if existing else db.create_registration(
@@ -1488,13 +1485,12 @@ async def sanctum_apply(callback: CallbackQuery, state: FSMContext):
     if personal_kb:
         kb_rows.extend(personal_kb.inline_keyboard)
     kb_rows.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="sanctum_back")])
-    await callback.message.answer(
-        f"Для вступления в {html.escape(SANCTUM_FULL_NAME)} переведите {price}.\n\n"
-        f"{_payment_block('payment_purpose_sanctum')}\n\n"
-        "После оплаты пришлите сюда, в VEDAME SPACE, скриншот Вашего чека 📸\n\n"
-        "Благодарю!",
-        reply_markup=InlineKeyboardMarkup(inline_keyboard=kb_rows),
+    text = (
+        db.get_setting("sanctum_payment_instructions_text")
+        .replace("{цена}", price)
+        .replace("{реквизиты}", _payment_block("payment_purpose_sanctum"))
     )
+    await callback.message.answer(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=kb_rows))
     await callback.answer()
 
 
@@ -1521,14 +1517,8 @@ async def sanctum_promise_start(callback: CallbackQuery, state: FSMContext):
             f"\n\nДату можно назвать не позже {_fmt_date(latest)} - до этого дня за Вами "
             "сохраняется Ваша прежняя цена."
         )
-    await callback.message.answer(
-        "На какую дату Вы планируете совершение оплаты?\n"
-        "Пришлите в формате ДД.ММ.ГГГГ (например: 15.09.2026),\n"
-        "я напомню Вам за день до неё.\n\n"
-        "Это важно отметить именно здесь, в боте, а не писать мне лично: только отметка в боте "
-        "показывает, что Вы возвращаетесь, - и пока дата не наступила, я не буду Вас беспокоить."
-        f"{limit_line}"
-    )
+    text = db.get_setting("sanctum_promise_prompt_text").replace("{ограничение}", limit_line)
+    await callback.message.answer(text)
     await callback.answer()
 
 
@@ -1552,25 +1542,26 @@ async def sanctum_promise_date(message: Message, state: FSMContext):
     try:
         promise_date = datetime.strptime(text.strip(), "%d.%m.%Y").date()
     except ValueError:
-        await message.answer("Не получилось распознать дату.\nПришлите в формате ДД.ММ.ГГГГ, например: 15.09.2026.")
+        await message.answer(db.get_setting("sanctum_promise_invalid_date_text"))
         return
     if promise_date <= _today():
-        await message.answer("Дата должна быть в будущем.\nПришлите, пожалуйста, другую дату.")
+        await message.answer(db.get_setting("sanctum_promise_past_date_text"))
         return
     membership = db.get_sanctum_membership(message.from_user.id)
     latest = _promise_latest_date(membership)
     if latest and promise_date > latest:
         await message.answer(
-            f"Эту дату я, к сожалению, принять не могу: прежняя цена сохраняется до {_fmt_date(latest)}.\n"
-            f"Пришлите, пожалуйста, дату не позже {_fmt_date(latest)}."
+            db.get_setting("sanctum_promise_too_late_text").replace("{дата}", _fmt_date(latest))
         )
         return
     db.set_promise_date(message.from_user.id, promise_date.isoformat())
     await state.clear()
-    await message.answer(
-        f"Хорошо 🙏\nЯ напомню Вам {(promise_date - timedelta(days=1)).strftime('%d.%m.%Y')}, "
-        f"за день до {promise_date.strftime('%d.%m.%Y')}."
+    text = (
+        db.get_setting("sanctum_promise_confirm_text")
+        .replace("{дата_напоминания}", (promise_date - timedelta(days=1)).strftime("%d.%m.%Y"))
+        .replace("{дата}", promise_date.strftime("%d.%m.%Y"))
     )
+    await message.answer(text)
 
 
 # ---------- VEDA HEALING FLOW (медитативный помощник) ----------
@@ -1988,7 +1979,7 @@ async def show_profile(message: Message):
     if membership and membership["status"] != "removed" and membership["valid_until"]:
         valid_until = _parse_date(membership["valid_until"])
         if membership["lifetime_free"]:
-            sanctum_lines.append("🏆 Доступ пожизненный и бесплатный - дар за ключ Люминар III.")
+            sanctum_lines.append(db.get_setting("sanctum_lifetime_profile_line"))
         elif valid_until and valid_until >= today:
             sanctum_lines.append(
                 db.get_setting("profile_sanctum_active_text").replace("{дата}", valid_until.strftime('%d.%m.%Y'))
@@ -2137,7 +2128,7 @@ async def _process_receipt_photo(message: Message, reg_id) -> bool:
 
     file_id = message.photo[-1].file_id
     db.attach_receipt(reg_id, file_id)
-    await message.answer("Спасибо! Чек отправлен на проверку, я сообщу Вам о результате 🙏")
+    await message.answer(db.get_setting("receipt_thanks_text"))
 
     user_row = db.get_user(message.from_user.id)
     name_part = html.escape(_user_display_name(user_row)) if user_row else "(имя неизвестно)"
@@ -2169,12 +2160,12 @@ async def receipt_received(message: Message, state: FSMContext):
     ok = await _process_receipt_photo(message, reg_id)
     await state.clear()
     if not ok:
-        await message.answer("Не нашла активную заявку. Попробуйте зарегистрироваться заново.")
+        await message.answer(db.get_setting("receipt_no_active_request_text"))
 
 
 @router.message(ReceiptStates.waiting_receipt)
 async def receipt_wrong_type(message: Message):
-    await message.answer("Пришлите, пожалуйста, именно скриншот (фото) чека 📸")
+    await message.answer(db.get_setting("receipt_wrong_type_text"))
 
 
 async def _mark_admin_message_done(callback: CallbackQuery, note: str):
@@ -2207,7 +2198,7 @@ async def reg_confirm(callback: CallbackQuery):
         s = db.get_sanctum()
         invite_link = s["invite_link"] if s else ""
 
-    text = f"✅ Оплата за «{reg['product_title']}» подтверждена!"
+    text = db.get_setting("payment_confirmed_text").replace("{название}", reg["product_title"])
     text += f"\n\nВот Ваша ссылка:\n{invite_link}" if invite_link else "\n\nСсылку пришлю Вам отдельно."
 
     old_level = None
@@ -2226,8 +2217,9 @@ async def reg_confirm(callback: CallbackQuery):
         old_level = compute_ascension_level(reg["user_id"])
         valid_until, locked_price = _extend_sanctum_membership(reg["user_id"], price=reg["price"])
         text += (
-            f"\n\nПодписка активна до {valid_until.strftime('%d.%m.%Y')} по цене {locked_price}. "
-            "Я напомню заранее, когда придёт время продлевать подписку."
+            db.get_setting("payment_confirmed_sanctum_line")
+            .replace("{дата}", valid_until.strftime('%d.%m.%Y'))
+            .replace("{цена}", locked_price)
         )
         new_level = compute_ascension_level(reg["user_id"])
 
@@ -2272,10 +2264,7 @@ async def reg_decline(callback: CallbackQuery):
     try:
         await callback.bot.send_message(
             reg["user_id"],
-            f"❌ Оплату за «{reg['product_title']}» не удалось подтвердить.\n\n"
-            "Если хотите прислать чек ещё раз - нажмите «📸 Отправить чек».\n"
-            "Если остались вопросы - нажмите «💌 Личное обращение», напишите сообщение, "
-            "и я отвечу Вам здесь же 🙏",
+            db.get_setting("payment_declined_text").replace("{название}", reg["product_title"]),
             reply_markup=_receipt_help_kb(reg_id),
         )
     except Exception:
@@ -2302,17 +2291,18 @@ async def resend_receipt_start(callback: CallbackQuery, state: FSMContext):
     reg_id = int(callback.data[len("resend_receipt_"):])
     reg = db.get_registration(reg_id)
     if not reg:
-        await callback.answer("Эта заявка больше не найдена.", show_alert=True)
+        await callback.answer(db.get_setting("resend_receipt_not_found_text"), show_alert=True)
         return
     if reg["status"] == "confirmed":
-        await callback.answer("Эта оплата уже подтверждена ✅", show_alert=True)
+        await callback.answer(db.get_setting("resend_receipt_already_confirmed_text"), show_alert=True)
         return
     if reg["status"] == "awaiting_confirmation":
-        await callback.answer("Чек уже отправлен и ожидает проверки 🙏", show_alert=True)
+        await callback.answer(db.get_setting("resend_receipt_already_sent_text"), show_alert=True)
         return
     await state.set_state(ReceiptStates.waiting_receipt)
     await state.update_data(reg_id=reg_id)
-    await callback.message.answer(f"Пришлите, пожалуйста, скриншот чека по «{reg['product_title']}» 📸")
+    text = db.get_setting("resend_receipt_prompt_text").replace("{название}", reg["product_title"])
+    await callback.message.answer(text)
     await callback.answer()
 
 
@@ -3857,8 +3847,9 @@ async def adm_grant_access_finish(message: Message, state: FSMContext):
     s = db.get_sanctum()
     invite_link = s["invite_link"] if s else ""
     user_text = (
-        f"✨ Вам открыт доступ в {html.escape(SANCTUM_FULL_NAME)} до {valid_until.strftime('%d.%m.%Y')} "
-        f"по цене {locked_price}."
+        db.get_setting("sanctum_manual_grant_text")
+        .replace("{дата}", valid_until.strftime('%d.%m.%Y'))
+        .replace("{цена}", locked_price)
     )
     if invite_link:
         user_text += f"\n\nВаша ссылка:\n{invite_link}"
@@ -4160,6 +4151,140 @@ async def adm_reminder_text_field_start(callback: CallbackQuery, state: FSMConte
         "Можно вставить <code>{date}</code> (дата окончания) и/или <code>{price}</code> "
         "(цена именно этого человека) в нужных местах текста."
     )
+    await callback.answer()
+
+
+# ---------- админ-панель: тексты экранов VEDA SANCTUM (аудит 2026-09-28) ----------
+
+SANCTUM_SCREEN_TEXT_LABELS = {
+    "sanctum_placeholder_text": "заглушка, пока реквизиты Sanctum ещё не заполнены",
+    "sanctum_lifetime_text": "экран для тех, у кого пожизненный доступ (Люминар III)",
+    "sanctum_active_text": "экран «доступ активен до...» (с предложением продлить)",
+    "sanctum_expired_text": "экран «доступ закончился...» (с предложением возобновить)",
+    "sanctum_price_locked_line": "строка цены внутри экрана «закончился», если прежняя цена ещё сохраняется",
+    "sanctum_price_current_line": "строка цены внутри экрана «закончился», если прежняя цена уже не сохраняется",
+    "sanctum_already_lifetime_text": "всплывающая подсказка при попытке оплатить, если доступ уже пожизненный",
+    "sanctum_pending_request_text": "если уже есть заявка на Sanctum, ожидающая проверки",
+    "sanctum_payment_instructions_text": "сообщение с реквизитами оплаты Sanctum",
+    "sanctum_promise_prompt_text": "вопрос «на какую дату планируете оплату» (кнопка «Оплачу позже»)",
+    "sanctum_promise_invalid_date_text": "если дату не удалось распознать",
+    "sanctum_promise_past_date_text": "если названная дата уже в прошлом",
+    "sanctum_promise_too_late_text": "если дата позже, чем разрешено (после неё цена уже не сохраняется)",
+    "sanctum_promise_confirm_text": "подтверждение «хорошо, я напомню» после названной даты",
+    "sanctum_lifetime_profile_line": "строка в профиле для тех, у кого пожизненный доступ",
+    "sanctum_manual_grant_text": "сообщение человеку, когда Вы вручную выдаёте ему доступ",
+    "not_ready_text": "если оплата (вебинар или Sanctum) пока не настроена технически",
+}
+
+SANCTUM_SCREEN_TEXT_PLACEHOLDERS = {
+    "sanctum_active_text": ["{дата}", "{цена}"],
+    "sanctum_expired_text": ["{дата_часть}", "{строка_цены}"],
+    "sanctum_price_locked_line": ["{цена}", "{дата_до}"],
+    "sanctum_price_current_line": ["{цена}"],
+    "sanctum_payment_instructions_text": ["{цена}", "{реквизиты}"],
+    "sanctum_promise_prompt_text": ["{ограничение}"],
+    "sanctum_promise_too_late_text": ["{дата}"],
+    "sanctum_promise_confirm_text": ["{дата_напоминания}", "{дата}"],
+    "sanctum_manual_grant_text": ["{дата}", "{цена}"],
+}
+
+
+@router.callback_query(F.data == "adm_sanctum_screens_texts")
+async def adm_sanctum_screens_texts(callback: CallbackQuery):
+    if not await _require_permission(callback, "adm_sanctum_screens_texts"):
+        return
+    text = (
+        "<b>✏️ Тексты экранов VEDA SANCTUM</b>\n\n"
+        "Это не напоминания (они в соседнем разделе), а сами экраны, которые человек видит, "
+        "когда сам заходит в раздел ⚜️ VEDA SANCTUM, нажимает «Инициировать шаг оплаты» или "
+        "«⏰ Оплачу позже», а также то, что уходит при ручной выдаче доступа.\n\n"
+        "Нажмите на нужный текст ниже, чтобы отредактировать (форматирование - жирный, курсив - "
+        "сохраняется, если выделяете прямо при вводе в Telegram)."
+    )
+    rows = [
+        [InlineKeyboardButton(text=f"✏️ {label}", callback_data=f"adm_sst_{key}")]
+        for key, label in SANCTUM_SCREEN_TEXT_LABELS.items()
+    ]
+    rows.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="adm_back")])
+    await callback.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("adm_sst_"))
+async def adm_sanctum_screen_text_field_start(callback: CallbackQuery, state: FSMContext):
+    if not db.is_admin(callback.from_user.id):
+        await callback.answer("Только для администраторов", show_alert=True)
+        return
+    field = callback.data[len("adm_sst_"):]
+    current = db.get_setting(field) or ""
+    await state.set_state(EditFieldStates.waiting_value)
+    await state.update_data(target="sanctum_screen_text", field=field)
+    prompt = f"Сейчас:\n{current}\n\nПришлите новый текст - {SANCTUM_SCREEN_TEXT_LABELS[field]}:"
+    placeholders = SANCTUM_SCREEN_TEXT_PLACEHOLDERS.get(field)
+    if placeholders:
+        ph_hint = ", ".join(f"<code>{html.escape(p)}</code>" for p in placeholders)
+        prompt += f"\n\nВажно: именно фигурные скобки - {ph_hint} (не круглые), иначе не подставится."
+    await callback.message.answer(prompt)
+    await callback.answer()
+
+
+# ---------- админ-панель: тексты оплаты и чека (аудит 2026-09-28) ----------
+
+PAYMENT_FLOW_TEXT_LABELS = {
+    "receipt_thanks_text": "спасибо, чек отправлен на проверку",
+    "receipt_no_active_request_text": "если активная заявка не найдена (сбой)",
+    "receipt_wrong_type_text": "если прислали не фото, а что-то другое, пока бот ждёт чек",
+    "payment_confirmed_text": "начало сообщения о подтверждённой оплате",
+    "payment_confirmed_sanctum_line": "добавка к нему для Sanctum (дата и цена подписки)",
+    "payment_declined_text": "сообщение, если оплату отклонили",
+    "resend_receipt_not_found_text": "если заявка на повторную отправку чека не найдена",
+    "resend_receipt_already_confirmed_text": "если оплата уже подтверждена",
+    "resend_receipt_already_sent_text": "если чек уже отправлен и ждёт проверки",
+    "resend_receipt_prompt_text": "просьба прислать чек ещё раз",
+}
+
+PAYMENT_FLOW_TEXT_PLACEHOLDERS = {
+    "payment_confirmed_text": ["{название}"],
+    "payment_confirmed_sanctum_line": ["{дата}", "{цена}"],
+    "payment_declined_text": ["{название}"],
+    "resend_receipt_prompt_text": ["{название}"],
+}
+
+
+@router.callback_query(F.data == "adm_payment_flow_texts")
+async def adm_payment_flow_texts(callback: CallbackQuery):
+    if not await _require_permission(callback, "adm_payment_flow_texts"):
+        return
+    text = (
+        "<b>✏️ Тексты оплаты и чека</b>\n\n"
+        "Сообщения, которые человек видит на пути от «прислал скриншот чека» до "
+        "«оплата подтверждена или отклонена» - для вебинаров и для VEDA SANCTUM одинаково.\n\n"
+        "Нажмите на нужный текст ниже, чтобы отредактировать."
+    )
+    rows = [
+        [InlineKeyboardButton(text=f"✏️ {label}", callback_data=f"adm_pft_{key}")]
+        for key, label in PAYMENT_FLOW_TEXT_LABELS.items()
+    ]
+    rows.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="adm_back")])
+    await callback.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("adm_pft_"))
+async def adm_payment_flow_text_field_start(callback: CallbackQuery, state: FSMContext):
+    if not db.is_admin(callback.from_user.id):
+        await callback.answer("Только для администраторов", show_alert=True)
+        return
+    field = callback.data[len("adm_pft_"):]
+    current = db.get_setting(field) or ""
+    await state.set_state(EditFieldStates.waiting_value)
+    await state.update_data(target="payment_flow_text", field=field)
+    prompt = f"Сейчас:\n{current}\n\nПришлите новый текст - {PAYMENT_FLOW_TEXT_LABELS[field]}:"
+    placeholders = PAYMENT_FLOW_TEXT_PLACEHOLDERS.get(field)
+    if placeholders:
+        ph_hint = ", ".join(f"<code>{html.escape(p)}</code>" for p in placeholders)
+        prompt += f"\n\nВажно: именно фигурные скобки - {ph_hint} (не круглые), иначе не подставится."
+    await callback.message.answer(prompt)
     await callback.answer()
 
 
@@ -5135,6 +5260,7 @@ async def edit_field_value(message: Message, state: FSMContext):
     html_trusted = (
         (target, field) in HTML_TRUSTED_FIELDS or target == "feed_post" or target == "ritual_text"
         or (target == "ritual_event" and field in ("meaning", "practice"))
+        or target in ("sanctum_screen_text", "payment_flow_text")
     )
     value = message.html_text if html_trusted else message.text
 
@@ -5283,6 +5409,12 @@ async def edit_field_value(message: Message, state: FSMContext):
             raw = f"https://t.me/{raw}"
         db.set_setting("admin_personal_chat_link", raw)
         await message.answer(f"Ссылка на личный чат обновлена ✅\n{raw}")
+    elif target == "sanctum_screen_text":
+        db.set_setting(field, value)
+        await message.answer(f"«{SANCTUM_SCREEN_TEXT_LABELS[field]}» обновлён ✅")
+    elif target == "payment_flow_text":
+        db.set_setting(field, value)
+        await message.answer(f"«{PAYMENT_FLOW_TEXT_LABELS[field]}» обновлён ✅")
     elif target in ("ritual_text", "ritual_event", "ritual_add"):
         if await _ritual_edit_value(message, state, data, target, field, value):
             return

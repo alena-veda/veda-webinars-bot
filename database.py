@@ -938,6 +938,95 @@ def init_db():
         if not c.fetchone():
             c.execute("INSERT INTO settings (key, value) VALUES (?, ?)", (key, value))
 
+    # ---------- аудит текстов 2026-09-28: экраны VEDA SANCTUM ----------
+    _sanctum_screen_defaults = {
+        "not_ready_text": "Извините, регистрация сюда пока недоступна. Загляните чуть позже 🙏",
+        "sanctum_placeholder_text": (
+            "✨ Информация о канале VEDA SANCTUM | CODEofGOD скоро появится здесь. Загляните позже 🙏"
+        ),
+        "sanctum_lifetime_text": (
+            "⚜️ VEDA SANCTUM | CODEofGOD\n\n"
+            "🏆 Ваш доступ пожизненный и бесплатный - дар за ключ Люминар III."
+        ),
+        "sanctum_active_text": (
+            "⚜️ VEDA SANCTUM | CODEofGOD\n\n"
+            "Ваш доступ активен до {дата}.\n\n"
+            "Хотите продлить заранее на следующий месяц? Стоимость: {цена} "
+            "(закреплена за Вами, как за опытным участником Sanctum)."
+        ),
+        "sanctum_expired_text": (
+            "⚜️ VEDA SANCTUM | CODEofGOD\n\n"
+            "Ваш доступ закончился{дата_часть}.\n\n"
+            "Хотите возобновить?\n{строка_цены}"
+        ),
+        "sanctum_price_locked_line": (
+            "Стоимость подписки в месяц: {цена} - Ваша прежняя цена сохраняется до {дата_до}."
+        ),
+        "sanctum_price_current_line": "Стоимость подписки в месяц: {цена}.",
+        "sanctum_already_lifetime_text": "У Вас уже пожизненный доступ в VEDA SANCTUM 🏆 Платить не нужно.",
+        "sanctum_pending_request_text": (
+            "У Вас уже есть заявка в VEDA SANCTUM | CODEofGOD - она ожидает проверки, "
+            "я подтвержу её в ближайшее время 🙏"
+        ),
+        "sanctum_payment_instructions_text": (
+            "Для вступления в VEDA SANCTUM | CODEofGOD переведите {цена}.\n\n"
+            "{реквизиты}\n\n"
+            "После оплаты пришлите сюда, в VEDAME SPACE, скриншот Вашего чека 📸\n\n"
+            "Благодарю!"
+        ),
+        "sanctum_promise_prompt_text": (
+            "На какую дату Вы планируете совершение оплаты?\n"
+            "Пришлите в формате ДД.ММ.ГГГГ (например: 15.09.2026),\n"
+            "я напомню Вам за день до неё.\n\n"
+            "Это важно отметить именно здесь, в боте, а не писать мне лично: только отметка в боте "
+            "показывает, что Вы возвращаетесь, - и пока дата не наступила, я не буду Вас беспокоить."
+            "{ограничение}"
+        ),
+        "sanctum_promise_invalid_date_text": (
+            "Не получилось распознать дату.\nПришлите в формате ДД.ММ.ГГГГ, например: 15.09.2026."
+        ),
+        "sanctum_promise_past_date_text": "Дата должна быть в будущем.\nПришлите, пожалуйста, другую дату.",
+        "sanctum_promise_too_late_text": (
+            "Эту дату я, к сожалению, принять не могу: прежняя цена сохраняется до {дата}.\n"
+            "Пришлите, пожалуйста, дату не позже {дата}."
+        ),
+        "sanctum_promise_confirm_text": "Хорошо 🙏\nЯ напомню Вам {дата_напоминания}, за день до {дата}.",
+        "sanctum_lifetime_profile_line": "🏆 Доступ пожизненный и бесплатный - дар за ключ Люминар III.",
+        "sanctum_manual_grant_text": (
+            "✨ Вам открыт доступ в VEDA SANCTUM | CODEofGOD до {дата} по цене {цена}."
+        ),
+    }
+    for key, value in _sanctum_screen_defaults.items():
+        c.execute("SELECT value FROM settings WHERE key = ?", (key,))
+        if not c.fetchone():
+            c.execute("INSERT INTO settings (key, value) VALUES (?, ?)", (key, value))
+
+    # ---------- аудит текстов 2026-09-28: оплата и чек ----------
+    _payment_flow_defaults = {
+        "receipt_thanks_text": "Спасибо! Чек отправлен на проверку, я сообщу Вам о результате 🙏",
+        "receipt_no_active_request_text": "Не нашла активную заявку. Попробуйте зарегистрироваться заново.",
+        "receipt_wrong_type_text": "Пришлите, пожалуйста, именно скриншот (фото) чека 📸",
+        "payment_confirmed_text": "✅ Оплата за «{название}» подтверждена!",
+        "payment_confirmed_sanctum_line": (
+            "\n\nПодписка активна до {дата} по цене {цена}. "
+            "Я напомню заранее, когда придёт время продлевать подписку."
+        ),
+        "payment_declined_text": (
+            "❌ Оплату за «{название}» не удалось подтвердить.\n\n"
+            "Если хотите прислать чек ещё раз - нажмите «📸 Отправить чек».\n"
+            "Если остались вопросы - нажмите «💌 Личное обращение», напишите сообщение, "
+            "и я отвечу Вам здесь же 🙏"
+        ),
+        "resend_receipt_not_found_text": "Эта заявка больше не найдена.",
+        "resend_receipt_already_confirmed_text": "Эта оплата уже подтверждена ✅",
+        "resend_receipt_already_sent_text": "Чек уже отправлен и ожидает проверки 🙏",
+        "resend_receipt_prompt_text": "Пришлите, пожалуйста, скриншот чека по «{название}» 📸",
+    }
+    for key, value in _payment_flow_defaults.items():
+        c.execute("SELECT value FROM settings WHERE key = ?", (key,))
+        if not c.fetchone():
+            c.execute("INSERT INTO settings (key, value) VALUES (?, ?)", (key, value))
+
     # дар за Люминар I увеличен с 1 до 2 месяцев (её решение 2026-09-24) - если
     # текст ещё не был правлен вручную (значение точно как в старом дефолте),
     # обновляем его на новую формулировку; если она уже сама переписала текст,
