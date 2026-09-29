@@ -447,32 +447,31 @@ def _grant_luminar1_gift(user_id: int):
 
 # ---------- Путь Восхождения + Орден Люминаров ----------
 
-ASCENSION_LEVEL_NAMES = {
-    1: "Первое Касание",
-    2: "Искра",
-    3: "Исследователь Глубины",
-}
-
 # (порог по числу реально вошедших-оплативших приглашённых, ранг) — проверяются
 # от старшего к младшему, первый подошедший порог и есть текущий ранг
 LUMINAR_THRESHOLDS = [(30, 3), (10, 2), (5, 1)]
 
-LUMINAR_LABELS = {
-    1: "Орден: Люминар I",
-    2: "Орден: Люминар II",
-    3: "Орден: Люминар III",
-}
+# названия ступеней/рангов и формулировки даров - редактируемые настройки
+# (аудит 2026-09-29), см. ADMIN_PERMISSION_SECTIONS -> "✏️ Названия ступеней
+# и рангов". Только Люминар I выдаётся автоматически (см.
+# _credit_luminar_referral), II и III она дарит лично, бот только описывает
+# дар и сообщает ей о новом ранге.
 
-LUMINAR_RANK_NAMES = {1: "Люминар I", 2: "Люминар II", 3: "Люминар III"}
+def _ascension_level_name(level: int) -> str:
+    return db.get_setting(f"ascension_level{level}_name")
 
-# её формулировки даров, 2026-08-31 (II пересмотрен с 30% на 50%) — только
-# I выдаётся автоматически (см. _credit_luminar_referral), II и III она дарит
-# лично, бот только описывает дар и сообщает ей о новом ранге
-LUMINAR_GIFT_DESCRIPTIONS = {
-    1: "2 месяца в VEDA SANCTUM в дар",
-    2: "скидка 30% на личную сессию-терапию или распаковку личности",
-    3: "2 часа личной глубинной сессии в дар - распаковка личности или энерготерапия, на выбор",
-}
+
+def _luminar_label(rank: int) -> str:
+    return db.get_setting(f"luminar_label_{rank}")
+
+
+def _luminar_rank_name(rank: int) -> str:
+    return db.get_setting(f"luminar_rank_name_{rank}") if rank else "нет ранга"
+
+
+def _luminar_gift(rank: int) -> str:
+    return db.get_setting(f"luminar_gift_{rank}") or ""
+
 
 # сколько дней просрочки допускаем, прежде чем откатывать ступень на одну вниз —
 # короткое опоздание с оплатой (пара дней) не должно "ронять" человека
@@ -687,7 +686,7 @@ async def _credit_luminar_referral(bot: Bot, referred_user_id: int):
                 logging.exception("Не удалось отправить мгновенное уведомление о реферале пользователю %s", referrer_id)
         return
 
-    gift_desc = LUMINAR_GIFT_DESCRIPTIONS[new_rank]
+    gift_desc = _luminar_gift(new_rank)
     gift_note = ""
     template = db.get_setting(f"luminar_{new_rank}_text") or ""
     user_message = (
@@ -732,7 +731,7 @@ async def _credit_luminar_referral(bot: Bot, referred_user_id: int):
             await bot.send_message(
                 admin_id,
                 f'✨ {html.escape(referrer_name)} (<a href="tg://user?id={referrer_id}">ID {referrer_id}</a>) '
-                f"получил(а) {LUMINAR_RANK_NAMES[new_rank]} {today_str} - всего приглашённых-оплативших: "
+                f"получил(а) {_luminar_rank_name(new_rank)} {today_str} - всего приглашённых-оплативших: "
                 f"{new_count}.{gift_note}",
             )
         except Exception:
@@ -781,6 +780,7 @@ ADMIN_PERMISSION_SECTIONS = [
     ]),
     ("🪜 Путь Восхождения и Люминаров", [
         ("adm_ascension_texts", "🪜 Тексты Пути Восхождения и Люминаров"),
+        ("adm_naming_texts", "✏️ Названия ступеней и рангов"),
         ("adm_ascension_photos", "🖼 Фото Пути Восхождения и Люминаров"),
         ("adm_ascension_media", "🎥 Видео/голос на переходе ступени"),
         ("adm_intentions_list", "🕯 Намерения участников"),
@@ -2016,15 +2016,15 @@ async def show_profile(message: Message):
     level = compute_ascension_level(user_id)
     luminar_count = user_row["luminar_count"] if user_row else 0
     luminar_rank = _luminar_rank(luminar_count)
-    step_label = db.get_setting("profile_path_step_label_text").replace("{ступень}", ASCENSION_LEVEL_NAMES[level])
+    step_label = db.get_setting("profile_path_step_label_text").replace("{ступень}", _ascension_level_name(level))
     path_lines = [step_label]
     if luminar_rank:
-        rank_label = db.get_setting("profile_luminar_rank_label_text").replace("{ранг}", LUMINAR_LABELS[luminar_rank])
+        rank_label = db.get_setting("profile_luminar_rank_label_text").replace("{ранг}", _luminar_label(luminar_rank))
         if luminar_rank < 3:
             # прогресс к СЛЕДУЮЩЕМУ ключу — только пока не достигнут максимальный
             # ранг (для Люминар III следующего пока не существует)
             next_threshold = 10 if luminar_rank == 1 else 30
-            next_rank_name = LUMINAR_RANK_NAMES[luminar_rank + 1]
+            next_rank_name = _luminar_rank_name(luminar_rank + 1)
             filled = max(0, min(10, round(luminar_count / next_threshold * 10)))
             bar = "▓" * filled + "░" * (10 - filled)
             progress_line = (
@@ -3913,7 +3913,7 @@ async def adm_sanctum_list(callback: CallbackQuery):
         if m["lifetime_free"]:
             line = (
                 f"{status} - {html.escape(name)} ({id_link}) - дар Люминара III, платить больше не нужно\n"
-                f"   🪜 {ASCENSION_LEVEL_NAMES[level]} - в поле по оплатам: {acc_days} дн. (~{acc_days / 30:.1f} мес.)"
+                f"   🪜 {_ascension_level_name(level)} - в поле по оплатам: {acc_days} дн. (~{acc_days / 30:.1f} мес.)"
             )
         else:
             date_text = valid_until.strftime("%d.%m.%Y") if valid_until else "-"
@@ -3923,7 +3923,7 @@ async def adm_sanctum_list(callback: CallbackQuery):
             rate_tag = "🆕 новая цена" if _strip_html_tags(price) == _strip_html_tags(current_base_price) else "🕰 старая цена"
             line = (
                 f"{status} - {html.escape(name)} ({id_link}) - до {date_text} - {price} ({rate_tag})\n"
-                f"   🪜 {ASCENSION_LEVEL_NAMES[level]} - в поле по оплатам: {acc_days} дн. (~{acc_days / 30:.1f} мес.)"
+                f"   🪜 {_ascension_level_name(level)} - в поле по оплатам: {acc_days} дн. (~{acc_days / 30:.1f} мес.)"
             )
         if m["promise_date"]:
             promise = _parse_date(m["promise_date"])
@@ -4572,6 +4572,58 @@ async def adm_ascension_text_field_start(callback: CallbackQuery, state: FSMCont
     await callback.answer()
 
 
+# ---------- админ-панель: названия ступеней и рангов (аудит 2026-09-29) ----------
+
+NAMING_TEXT_LABELS = {
+    "ascension_level1_name": "название ступени 1 - «Первое Касание»",
+    "ascension_level2_name": "название ступени 2 - «Искра»",
+    "ascension_level3_name": "название ступени 3 - «Исследователь Глубины»",
+    "luminar_label_1": "полное название ранга Люминар I (строка в профиле)",
+    "luminar_label_2": "полное название ранга Люминар II (строка в профиле)",
+    "luminar_label_3": "полное название ранга Люминар III (строка в профиле)",
+    "luminar_rank_name_1": "короткое название ранга Люминар I (в уведомлениях)",
+    "luminar_rank_name_2": "короткое название ранга Люминар II (в уведомлениях)",
+    "luminar_rank_name_3": "короткое название ранга Люминар III (в уведомлениях)",
+    "luminar_gift_1": "описание дара за Люминар I (5 приглашённых)",
+    "luminar_gift_2": "описание дара за Люминар II (10 приглашённых)",
+    "luminar_gift_3": "описание дара за Люминар III (30 приглашённых)",
+}
+
+
+@router.callback_query(F.data == "adm_naming_texts")
+async def adm_naming_texts(callback: CallbackQuery):
+    if not await _require_permission(callback, "adm_naming_texts"):
+        return
+    text = (
+        "<b>✏️ Названия ступеней и рангов</b>\n\n"
+        "Сами слова «Первое Касание», «Искра», «Люминар I/II/III» и формулировки даров - "
+        "они подставляются в уже редактируемые тексты (поздравления, профиль) через "
+        "<code>{ступень}</code>/<code>{ранг}</code>/<code>{дар}</code>. Изменить название здесь - "
+        "оно сразу поменяется везде, где подставляется.\n\n"
+        "Нажмите на нужное, чтобы отредактировать."
+    )
+    rows = [
+        [InlineKeyboardButton(text=f"✏️ {label}", callback_data=f"adm_nmt_{key}")]
+        for key, label in NAMING_TEXT_LABELS.items()
+    ]
+    rows.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="adm_back")])
+    await callback.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("adm_nmt_"))
+async def adm_naming_text_field_start(callback: CallbackQuery, state: FSMContext):
+    if not db.is_admin(callback.from_user.id):
+        await callback.answer("Только для администраторов", show_alert=True)
+        return
+    field = callback.data[len("adm_nmt_"):]
+    current = db.get_setting(field) or ""
+    await state.set_state(EditFieldStates.waiting_value)
+    await state.update_data(target="naming_text", field=field)
+    await callback.message.answer(f"Сейчас:\n{current}\n\nПришлите новое - {NAMING_TEXT_LABELS[field]}:")
+    await callback.answer()
+
+
 # ---------- админ-панель: реквизиты оплаты ----------
 
 PAYMENT_FIELD_LABELS = {
@@ -4876,7 +4928,7 @@ async def adm_luminar_manual_user(message: Message, state: FSMContext):
     lifetime_note = " (сейчас с пожизненным доступом в Sanctum)" if m and m["lifetime_free"] else ""
     await state.set_state(LuminarManualStates.waiting_rank)
     await state.update_data(target_user_id=target_user_id)
-    rank_label = LUMINAR_RANK_NAMES.get(current_rank, "нет ранга")
+    rank_label = _luminar_rank_name(current_rank)
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="✏️ Ввести точное число приглашённых", callback_data="adm_lm_exact")],
         [InlineKeyboardButton(text="Нет ранга", callback_data="adm_lm_rank_0")],
@@ -4930,7 +4982,7 @@ async def _apply_luminar_manual(bot: Bot, target_user_id: int, new_count: int) -
     new_rank = _luminar_rank(new_count)
     new_level = compute_ascension_level(target_user_id)
 
-    result_lines = [f"Готово ✅ Счётчик: {new_count}. Ранг: {LUMINAR_RANK_NAMES.get(new_rank, 'нет ранга')}."]
+    result_lines = [f"Готово ✅ Счётчик: {new_count}. Ранг: {_luminar_rank_name(new_rank)}."]
 
     if new_rank > old_rank:
         # тот же дар, что и при настоящем достижении - для согласованности с
@@ -4949,7 +5001,7 @@ async def _apply_luminar_manual(bot: Bot, target_user_id: int, new_count: int) -
             user_message = (
                 template.replace("{имя}", (u["preferred_name"] or u["first_name"] or "друг"))
                 .replace("{число}", str(new_count))
-                .replace("{дар}", LUMINAR_GIFT_DESCRIPTIONS.get(new_rank, ""))
+                .replace("{дар}", _luminar_gift(new_rank))
             )
             try:
                 await _send_with_optional_photo(
@@ -5132,7 +5184,7 @@ async def _render_user_detail(callback: CallbackQuery, user_id: int):
     luminar_count = u["luminar_count"] or 0
     luminar_rank = _luminar_rank(luminar_count)
     if luminar_rank:
-        luminar_status = f"{LUMINAR_RANK_NAMES[luminar_rank]} ({luminar_count} приглашённых-оплативших)"
+        luminar_status = f"{_luminar_rank_name(luminar_rank)} ({luminar_count} приглашённых-оплативших)"
     else:
         luminar_status = f"пока нет ({luminar_count} из 5 до Люминара I)"
     text = (
@@ -5525,6 +5577,9 @@ async def edit_field_value(message: Message, state: FSMContext):
     elif target == "general_screen_text":
         db.set_setting(field, value)
         await message.answer(f"«{GENERAL_SCREEN_TEXT_LABELS[field]}» обновлён ✅")
+    elif target == "naming_text":
+        db.set_setting(field, value)
+        await message.answer(f"«{NAMING_TEXT_LABELS[field]}» обновлено ✅")
     elif target == "sanctum_screen_text":
         db.set_setting(field, value)
         await message.answer(f"«{SANCTUM_SCREEN_TEXT_LABELS[field]}» обновлён ✅")
