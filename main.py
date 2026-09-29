@@ -784,6 +784,7 @@ ADMIN_PERMISSION_SECTIONS = [
         ("adm_ascension_photos", "🖼 Фото Пути Восхождения и Люминаров"),
         ("adm_ascension_media", "🎥 Видео/голос на переходе ступени"),
         ("adm_intentions_list", "🕯 Намерения участников"),
+        ("adm_intention_texts", "🕯 Тексты о намерении"),
         ("adm_profile_texts", "✨ Тексты «Мой профиль»"),
         ("adm_personal_link", "💌 Ссылка на личный чат с Alena Veda"),
         ("adm_luminar_manual", "✨ Установить ранг Люминара вручную"),
@@ -2851,15 +2852,15 @@ async def send_weekly_health_digest(bot: Bot):
 # ---------- админ-панель: автовозврат "потерянных" людей ----------
 
 REENGAGE_FIELD_LABELS = {
-    "stall_text": "текст «завис на оплате»",
-    "reengage_text": "текст «пришёл и пропал»",
-    "winback_text": "текст «возврат после ухода из Sanctum»",
-    "sanctum_nudge_text": "текст «посмотрел, не начал»",
-    "sanctum_removed_text": "текст «убрала вручную» (уходит сразу при удалении из Sanctum)",
-    "sanctum_lastchance_text": "текст «последний шанс сохранить цену»",
-    "sanctum_reset_text": "текст «время в поле обнулилось»",
-    "sanctum_reset_luminar_line": "строку про ранг Люминара (для «время в поле обнулилось»)",
-    "sanctum_reset_meditation_line": "строку про VEDA HEALING FLOW (для «время в поле обнулилось»)",
+    "stall_text": "текст «завис на оплате» - независимый случай, ждёт чек дольше срока (⏱ ниже)",
+    "reengage_text": "текст «пришёл и пропал» - независимый случай, ни разу ничего не покупал и молчит",
+    "winback_text": "текст «возврат после ухода из Sanctum» - независимый случай, был в Sanctum и не продлил",
+    "sanctum_nudge_text": "текст «посмотрел, не начал» - независимый случай, открыл Sanctum, но не нажал оплату (приходит ВМЕСТО «пришёл и пропал»)",
+    "sanctum_removed_text": "1) «убрала вручную» - уходит СРАЗУ, как только Вы нажали «🚫 Убрать» в списке подписчиков",
+    "sanctum_lastchance_text": "2) «последний шанс сохранить цену» - приходит ПОСЛЕ текста выше, за несколько дней до конца срока (⏱ ниже)",
+    "sanctum_reset_text": "3) «время в поле обнулилось» - приходит ПОСЛЕДНИМ в этой цепочке, если человек так и не вернулся",
+    "sanctum_reset_luminar_line": "добавка ВНУТРИ текста выше (3), про ранг Люминара - только тем, у кого он есть",
+    "sanctum_reset_meditation_line": "добавка ВНУТРИ текста выше (3), про VEDA HEALING FLOW - только тем, кто уже покупал",
 }
 
 
@@ -4022,9 +4023,9 @@ async def adm_sanctum_kick(callback: CallbackQuery):
 
 
 REMINDER_TEXT_LABELS = {
-    "sanctum_reminder_text_early": "текст напоминания заранее (за 2 дня до нового месяца)",
-    "sanctum_reminder_text_due": "текст напоминания в день истечения",
-    "sanctum_promise_reminder_text": "текст напоминания об обещанной дате оплаты",
+    "sanctum_reminder_text_early": "1) напоминание заранее (за 2 дня до нового месяца) - первое из двух",
+    "sanctum_reminder_text_due": "2) напоминание в день истечения - приходит ПОСЛЕ напоминания заранее, если так и не продлили",
+    "sanctum_promise_reminder_text": "отдельный случай, вне цепочки выше - приходит только тем, кто сам назвал дату оплаты через «⏰ Оплачу позже» (раздел «✏️ Тексты экранов VEDA SANCTUM»), за день до этой даты",
 }
 
 # (target, field) — поля, которые уходят пользователю без html.escape, поэтому
@@ -4092,13 +4093,10 @@ HTML_TRUSTED_FIELDS = {
     # HTML-разметку в тексте кнопки, поэтому для них нужен обычный текст без
     # форматирования (см. edit_field_value: html_trusted решается через
     # членство именно в этом множестве)
-    ("ascension_text", "ascension_intention_invite_text"),
-    ("ascension_text", "ascension_intention_confirmation_text"),
     ("ascension_text", "referral_welcome_text"),
     ("ascension_text", "luminar_referral_ping_text_1"),
     ("ascension_text", "luminar_referral_ping_text_2"),
     ("ascension_text", "luminar_referral_ping_text_3"),
-    ("ascension_text", "ascension_intention_recall_text"),
     ("ascension_text", "luminar_intro_text"),
     ("ascension_text", "luminar_1_text"),
     ("ascension_text", "luminar_2_text"),
@@ -4152,23 +4150,23 @@ async def adm_reminder_text_field_start(callback: CallbackQuery, state: FSMConte
 # ---------- админ-панель: тексты экранов VEDA SANCTUM (аудит 2026-09-28) ----------
 
 SANCTUM_SCREEN_TEXT_LABELS = {
-    "sanctum_placeholder_text": "заглушка, пока реквизиты Sanctum ещё не заполнены",
-    "sanctum_lifetime_text": "экран для тех, у кого пожизненный доступ (Люминар III)",
-    "sanctum_active_text": "экран «доступ активен до...» (с предложением продлить)",
-    "sanctum_expired_text": "экран «доступ закончился...» (с предложением возобновить)",
-    "sanctum_price_locked_line": "строка цены внутри экрана «закончился», если прежняя цена ещё сохраняется",
-    "sanctum_price_current_line": "строка цены внутри экрана «закончился», если прежняя цена уже не сохраняется",
-    "sanctum_already_lifetime_text": "всплывающая подсказка при попытке оплатить, если доступ уже пожизненный",
-    "sanctum_pending_request_text": "если уже есть заявка на Sanctum, ожидающая проверки",
-    "sanctum_payment_instructions_text": "сообщение с реквизитами оплаты Sanctum",
-    "sanctum_promise_prompt_text": "вопрос «на какую дату планируете оплату» (кнопка «Оплачу позже»)",
-    "sanctum_promise_invalid_date_text": "если дату не удалось распознать",
-    "sanctum_promise_past_date_text": "если названная дата уже в прошлом",
-    "sanctum_promise_too_late_text": "если дата позже, чем разрешено (после неё цена уже не сохраняется)",
-    "sanctum_promise_confirm_text": "подтверждение «хорошо, я напомню» после названной даты",
-    "sanctum_lifetime_profile_line": "строка в профиле для тех, у кого пожизненный доступ",
-    "sanctum_manual_grant_text": "сообщение человеку, когда Вы вручную выдаёте ему доступ",
-    "not_ready_text": "если оплата (вебинар или Sanctum) пока не настроена технически",
+    "sanctum_placeholder_text": "заглушка при открытии VEDA SANCTUM, пока реквизиты ещё не заполнены - вместо всего остального ниже",
+    "sanctum_lifetime_text": "экран VEDA SANCTUM для тех, у кого пожизненный доступ (Люминар III) - вместо «активен»/«закончился» ниже",
+    "sanctum_active_text": "экран «доступ активен до...» - открывается, если человек уже был в Sanctum и оплата действует; кнопка на нём ведёт к реквизитам оплаты ниже",
+    "sanctum_expired_text": "экран «доступ закончился...» - открывается вместо экрана выше, если оплата истекла; кнопка ведёт к тем же реквизитам оплаты",
+    "sanctum_price_locked_line": "строка цены ВНУТРИ экрана «закончился» выше, если прежняя цена ещё сохраняется",
+    "sanctum_price_current_line": "строка цены ВНУТРИ экрана «закончился» выше, если прежняя цена уже не сохраняется - альтернатива строке выше",
+    "sanctum_already_lifetime_text": "всплывающая подсказка при попытке нажать оплату, если доступ уже пожизненный - вместо реквизитов ниже",
+    "sanctum_pending_request_text": "если уже есть заявка на Sanctum, ожидающая проверки - вместо реквизитов ниже, при повторном нажатии оплаты",
+    "sanctum_payment_instructions_text": "сообщение с реквизитами оплаты Sanctum - приходит после нажатия «Инициировать шаг»/«Продлить»/«Возобновить»; дальше человек либо присылает чек (раздел «✏️ Тексты оплаты и чека»), либо нажимает «Оплачу позже» (цепочка ниже)",
+    "sanctum_promise_prompt_text": "1) «На какую дату планируете оплату» - приходит после кнопки «⏰ Оплачу позже»",
+    "sanctum_promise_invalid_date_text": "2а) если дату не удалось распознать - просит прислать ещё раз, цепочка не сдвигается",
+    "sanctum_promise_past_date_text": "2б) если названная дата уже в прошлом - тоже просит другую дату",
+    "sanctum_promise_too_late_text": "2в) если дата позже, чем разрешено - тоже просит другую дату",
+    "sanctum_promise_confirm_text": "3) подтверждение «хорошо, я напомню» - приходит, когда дата наконец принята; в назначенный день само придёт напоминание (раздел «✉️ Тексты напоминаний VEDA SANCTUM»)",
+    "sanctum_lifetime_profile_line": "строка в «Мой профиль» для тех, у кого пожизненный доступ",
+    "sanctum_manual_grant_text": "сообщение человеку, когда Вы вручную выдаёте ему доступ в «🔑 Выдать/продлить доступ»",
+    "not_ready_text": "если оплата (вебинар или Sanctum) пока не настроена технически - редкий технический случай, не часть обычной цепочки",
 }
 
 SANCTUM_SCREEN_TEXT_PLACEHOLDERS = {
@@ -4226,16 +4224,16 @@ async def adm_sanctum_screen_text_field_start(callback: CallbackQuery, state: FS
 # ---------- админ-панель: тексты оплаты и чека (аудит 2026-09-28) ----------
 
 PAYMENT_FLOW_TEXT_LABELS = {
-    "receipt_thanks_text": "спасибо, чек отправлен на проверку",
-    "receipt_no_active_request_text": "если активная заявка не найдена (сбой)",
-    "receipt_wrong_type_text": "если прислали не фото, а что-то другое, пока бот ждёт чек",
-    "payment_confirmed_text": "начало сообщения о подтверждённой оплате",
-    "payment_confirmed_sanctum_line": "добавка к нему для Sanctum (дата и цена подписки)",
-    "payment_declined_text": "сообщение, если оплату отклонили",
-    "resend_receipt_not_found_text": "если заявка на повторную отправку чека не найдена",
-    "resend_receipt_already_confirmed_text": "если оплата уже подтверждена",
-    "resend_receipt_already_sent_text": "если чек уже отправлен и ждёт проверки",
-    "resend_receipt_prompt_text": "просьба прислать чек ещё раз",
+    "receipt_thanks_text": "1) «Спасибо, чек отправлен на проверку» - приходит человеку СРАЗУ, как только он прислал фото чека (после реквизитов оплаты - вебинара или Sanctum)",
+    "receipt_no_active_request_text": "1а) если активная заявка не найдена (редкий сбой) - вместо благодарности выше",
+    "receipt_wrong_type_text": "1б) если прислали не фото, а что-то другое, пока бот ждёт чек - просит прислать ещё раз",
+    "payment_confirmed_text": "2) начало сообщения о подтверждённой оплате - приходит, когда ВЫ нажимаете «✅ Подтвердить» в «🧾 Заявки на подтверждение»",
+    "payment_confirmed_sanctum_line": "2а) добавка к сообщению выше, только для Sanctum (дата и цена подписки)",
+    "payment_declined_text": "2б) сообщение, если Вы вместо этого нажали «❌ Отклонить» - альтернатива подтверждению выше",
+    "resend_receipt_not_found_text": "после отказа человек может нажать «📸 Отправить чек» ещё раз - это если заявка вдруг не найдена (сбой)",
+    "resend_receipt_already_confirmed_text": "если оплата уже успела подтвердиться, пока он жал кнопку - редкий случай",
+    "resend_receipt_already_sent_text": "если чек уже отправлен и ждёт проверки - предупреждение вместо повтора",
+    "resend_receipt_prompt_text": "обычный случай - просьба прислать чек ещё раз, возвращает к шагу 1 выше",
 }
 
 PAYMENT_FLOW_TEXT_PLACEHOLDERS = {
@@ -4286,10 +4284,10 @@ async def adm_payment_flow_text_field_start(callback: CallbackQuery, state: FSMC
 # ---------- админ-панель: тексты напоминаний о вебинарах ----------
 
 WEBINAR_REMINDER_TEXT_LABELS = {
-    "webinar_reminder_5d_text": "текст напоминания за 5 дней",
-    "webinar_reminder_24h_text": "текст напоминания за 24 часа",
-    "webinar_reminder_1h_text": "текст напоминания за 1 час",
-    "webinar_video_ready_text": "текст «готова запись» (уходит, когда впервые заполняете ссылку на запись)",
+    "webinar_reminder_5d_text": "1) напоминание за 5 дней до начала",
+    "webinar_reminder_24h_text": "2) напоминание за 24 часа - приходит ПОСЛЕ напоминания за 5 дней",
+    "webinar_reminder_1h_text": "3) напоминание за 1 час - приходит ПОСЛЕДНИМ, прямо перед началом",
+    "webinar_video_ready_text": "отдельный случай, вне цепочки выше - уходит один раз, когда впервые заполняете ссылку на запись у прошедшего вебинара",
 }
 
 
@@ -4356,17 +4354,17 @@ async def adm_webinar_reminder_text_field_start(callback: CallbackQuery, state: 
 # ---------- админ-панель: тексты экранов «Вебинары» (аудит 2026-09-28) ----------
 
 WEBINAR_SCREEN_TEXT_LABELS = {
-    "webinars_intro_text": "текст над списком предстоящих вебинаров",
-    "webinars_empty_text": "текст, когда предстоящих вебинаров пока нет",
-    "webinars_past_empty_text": "всплывающая подсказка, если прошедших пока нет",
-    "webinars_past_header_text": "заголовок над списком прошедших",
+    "webinars_intro_text": "текст над списком предстоящих вебинаров - первое, что видно при нажатии «📅 Вебинары»",
+    "webinars_empty_text": "текст, когда предстоящих вебинаров пока нет - вместо текста выше",
+    "webinars_past_empty_text": "всплывающая подсказка, если прошедших пока нет - при нажатии «📜 Прошедшие»",
+    "webinars_past_header_text": "заголовок над списком прошедших - вместо подсказки выше, если прошедшие есть",
     "webinar_unavailable_past_text": "если открыли прошедший вебинар, которого уже нет (удалён)",
-    "webinar_video_locked_line": "строка про доступ к записи для тех, кому она пока не открыта",
-    "webinar_unavailable_text": "всплывающая подсказка, если вебинар стал недоступен (удалён/скрыт)",
-    "webinar_pending_request_text": "если уже есть заявка на этот вебинар, ожидающая проверки",
-    "webinar_payment_instructions_text": "сообщение с реквизитами оплаты вебинара",
-    "webinar_reviews_empty_text": "всплывающая подсказка, если отзывов у вебинара пока нет",
-    "webinar_reviews_header_text": "заголовок над списком отзывов конкретного вебинара",
+    "webinar_video_locked_line": "строка про доступ к записи ВНУТРИ карточки прошедшего вебинара, для тех, кому запись пока не открыта",
+    "webinar_unavailable_text": "всплывающая подсказка, если вебинар стал недоступен (удалён/скрыт) - вместо карточки",
+    "webinar_pending_request_text": "если уже есть заявка на этот вебинар, ожидающая проверки - вместо реквизитов ниже, при повторном нажатии оплаты",
+    "webinar_payment_instructions_text": "сообщение с реквизитами оплаты вебинара - приходит после «Зарегистрироваться и оплатить»; дальше человек присылает чек (раздел «✏️ Тексты оплаты и чека»)",
+    "webinar_reviews_empty_text": "всплывающая подсказка, если отзывов у вебинара пока нет (кнопка «⭐ Отзывы» в таком случае вообще не показывается человеку)",
+    "webinar_reviews_header_text": "заголовок над списком отзывов конкретного вебинара - над самими отзывами",
 }
 
 WEBINAR_SCREEN_TEXT_PLACEHOLDERS = {
@@ -4416,34 +4414,31 @@ async def adm_webinar_screen_text_field_start(callback: CallbackQuery, state: FS
 # ---------- админ-панель: общие тексты, архив, вопросы, намерение (аудит 2026-09-28) ----------
 
 GENERAL_SCREEN_TEXT_LABELS = {
-    "unknown_user_text": "если человека нет в базе, а он написал что-то, кроме /start",
-    "require_text_text": "если бот ждёт текст, а прислали что-то другое (фото, стикер)",
-    "name_question_text": "вопрос «Как я могу к Вам обращаться?» при знакомстве",
-    "name_thanks_text": "«Благодарю» сразу после имени (только когда пришли по ссылке на вебинар)",
-    "cancel_text": "ответ на команду /cancel",
-    "info_menu_text": "«Выберите, что интересует» - меню раздела ❓ Инфо",
-    "feed_intro_text": "вступление над списком месяцев архива публикаций",
-    "feed_empty_text": "если в архиве публикаций пока пусто",
+    "unknown_user_text": "если человека нет в базе, а он написал что-то, кроме /start (отдельный случай, вне цепочек)",
+    "require_text_text": "если бот ждёт текст, а прислали что-то другое - может появиться в ЛЮБОМ месте ввода текста",
+    "name_question_text": "вопрос «Как я могу к Вам обращаться?» - самое первое сообщение при знакомстве (или сразу после клика по прямой ссылке на вебинар, если человек ещё не знаком)",
+    "name_thanks_text": "«Благодарю, {имя}!» - идёт СРАЗУ ПОСЛЕ ответа на вопрос выше, но только если пришли по прямой ссылке на вебинар (в обычном знакомстве вместо этого сразу идёт общее приветствие пространства и «Первое Касание»)",
+    "cancel_text": "ответ на команду /cancel - прерывает любой текущий ввод, возвращает в меню",
+    "info_menu_text": "«Выберите, что интересует» - меню раздела ❓ Инфо (дальше человек выбирает «Частые вопросы» или «Правила»)",
+    "feed_intro_text": "вступление над списком месяцев архива публикаций - первое, что видно при открытии архива",
+    "feed_empty_text": "если в архиве публикаций пока пусто - альтернатива вступлению выше",
     "feed_month_empty_text": "если в выбранном месяце публикаций больше нет",
     "feed_post_not_found_text": "если публикация не найдена (удалена)",
-    "contact_admin_prompt_text": "приглашение написать «💌 Личное обращение»",
-    "contact_admin_thanks_text": "подтверждение, что личное сообщение передано",
-    "contact_admin_failed_text": "если передать личное сообщение не удалось (сбой)",
-    "question_unavailable_text": "если вопросы под вебинаром/публикацией выключены",
-    "question_prompt_text": "приглашение написать вопрос под вебинаром/публикацией",
-    "question_thanks_text": "подтверждение, что вопрос передан",
-    "question_failed_text": "если передать вопрос не удалось (сбой)",
-    "question_answer_prefix_text": "начало сообщения с Вашим ответом на вопрос человека",
+    "contact_admin_prompt_text": "приглашение написать «💌 Личное обращение» - после него человек пишет сообщение, дальше уходит одно из двух ниже",
+    "contact_admin_thanks_text": "подтверждение, что сообщение передано - приходит СРАЗУ ПОСЛЕ того, как человек написал (обычный исход)",
+    "contact_admin_failed_text": "если передать не удалось (сбой) - редкая альтернатива подтверждению выше",
+    "question_unavailable_text": "если вопросы под вебинаром/публикацией выключены - вместо приглашения написать вопрос",
+    "question_prompt_text": "приглашение написать вопрос под вебинаром/публикацией - после него человек пишет вопрос, дальше уходит одно из двух ниже",
+    "question_thanks_text": "подтверждение, что вопрос передан - приходит СРАЗУ ПОСЛЕ того, как человек написал (обычный исход)",
+    "question_failed_text": "если передать вопрос не удалось (сбой) - редкая альтернатива подтверждению выше",
+    "question_answer_prefix_text": "начало сообщения с Вашим ответом - приходит человеку, когда Вы отвечаете на его вопрос из панели",
     "qa_public_empty_text": "если под постом ещё нет опубликованных вопросов-ответов",
-    "qa_public_header_text": "заголовок списка «Вопросы и ответы»",
-    "intention_missing_text": "если человек нажал «Изменить намерение», а оно ещё не записано",
-    "intention_edit_prompt_text": "приглашение переписать уже записанное намерение",
+    "qa_public_header_text": "заголовок списка «Вопросы и ответы» - над самим списком вопросов",
 }
 
 GENERAL_SCREEN_TEXT_PLACEHOLDERS = {
     "name_thanks_text": ["{имя}"],
     "question_answer_prefix_text": ["{ответ}"],
-    "intention_edit_prompt_text": ["{текст}"],
 }
 
 
@@ -4452,10 +4447,11 @@ async def adm_general_screen_texts(callback: CallbackQuery):
     if not await _require_permission(callback, "adm_general_screen_texts"):
         return
     text = (
-        "<b>✏️ Прочие тексты (общие, архив, вопросы, намерение)</b>\n\n"
+        "<b>✏️ Прочие тексты (общие, архив, вопросы)</b>\n\n"
         "Технические и служебные сообщения бота, которые не попали в другие разделы - "
         "приветственные подсказки, архив публикаций, вопросы под постами, обращение "
-        "«💌 Личное обращение», намерение ступени «Искра».\n\n"
+        "«💌 Личное обращение». Намерение ступени «Искра» - в своём разделе "
+        "«🕯 Тексты о намерении».\n\n"
         "Нажмите на нужный текст ниже, чтобы отредактировать."
     )
     rows = [
@@ -4488,25 +4484,22 @@ async def adm_general_screen_text_field_start(callback: CallbackQuery, state: FS
 # ---------- админ-панель: тексты Пути Восхождения и Люминаров ----------
 
 ASCENSION_TEXT_LABELS = {
-    "ascension_level1_brief_text": "краткая сводка «Первое Касание» (видна в профиле)",
-    "ascension_level1_text": "полное послание «Первое Касание» (кнопка «Читать послание» + сообщение сразу после /start)",
-    "ascension_level2_brief_text": "краткая сводка «Искра» (видна в профиле)",
-    "ascension_level2_text": "полное послание «Искра» (кнопка «Читать послание» + сообщение при переходе)",
-    "ascension_level3_brief_text": "краткая сводка «Исследователь Глубины» (видна в профиле)",
-    "ascension_level3_text": "полное послание «Исследователь Глубины» (кнопка «Читать послание» + сообщение при переходе)",
-    "ascension_overview_text": "«Как устроен Путь?» - справка (кнопка ℹ️ в профиле)",
-    "ascension_intention_invite_text": "приглашение написать намерение (сразу после «Искры»)",
-    "ascension_intention_confirmation_text": "ответ сразу после того, как человек написал намерение",
-    "referral_welcome_text": "особое приветствие для пришедших по реферальной ссылке (перед вопросом об имени)",
-    "luminar_referral_ping_text_1": "мгновенное уведомление о реферале - вариант 1 (случайно выбирается один из трёх)",
-    "luminar_referral_ping_text_2": "мгновенное уведомление о реферале - вариант 2",
-    "luminar_referral_ping_text_3": "мгновенное уведомление о реферале - вариант 3",
-    "ascension_intention_recall_text": "ежемесячное напоминание о намерении",
-    "luminar_intro_short_text": "«Созвездие Люминаров» - краткая строка (видна в профиле всегда)",
-    "luminar_intro_text": "«Созвездие Люминаров» - полный текст (кнопка «Подробнее» в профиле)",
-    "luminar_1_text": "поздравление с Люминар I (5 приглашённых)",
-    "luminar_2_text": "поздравление с Люминар II (10 приглашённых)",
-    "luminar_3_text": "поздравление с Люминар III (30 приглашённых)",
+    "ascension_level1_brief_text": "краткая сводка «Первое Касание» - видна в профиле, короткая версия полного послания ниже",
+    "ascension_level1_text": "полное послание «Первое Касание» - приходит сразу после ПЕРВОГО знакомства (имя + общее приветствие), самое первое послание, до него ничего нет",
+    "ascension_level2_brief_text": "краткая сводка «Искра» - видна в профиле, короткая версия полного послания ниже",
+    "ascension_level2_text": "полное послание «Искра» - приходит сразу после ПЕРВОЙ оплаты VEDA SANCTUM; следом за ним, отдельным сообщением, уходит приглашение написать намерение (раздел «🕯 Тексты о намерении»)",
+    "ascension_level3_brief_text": "краткая сводка «Исследователь Глубины» - видна в профиле, короткая версия полного послания ниже",
+    "ascension_level3_text": "полное послание «Исследователь Глубины» - приходит при переходе на эту ступень (обычно через 6 месяцев в Sanctum после «Искры»)",
+    "ascension_overview_text": "«Как устроен Путь?» - отдельная справка, открывается кнопкой ℹ️ в профиле по желанию человека, не часть автоматической цепочки",
+    "referral_welcome_text": "особое приветствие для пришедших по реферальной ссылке - приходит ПЕРВЫМ, до обычного вопроса об имени",
+    "luminar_referral_ping_text_1": "мгновенное уведомление о новом реферале - вариант 1 из трёх (бот случайно выбирает один; если реферал дал новый ранг - вместо этого уходит поздравление с рангом ниже)",
+    "luminar_referral_ping_text_2": "мгновенное уведомление о новом реферале - вариант 2 из трёх",
+    "luminar_referral_ping_text_3": "мгновенное уведомление о новом реферале - вариант 3 из трёх",
+    "luminar_intro_short_text": "«Созвездие Люминаров» - краткая строка, видна в профиле всегда",
+    "luminar_intro_text": "«Созвездие Люминаров» - полный текст, открывается кнопкой «Подробнее» в профиле",
+    "luminar_1_text": "поздравление с Люминар I - приходит ВМЕСТО обычного уведомления о реферале, когда приглашённых становится 5",
+    "luminar_2_text": "поздравление с Люминар II - приходит ВМЕСТО обычного уведомления о реферале, когда приглашённых становится 10",
+    "luminar_3_text": "поздравление с Люминар III - приходит ВМЕСТО обычного уведомления о реферале, когда приглашённых становится 30",
 }
 
 ASCENSION_TEXT_PLACEHOLDERS = {
@@ -4514,9 +4507,7 @@ ASCENSION_TEXT_PLACEHOLDERS = {
     "ascension_level2_text": ["{имя}"],
     "ascension_level3_text": ["{имя}"],
     "ascension_overview_text": ["{имя}"],
-    "ascension_intention_confirmation_text": ["{имя}"],
     "referral_welcome_text": ["{пригласивший}", "{название}"],
-    "ascension_intention_recall_text": ["{намерение}"],
     "luminar_1_text": ["{имя}"],
     "luminar_2_text": ["{имя}"],
     "luminar_3_text": ["{имя}"],
@@ -4531,18 +4522,16 @@ async def adm_ascension_texts(callback: CallbackQuery):
         "<b>✉️ Тексты Пути Восхождения и Люминаров</b>\n\n"
         "Тексты ступеней 1-3 показываются в «✨ Мой профиль», а для 2-й и 3-й ступени "
         "ещё и приходят отдельным сообщением ровно в момент перехода (сразу ПОСЛЕ "
-        "подтверждения оплаты, не раньше). Приглашение, подтверждение и ежемесячное "
-        "напоминание - три момента ритуала намерения на ступени «Искра», по порядку: "
-        "приглашение уходит сразу после текста «Искра», подтверждение - сразу как "
-        "человек напишет своё намерение в ответ (и в нём же - напоминание о личном "
-        "разборе в дар), напоминание - раз в месяц после этого. "
-        "Поздравления Люминаров уходят при достижении каждого ранга. Справка «Как устроен Путь?» "
-        "открывается по отдельной кнопке ℹ️ в профиле, по желанию человека.\n\n"
+        "подтверждения оплаты, не раньше). Сразу после «Искры» начинается отдельный "
+        "ритуал намерения - его тексты вынесены в свой раздел «🕯 Тексты о намерении» "
+        "(соседняя кнопка в этой же группе панели).\n\n"
+        "Поздравления Люминаров приходят ВМЕСТО обычного уведомления о реферале, когда "
+        "приглашённых становится 5/10/30. Справка «Как устроен Путь?» "
+        "открывается по отдельной кнопке ℹ️ в профиле, по желанию человека, вне цепочки.\n\n"
         "Нажмите на нужный текст ниже, чтобы отредактировать (можно форматировать - "
         "жирный, курсив, ссылки - прямо при вводе в Telegram).\n\n"
         "Подсказки по местам вставки:\n"
-        "• Ступени 1-3, подтверждение намерения: <code>{имя}</code>\n"
-        "• Напоминание о намерении: <code>{намерение}</code>\n"
+        "• Ступени 1-3, приветствие рефералов: <code>{имя}</code>\n"
         "• Поздравления Люминаров: <code>{имя}</code>, <code>{число}</code>, <code>{дар}</code>"
     )
     rows = [
@@ -4565,6 +4554,66 @@ async def adm_ascension_text_field_start(callback: CallbackQuery, state: FSMCont
     await state.update_data(target="ascension_text", field=field)
     prompt = f"Сейчас:\n{current}\n\nПришлите новый {ASCENSION_TEXT_LABELS[field]}:"
     placeholders = ASCENSION_TEXT_PLACEHOLDERS.get(field)
+    if placeholders:
+        ph_hint = ", ".join(f"<code>{html.escape(p)}</code>" for p in placeholders)
+        prompt += f"\n\nВажно: именно фигурные скобки - {ph_hint} (не круглые), иначе не подставится."
+    await callback.message.answer(prompt)
+    await callback.answer()
+
+
+# ---------- админ-панель: тексты о намерении (аудит 2026-09-29) ----------
+# Собраны в один раздел все сообщения ритуала намерения на ступени «Искра» -
+# раньше были разбросаны по двум разным экранам (её просьба 2026-09-29:
+# "чтоб мне было понятно всё точно, чтоб был порядок, а не хаос").
+# Порядок в списке ниже - это и есть порядок событий в жизни человека.
+
+INTENTION_TEXT_LABELS = {
+    "ascension_intention_invite_text": "1) Приглашение написать намерение - приходит СРАЗУ ПОСЛЕ полного послания «Искра» (текст «Искра» - в разделе «🪜 Тексты Пути Восхождения и Люминаров»)",
+    "ascension_intention_confirmation_text": "2) Ответ сразу после того, как человек написал намерение - приходит СРАЗУ ПОСЛЕ того, как он ответил на приглашение выше",
+    "ascension_intention_recall_text": "3) Ежемесячное напоминание о намерении - приходит 8 и 22 числа каждого месяца ПОСЛЕ того, как намерение уже записано, пока Вы не отметите разбор «дан» в «🕯 Намерения участников»",
+    "intention_edit_prompt_text": "4) Приглашение переписать намерение - открывается кнопкой «✏️ Изменить намерение» в профиле или в напоминании выше, в ЛЮБОЙ момент после того, как намерение уже записано",
+    "intention_missing_text": "Если нажали «Изменить намерение», а оно ещё НЕ записано - редкий случай, обычно до этого доходит только через прямую ссылку, минуя приглашение выше",
+}
+
+INTENTION_TEXT_PLACEHOLDERS = {
+    "ascension_intention_confirmation_text": ["{имя}"],
+    "ascension_intention_recall_text": ["{намерение}"],
+    "intention_edit_prompt_text": ["{текст}"],
+}
+
+
+@router.callback_query(F.data == "adm_intention_texts")
+async def adm_intention_texts(callback: CallbackQuery):
+    if not await _require_permission(callback, "adm_intention_texts"):
+        return
+    text = (
+        "<b>🕯 Тексты о намерении</b>\n\n"
+        "Все сообщения ритуала намерения ступени «Искра», собранные в одном месте - "
+        "раньше были разбросаны по двум разным разделам. Порядок кнопок ниже - "
+        "это порядок событий по жизни: приглашение → ответ → ежемесячное напоминание → "
+        "переписать в любой момент. Последняя кнопка - редкий отдельный случай.\n\n"
+        "Нажмите на нужный текст ниже, чтобы отредактировать."
+    )
+    rows = [
+        [InlineKeyboardButton(text=f"✏️ {label}", callback_data=f"adm_int_{key}")]
+        for key, label in INTENTION_TEXT_LABELS.items()
+    ]
+    rows.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="adm_back")])
+    await callback.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("adm_int_"))
+async def adm_intention_text_field_start(callback: CallbackQuery, state: FSMContext):
+    if not db.is_admin(callback.from_user.id):
+        await callback.answer("Только для администраторов", show_alert=True)
+        return
+    field = callback.data[len("adm_int_"):]
+    current = db.get_setting(field) or ""
+    await state.set_state(EditFieldStates.waiting_value)
+    await state.update_data(target="intention_text", field=field)
+    prompt = f"Сейчас:\n{current}\n\nПришлите новый текст - {INTENTION_TEXT_LABELS[field]}:"
+    placeholders = INTENTION_TEXT_PLACEHOLDERS.get(field)
     if placeholders:
         ph_hint = ", ".join(f"<code>{html.escape(p)}</code>" for p in placeholders)
         prompt += f"\n\nВажно: именно фигурные скобки - {ph_hint} (не круглые), иначе не подставится."
@@ -5422,7 +5471,10 @@ async def edit_field_value(message: Message, state: FSMContext):
     html_trusted = (
         (target, field) in HTML_TRUSTED_FIELDS or target == "feed_post" or target == "ritual_text"
         or (target == "ritual_event" and field in ("meaning", "practice"))
-        or target in ("sanctum_screen_text", "payment_flow_text", "webinar_screen_text", "general_screen_text")
+        or target in (
+            "sanctum_screen_text", "payment_flow_text", "webinar_screen_text",
+            "general_screen_text", "intention_text",
+        )
     )
     value = message.html_text if html_trusted else message.text
 
@@ -5580,6 +5632,9 @@ async def edit_field_value(message: Message, state: FSMContext):
     elif target == "naming_text":
         db.set_setting(field, value)
         await message.answer(f"«{NAMING_TEXT_LABELS[field]}» обновлено ✅")
+    elif target == "intention_text":
+        db.set_setting(field, value)
+        await message.answer(f"«{INTENTION_TEXT_LABELS[field]}» обновлён ✅")
     elif target == "sanctum_screen_text":
         db.set_setting(field, value)
         await message.answer(f"«{SANCTUM_SCREEN_TEXT_LABELS[field]}» обновлён ✅")
