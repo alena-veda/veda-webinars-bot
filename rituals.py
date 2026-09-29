@@ -93,6 +93,18 @@ TEXT_DEFAULTS = {
     "ritual_practice_navaratri": "",
     "ritual_practice_equinox": "",
     "ritual_practice_solstice": "",
+    # экран календаря на 2 месяца вперёд (кнопка "🌙" из профиля/Инфо) - аудит 2026-09-28
+    "ritual_calendar_header_text": "🌙 <b>Календарь ритуалов</b>",
+    "ritual_month_empty_text": "даты скоро появятся",
+    "ritual_kyiv_time_text": "Время везде киевское.",
+    "ritual_members_only_text": "Этот раздел для участников VEDA SANCTUM",
+    "ritual_month_no_dates_text": "На этот месяц пока нет дат",
+    "ritual_reminder_on_text": "Напоминания включены: в день события утром придёт сообщение 🔔",
+    "ritual_reminder_off_text": "Напоминания выключены 🔕",
+    "ritual_optout_on_text": (
+        "Хорошо, календарь 1-го числа больше не пришлю. Открыть его всегда можно в «Инфо» и в профиле."
+    ),
+    "ritual_optout_off_text": "Календарь снова будет приходить 1-го числа каждого месяца ✅",
 }
 
 TEXT_LABELS = {
@@ -117,6 +129,15 @@ TEXT_LABELS = {
     "ritual_practice_navaratri": "практика на Навратри (на все даты сразу)",
     "ritual_practice_equinox": "практика на равноденствие (на все даты сразу)",
     "ritual_practice_solstice": "практика на солнцестояние (на все даты сразу)",
+    "ritual_calendar_header_text": "заголовок экрана календаря на 2 месяца вперёд",
+    "ritual_month_empty_text": "если в одном из двух месяцев пока нет дат",
+    "ritual_kyiv_time_text": "подпись под двухмесячным календарём про часовой пояс",
+    "ritual_members_only_text": "если не участник Sanctum пытается открыть детали/переключатели",
+    "ritual_month_no_dates_text": "«О практиках месяца» - если в этом месяце дат нет",
+    "ritual_reminder_on_text": "подсказка при включении напоминания на день события",
+    "ritual_reminder_off_text": "подсказка при выключении напоминания на день события",
+    "ritual_optout_on_text": "подсказка при отключении ежемесячной рассылки календаря",
+    "ritual_optout_off_text": "подсказка при включении ежемесячной рассылки календаря обратно",
 }
 
 # одноразовое напоминание тем, кто увидел кнопку календаря (например, на

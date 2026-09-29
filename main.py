@@ -104,7 +104,7 @@ async def _unknown_user_guard(handler, event, data):
     text = event.text or ""
     if user and not text.startswith("/start") and not db.get_user(user.id):
         await event.answer(
-            "Чтобы начать (или начать заново), напишите /start 🙏",
+            db.get_setting("unknown_user_text"),
             reply_markup=ReplyKeyboardRemove(),
         )
         return
@@ -266,7 +266,7 @@ async def _require_text(message: Message):
     возвращает None, если пришло фото/стикер/что угодно нетекстовое —
     защищает поля в базе от записи пустого/None значения."""
     if not message.text:
-        await message.answer("Пришлите, пожалуйста, обычным текстом 🙏")
+        await message.answer(db.get_setting("require_text_text"))
         return None
     return message.text
 
@@ -276,7 +276,7 @@ async def _require_html_text(message: Message):
     ссылки), которое вы выделяете прямо в Telegram при вводе — для полей,
     которые потом показываются людям с сохранением этого форматирования."""
     if not message.text:
-        await message.answer("Пришлите, пожалуйста, обычным текстом 🙏")
+        await message.answer(db.get_setting("require_text_text"))
         return None
     return message.html_text
 
@@ -805,6 +805,7 @@ ADMIN_PERMISSION_SECTIONS = [
         ("adm_faq_suggestion_confirm", "✏️ Текст подтверждения (вопрос принят)"),
         ("adm_rules", "📜 Текст «Правила пространства»"),
         ("adm_bot_guide", "🧭 Текст «Как пользоваться ботом»"),
+        ("adm_general_screen_texts", "✏️ Прочие тексты (общие, архив, вопросы, намерение)"),
     ]),
     ("💳 Оплаты", [
         ("adm_payment", "💳 Реквизиты оплаты"),
@@ -966,7 +967,8 @@ async def _send_welcome(message: Message):
     )
 
 
-NAME_QUESTION_TEXT = "Как я могу к Вам обращаться? Представьтесь, пожалуйста. ✨"
+def _name_question_text() -> str:
+    return db.get_setting("name_question_text")
 
 
 async def _send_referral_welcome(message: Message, referrer):
@@ -996,7 +998,7 @@ async def _send_referral_welcome(message: Message, referrer):
 @router.callback_query(F.data == "referral_continue")
 async def referral_continue_cb(callback: CallbackQuery, state: FSMContext):
     await state.set_state(NameStates.waiting_name)
-    await callback.message.answer(NAME_QUESTION_TEXT)
+    await callback.message.answer(_name_question_text())
     await callback.answer()
 
 
@@ -1044,7 +1046,7 @@ async def cmd_start(message: Message, state: FSMContext):
                     # не бросаем дальше — человек всё равно получит обычный
                     # вопрос об имени ниже, а не останется совсем без ответа
         await state.set_state(NameStates.waiting_name)
-        await message.answer(NAME_QUESTION_TEXT)
+        await message.answer(_name_question_text())
         return
     await _send_welcome(message)
 
@@ -1076,7 +1078,8 @@ async def name_received(message: Message, state: FSMContext):
     await state.clear()
     if pending_webinar_id:
         await message.answer(
-            f"Благодарю, {text.strip()}! 🙏", reply_markup=main_menu_kb(message.from_user.id)
+            db.get_setting("name_thanks_text").replace("{имя}", text.strip()),
+            reply_markup=main_menu_kb(message.from_user.id),
         )
         # если вебинар вдруг стал недоступен, пока человек знакомился с ботом —
         # не страшно, он уже в главном меню с полноценной навигацией
@@ -1113,7 +1116,7 @@ async def name_received(message: Message, state: FSMContext):
 @router.message(Command("cancel"))
 async def cmd_cancel(message: Message, state: FSMContext):
     await state.clear()
-    await message.answer("Отменено.", reply_markup=main_menu_kb(message.from_user.id))
+    await message.answer(db.get_setting("cancel_text"), reply_markup=main_menu_kb(message.from_user.id))
     # администратора после отмены возвращаем сразу в панель, а не просто в
     # обычное меню - именно туда он и хотел вернуться, отменяя правку
     # (её решение 2026-09-27: "/cancel" должен реально возвращать на главный
@@ -1280,7 +1283,7 @@ async def wb_view(callback: CallbackQuery, state: FSMContext):
         db.add_user(callback.from_user.id, callback.from_user.username, callback.from_user.first_name)
         await state.set_state(NameStates.waiting_name)
         await state.update_data(pending_webinar_id=webinar_id)
-        await callback.message.answer("Как я могу к Вам обращаться? Представьтесь, пожалуйста. ✨")
+        await callback.message.answer(_name_question_text())
         await callback.answer()
         return
     ok = await _send_webinar_card(callback.message, webinar_id, callback.from_user.id)
@@ -1631,12 +1634,12 @@ async def open_bot_guide_cb(callback: CallbackQuery):
 
 @router.message(F.text == BTN_INFO)
 async def show_info_menu(message: Message):
-    await message.answer("Выберите, что интересует:", reply_markup=_info_menu_kb())
+    await message.answer(db.get_setting("info_menu_text"), reply_markup=_info_menu_kb())
 
 
 @router.callback_query(F.data == "info_menu_back")
 async def info_menu_back_cb(callback: CallbackQuery):
-    await callback.message.answer("Выберите, что интересует:", reply_markup=_info_menu_kb())
+    await callback.message.answer(db.get_setting("info_menu_text"), reply_markup=_info_menu_kb())
     await callback.answer()
 
 
@@ -1724,19 +1727,14 @@ def _feed_months_kb(months) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-FEED_MONTHS_INTRO = (
-    "Здесь собраны все публикации, упорядоченные по месяцам.\n\n"
-    "Выберите месяц ниже - откроется самая свежая публикация из него, а дальше "
-    "листайте кнопками «Раньше» / «Позже» под ней, одну за другой."
-)
-
-
 async def _send_feed_months(message: Message):
     months = db.get_feed_months(_today().isoformat())
     if not months:
-        await message.answer("Пока в архиве пусто.\nЗагляните позже 🌿")
+        await message.answer(db.get_setting("feed_empty_text"))
         return
-    await message.answer(f"{BTN_FEED}\n\n{FEED_MONTHS_INTRO}", reply_markup=_feed_months_kb(months))
+    await message.answer(
+        f"{BTN_FEED}\n\n{db.get_setting('feed_intro_text')}", reply_markup=_feed_months_kb(months)
+    )
 
 
 @router.message(F.text == BTN_FEED)
@@ -1748,10 +1746,12 @@ async def show_feed(message: Message):
 async def feed_months(callback: CallbackQuery):
     months = db.get_feed_months(_today().isoformat())
     if not months:
-        await callback.message.edit_text("Пока в архиве пусто.\nЗагляните позже 🌿")
+        await callback.message.edit_text(db.get_setting("feed_empty_text"))
         await callback.answer()
         return
-    await callback.message.edit_text(f"{BTN_FEED}\n\n{FEED_MONTHS_INTRO}", reply_markup=_feed_months_kb(months))
+    await callback.message.edit_text(
+        f"{BTN_FEED}\n\n{db.get_setting('feed_intro_text')}", reply_markup=_feed_months_kb(months)
+    )
     await callback.answer()
 
 
@@ -1806,7 +1806,7 @@ async def feed_month_open(callback: CallbackQuery):
     year_month = callback.data[len("feed_month_"):]
     posts = db.get_feed_posts_in_month(year_month, _today().isoformat())
     if not posts:
-        await callback.answer("В этом месяце публикаций больше нет.", show_alert=True)
+        await callback.answer(db.get_setting("feed_month_empty_text"), show_alert=True)
         return
     await _show_feed_post_at(callback.message, year_month, 0, posts, callback.from_user.id)
     await callback.answer()
@@ -1819,7 +1819,7 @@ async def feed_nav(callback: CallbackQuery):
     idx = int(idx_str)
     posts = db.get_feed_posts_in_month(year_month, _today().isoformat())
     if not posts or idx < 0 or idx >= len(posts):
-        await callback.answer("Публикация не найдена - возможно, её удалили.", show_alert=True)
+        await callback.answer(db.get_setting("feed_post_not_found_text"), show_alert=True)
         return
     await _show_feed_post_at(callback.message, year_month, idx, posts, callback.from_user.id)
     await callback.answer()
@@ -2306,9 +2306,7 @@ async def resend_receipt_start(callback: CallbackQuery, state: FSMContext):
 @router.callback_query(F.data == "contact_admin")
 async def contact_admin_start(callback: CallbackQuery, state: FSMContext):
     await state.set_state(ContactAdminStates.waiting_message)
-    await callback.message.answer(
-        "Напишите Ваше сообщение (можно текстом, фото, голосовое) - я его передам и Вам ответят здесь же 🙏"
-    )
+    await callback.message.answer(db.get_setting("contact_admin_prompt_text"))
     await callback.answer()
 
 
@@ -2332,9 +2330,9 @@ async def contact_admin_received(message: Message, state: FSMContext):
         except Exception:
             logging.exception("Не удалось передать сообщение администратору %s", admin_id)
     if delivered:
-        await message.answer("Благодарю, я передала Ваше сообщение 🙏\nОтвет придёт здесь же, в этом чате.")
+        await message.answer(db.get_setting("contact_admin_thanks_text"))
     else:
-        await message.answer("Не получилось передать сообщение, попробуйте ещё раз чуть позже 🙏")
+        await message.answer(db.get_setting("contact_admin_failed_text"))
 
 
 @router.callback_query(F.data.startswith("admin_reply_"))
@@ -2381,11 +2379,11 @@ async def wq_ask_webinar_start(callback: CallbackQuery, state: FSMContext):
     webinar_id = int(callback.data[len("wq_ask_webinar_"):])
     w = db.get_webinar(webinar_id)
     if not w or not w["allow_questions"]:
-        await callback.answer("Вопросы сейчас недоступны.", show_alert=True)
+        await callback.answer(db.get_setting("question_unavailable_text"), show_alert=True)
         return
     await state.set_state(QuestionStates.waiting_question)
     await state.update_data(ref_type="webinar", ref_id=webinar_id, ref_title=w["title"])
-    await callback.message.answer("Напишите Ваш вопрос, я передам его Алёне 🙏")
+    await callback.message.answer(db.get_setting("question_prompt_text"))
     await callback.answer()
 
 
@@ -2394,11 +2392,11 @@ async def wq_ask_feed_start(callback: CallbackQuery, state: FSMContext):
     post_id = int(callback.data[len("wq_ask_feed_"):])
     post = db.get_feed_post(post_id)
     if not post or not post["allow_questions"]:
-        await callback.answer("Вопросы сейчас недоступны.", show_alert=True)
+        await callback.answer(db.get_setting("question_unavailable_text"), show_alert=True)
         return
     await state.set_state(QuestionStates.waiting_question)
     await state.update_data(ref_type="feed_post", ref_id=post_id, ref_title=_feed_post_short_label(post))
-    await callback.message.answer("Напишите Ваш вопрос, я передам его Алёне 🙏")
+    await callback.message.answer(db.get_setting("question_prompt_text"))
     await callback.answer()
 
 
@@ -2433,9 +2431,9 @@ async def question_received(message: Message, state: FSMContext):
         except Exception:
             logging.exception("Не удалось передать вопрос администратору %s", admin_id)
     if delivered:
-        await message.answer("Спасибо, я передала Ваш вопрос 🙏")
+        await message.answer(db.get_setting("question_thanks_text"))
     else:
-        await message.answer("Не получилось передать вопрос, попробуйте ещё раз чуть позже 🙏")
+        await message.answer(db.get_setting("question_failed_text"))
 
 
 @router.callback_query(F.data.startswith("q_answer_"))
@@ -2479,7 +2477,8 @@ async def _q_answer_finalize(callback: CallbackQuery, state: FSMContext, is_publ
         return
     db.set_question_answer(q_id, answer_text, is_public)
     try:
-        await callback.bot.send_message(q["user_id"], f"💬 Ответ на Ваш вопрос:\n\n{answer_text}")
+        answer_msg = db.get_setting("question_answer_prefix_text").replace("{ответ}", answer_text)
+        await callback.bot.send_message(q["user_id"], answer_msg)
     except Exception:
         logging.exception("Не удалось отправить ответ на вопрос пользователю %s", q["user_id"])
     note = "опубликован под постом ✅" if is_public else "отправлен лично ✅"
@@ -2502,9 +2501,9 @@ async def wq_public_webinar(callback: CallbackQuery):
     webinar_id = int(callback.data[len("wq_public_webinar_"):])
     qa = db.get_public_qa("webinar", webinar_id)
     if not qa:
-        await callback.answer("Пока нет опубликованных вопросов.", show_alert=True)
+        await callback.answer(db.get_setting("qa_public_empty_text"), show_alert=True)
         return
-    lines = ["<b>💬 Вопросы и ответы</b>\n"]
+    lines = [f"<b>{html.escape(db.get_setting('qa_public_header_text'))}</b>\n"]
     for q in qa:
         lines.append(f"❓ {html.escape(q['question_text'])}\n💬 {q['answer_text']}\n")
     await callback.message.answer("\n".join(lines))
@@ -2516,9 +2515,9 @@ async def wq_public_feed(callback: CallbackQuery):
     post_id = int(callback.data[len("wq_public_feed_"):])
     qa = db.get_public_qa("feed_post", post_id)
     if not qa:
-        await callback.answer("Пока нет опубликованных вопросов.", show_alert=True)
+        await callback.answer(db.get_setting("qa_public_empty_text"), show_alert=True)
         return
-    lines = ["<b>💬 Вопросы и ответы</b>\n"]
+    lines = [f"<b>{html.escape(db.get_setting('qa_public_header_text'))}</b>\n"]
     for q in qa:
         lines.append(f"❓ {html.escape(q['question_text'])}\n💬 {q['answer_text']}\n")
     await callback.message.answer("\n".join(lines))
@@ -4414,6 +4413,78 @@ async def adm_webinar_screen_text_field_start(callback: CallbackQuery, state: FS
     await callback.answer()
 
 
+# ---------- админ-панель: общие тексты, архив, вопросы, намерение (аудит 2026-09-28) ----------
+
+GENERAL_SCREEN_TEXT_LABELS = {
+    "unknown_user_text": "если человека нет в базе, а он написал что-то, кроме /start",
+    "require_text_text": "если бот ждёт текст, а прислали что-то другое (фото, стикер)",
+    "name_question_text": "вопрос «Как я могу к Вам обращаться?» при знакомстве",
+    "name_thanks_text": "«Благодарю» сразу после имени (только когда пришли по ссылке на вебинар)",
+    "cancel_text": "ответ на команду /cancel",
+    "info_menu_text": "«Выберите, что интересует» - меню раздела ❓ Инфо",
+    "feed_intro_text": "вступление над списком месяцев архива публикаций",
+    "feed_empty_text": "если в архиве публикаций пока пусто",
+    "feed_month_empty_text": "если в выбранном месяце публикаций больше нет",
+    "feed_post_not_found_text": "если публикация не найдена (удалена)",
+    "contact_admin_prompt_text": "приглашение написать «💌 Личное обращение»",
+    "contact_admin_thanks_text": "подтверждение, что личное сообщение передано",
+    "contact_admin_failed_text": "если передать личное сообщение не удалось (сбой)",
+    "question_unavailable_text": "если вопросы под вебинаром/публикацией выключены",
+    "question_prompt_text": "приглашение написать вопрос под вебинаром/публикацией",
+    "question_thanks_text": "подтверждение, что вопрос передан",
+    "question_failed_text": "если передать вопрос не удалось (сбой)",
+    "question_answer_prefix_text": "начало сообщения с Вашим ответом на вопрос человека",
+    "qa_public_empty_text": "если под постом ещё нет опубликованных вопросов-ответов",
+    "qa_public_header_text": "заголовок списка «Вопросы и ответы»",
+    "intention_missing_text": "если человек нажал «Изменить намерение», а оно ещё не записано",
+    "intention_edit_prompt_text": "приглашение переписать уже записанное намерение",
+}
+
+GENERAL_SCREEN_TEXT_PLACEHOLDERS = {
+    "name_thanks_text": ["{имя}"],
+    "question_answer_prefix_text": ["{ответ}"],
+    "intention_edit_prompt_text": ["{текст}"],
+}
+
+
+@router.callback_query(F.data == "adm_general_screen_texts")
+async def adm_general_screen_texts(callback: CallbackQuery):
+    if not await _require_permission(callback, "adm_general_screen_texts"):
+        return
+    text = (
+        "<b>✏️ Прочие тексты (общие, архив, вопросы, намерение)</b>\n\n"
+        "Технические и служебные сообщения бота, которые не попали в другие разделы - "
+        "приветственные подсказки, архив публикаций, вопросы под постами, обращение "
+        "«💌 Личное обращение», намерение ступени «Искра».\n\n"
+        "Нажмите на нужный текст ниже, чтобы отредактировать."
+    )
+    rows = [
+        [InlineKeyboardButton(text=f"✏️ {label}", callback_data=f"adm_gst_{key}")]
+        for key, label in GENERAL_SCREEN_TEXT_LABELS.items()
+    ]
+    rows.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="adm_back")])
+    await callback.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("adm_gst_"))
+async def adm_general_screen_text_field_start(callback: CallbackQuery, state: FSMContext):
+    if not db.is_admin(callback.from_user.id):
+        await callback.answer("Только для администраторов", show_alert=True)
+        return
+    field = callback.data[len("adm_gst_"):]
+    current = db.get_setting(field) or ""
+    await state.set_state(EditFieldStates.waiting_value)
+    await state.update_data(target="general_screen_text", field=field)
+    prompt = f"Сейчас:\n{current}\n\nПришлите новый текст - {GENERAL_SCREEN_TEXT_LABELS[field]}:"
+    placeholders = GENERAL_SCREEN_TEXT_PLACEHOLDERS.get(field)
+    if placeholders:
+        ph_hint = ", ".join(f"<code>{html.escape(p)}</code>" for p in placeholders)
+        prompt += f"\n\nВажно: именно фигурные скобки - {ph_hint} (не круглые), иначе не подставится."
+    await callback.message.answer(prompt)
+    await callback.answer()
+
+
 # ---------- админ-панель: тексты Пути Восхождения и Люминаров ----------
 
 ASCENSION_TEXT_LABELS = {
@@ -5299,7 +5370,7 @@ async def edit_field_value(message: Message, state: FSMContext):
     html_trusted = (
         (target, field) in HTML_TRUSTED_FIELDS or target == "feed_post" or target == "ritual_text"
         or (target == "ritual_event" and field in ("meaning", "practice"))
-        or target in ("sanctum_screen_text", "payment_flow_text", "webinar_screen_text")
+        or target in ("sanctum_screen_text", "payment_flow_text", "webinar_screen_text", "general_screen_text")
     )
     value = message.html_text if html_trusted else message.text
 
@@ -5451,6 +5522,9 @@ async def edit_field_value(message: Message, state: FSMContext):
     elif target == "webinar_screen_text":
         db.set_setting(field, value)
         await message.answer(f"«{WEBINAR_SCREEN_TEXT_LABELS[field]}» обновлён ✅")
+    elif target == "general_screen_text":
+        db.set_setting(field, value)
+        await message.answer(f"«{GENERAL_SCREEN_TEXT_LABELS[field]}» обновлён ✅")
     elif target == "sanctum_screen_text":
         db.set_setting(field, value)
         await message.answer(f"«{SANCTUM_SCREEN_TEXT_LABELS[field]}» обновлён ✅")
@@ -6644,13 +6718,11 @@ async def edit_intention_start(callback: CallbackQuery, state: FSMContext):
     membership = db.get_sanctum_membership(callback.from_user.id)
     current = membership["intention_text"] if membership else None
     if not current:
-        await callback.answer("У Вас пока нет записанного намерения.", show_alert=True)
+        await callback.answer(db.get_setting("intention_missing_text"), show_alert=True)
         return
     await state.set_state(IntentionStates.waiting_text)
-    await callback.message.answer(
-        f"Сейчас записано:\n«{current}»\n\n"
-        "Пришлите новый текст намерения полностью - он заменит прежний."
-    )
+    text = db.get_setting("intention_edit_prompt_text").replace("{текст}", current)
+    await callback.message.answer(text)
     await callback.answer()
 
 
@@ -6796,13 +6868,13 @@ async def ritual_open(callback: CallbackQuery):
         await callback.answer()
         return
     ym_now, ym_next = _ritual_two_months()
-    blocks = ["🌙 <b>Календарь ритуалов</b>"]
+    blocks = [db.get_setting("ritual_calendar_header_text")]
     for ym in (ym_now, ym_next):
         # в текущем месяце уже прошедшие даты не показываем
         evs = [e for e in rituals.events_of_month(ym) if e["event_date"] >= _today().isoformat()]
-        body ="\n".join(rituals.fmt_line(e) for e in evs) if evs else "даты скоро появятся"
+        body = "\n".join(rituals.fmt_line(e) for e in evs) if evs else db.get_setting("ritual_month_empty_text")
         blocks.append(f"<b>{rituals.month_title(ym)}</b>\n{body}")
-    blocks.append("Время везде киевское.")
+    blocks.append(db.get_setting("ritual_kyiv_time_text"))
     user_row = db.get_user(user_id)
     await _send_long(callback.bot, callback.message.chat.id, "\n\n".join(blocks), _ritual_kb(ym_now, user_row))
     await callback.answer()
@@ -6811,12 +6883,12 @@ async def ritual_open(callback: CallbackQuery):
 @router.callback_query(F.data.startswith("rit_about_"))
 async def ritual_about(callback: CallbackQuery):
     if not _ritual_is_member(callback.from_user.id):
-        await callback.answer("Этот раздел для участников VEDA SANCTUM", show_alert=True)
+        await callback.answer(db.get_setting("ritual_members_only_text"), show_alert=True)
         return
     ym = callback.data[len("rit_about_"):]
     text = rituals.about_text(ym)
     if not text:
-        await callback.answer("На этот месяц пока нет дат", show_alert=True)
+        await callback.answer(db.get_setting("ritual_month_no_dates_text"), show_alert=True)
         return
     await _send_long(callback.bot, callback.message.chat.id, text)
     await callback.answer()
@@ -6826,7 +6898,7 @@ async def ritual_about(callback: CallbackQuery):
 async def ritual_toggle_remind(callback: CallbackQuery):
     user_id = callback.from_user.id
     if not _ritual_is_member(user_id):
-        await callback.answer("Этот раздел для участников VEDA SANCTUM", show_alert=True)
+        await callback.answer(db.get_setting("ritual_members_only_text"), show_alert=True)
         return
     ym = callback.data[len("rit_remind_"):]
     user_row = db.get_user(user_id)
@@ -6837,8 +6909,7 @@ async def ritual_toggle_remind(callback: CallbackQuery):
     except Exception:
         pass
     await callback.answer(
-        "Напоминания включены: в день события утром придёт сообщение 🔔" if new_value
-        else "Напоминания выключены 🔕",
+        db.get_setting("ritual_reminder_on_text") if new_value else db.get_setting("ritual_reminder_off_text"),
         show_alert=True,
     )
 
@@ -6847,7 +6918,7 @@ async def ritual_toggle_remind(callback: CallbackQuery):
 async def ritual_toggle_optout(callback: CallbackQuery):
     user_id = callback.from_user.id
     if not _ritual_is_member(user_id):
-        await callback.answer("Этот раздел для участников VEDA SANCTUM", show_alert=True)
+        await callback.answer(db.get_setting("ritual_members_only_text"), show_alert=True)
         return
     ym = callback.data[len("rit_optout_"):]
     user_row = db.get_user(user_id)
@@ -6858,8 +6929,7 @@ async def ritual_toggle_optout(callback: CallbackQuery):
     except Exception:
         pass
     await callback.answer(
-        "Хорошо, календарь 1-го числа больше не пришлю. Открыть его всегда можно в «Инфо» и в профиле."
-        if new_value else "Календарь снова будет приходить 1-го числа каждого месяца ✅",
+        db.get_setting("ritual_optout_on_text") if new_value else db.get_setting("ritual_optout_off_text"),
         show_alert=True,
     )
 
