@@ -5201,7 +5201,7 @@ async def _render_user_detail(callback: CallbackQuery, user_id: int):
         [InlineKeyboardButton(text="✍️ Написать", callback_data=f"admin_reply_{user_id}")],
         [InlineKeyboardButton(text=meditation_label, callback_data=f"adm_user_meditation_toggle_{user_id}")],
         [InlineKeyboardButton(text=block_label, callback_data=f"adm_user_toggle_{user_id}")],
-        [InlineKeyboardButton(text="🔄 Знакомство заново (сбросить только имя)", callback_data=f"adm_user_reset_{user_id}")],
+        [InlineKeyboardButton(text="🔄 Обнулить только имя (заново познакомится)", callback_data=f"adm_user_reset_{user_id}")],
         [InlineKeyboardButton(text="⬅️ К списку", callback_data="adm_users_list")],
     ])
     await callback.message.edit_text(text, reply_markup=kb)
