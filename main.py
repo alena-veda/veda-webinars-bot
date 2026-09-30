@@ -1370,7 +1370,8 @@ async def show_sanctum(message: Message, user_id: int = None):
         else:
             date_part = f" {valid_until.strftime('%d.%m.%Y')}" if valid_until else ""
             deadline = _price_lock_deadline(membership)
-            if deadline and not _price_lock_expired(membership):
+            price_locked = bool(deadline and not _price_lock_expired(membership))
+            if price_locked:
                 price_line = (
                     db.get_setting("sanctum_price_locked_line")
                     .replace("{цена}", price)
@@ -1385,6 +1386,11 @@ async def show_sanctum(message: Message, user_id: int = None):
             )
             button_text = "Возобновить"
         rows = [[InlineKeyboardButton(text=button_text, callback_data="sanctum_apply")]]
+        # "Оплачу позже" имеет смысл показывать только пока цена ещё правда
+        # сохраняется - после дедлайна любая названная дата всё равно будет
+        # отклонена (см. sanctum_promise_date), кнопка вела бы в тупик
+        if valid_until and valid_until < today and price_locked:
+            rows.append([InlineKeyboardButton(text="⏰ Оплачу позже - назначить дату", callback_data="sanctum_promise")])
         if valid_until and valid_until >= today:
             rows.append([_ritual_calendar_btn()])
         kb = InlineKeyboardMarkup(inline_keyboard=rows)
