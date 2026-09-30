@@ -4024,7 +4024,7 @@ async def adm_sanctum_kick(callback: CallbackQuery):
             membership["price"] or db.get_sanctum()["price"],
         )
         try:
-            await callback.bot.send_message(user_id, text, reply_markup=_return_kb())
+            await callback.bot.send_message(user_id, text, reply_markup=_return_kb(with_promise=True))
             delivered = True
         except Exception:
             logging.exception("Не удалось отправить письмо об уходе из Sanctum пользователю %s", user_id)
