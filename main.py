@@ -4508,9 +4508,9 @@ ASCENSION_TEXT_PLACEHOLDERS = {
     "ascension_level3_text": ["{имя}"],
     "ascension_overview_text": ["{имя}"],
     "referral_welcome_text": ["{пригласивший}", "{название}"],
-    "luminar_1_text": ["{имя}"],
-    "luminar_2_text": ["{имя}"],
-    "luminar_3_text": ["{имя}"],
+    "luminar_1_text": ["{имя}", "{число}", "{дар}"],
+    "luminar_2_text": ["{имя}", "{число}", "{дар}"],
+    "luminar_3_text": ["{имя}", "{число}", "{дар}"],
 }
 
 
