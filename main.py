@@ -1325,7 +1325,12 @@ async def wb_reg(callback: CallbackQuery, state: FSMContext):
         .replace("{цена}", w["price"])
         .replace("{реквизиты}", _payment_block("payment_purpose_webinar"))
     )
-    await callback.message.answer(text, reply_markup=_personal_link_kb("💌 Написать Алёне лично"))
+    kb_rows = []
+    personal_kb = _personal_link_kb("💌 Написать Алёне лично")
+    if personal_kb:
+        kb_rows.extend(personal_kb.inline_keyboard)
+    kb_rows.append([InlineKeyboardButton(text="⬅️ Назад", callback_data=f"wb_view_{webinar_id}")])
+    await callback.message.answer(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=kb_rows))
     await callback.answer()
 
 
