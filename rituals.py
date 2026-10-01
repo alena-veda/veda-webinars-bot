@@ -6,7 +6,7 @@
 Drik Panchang (Киев). Экадаши показаны по смарта-традиции (как у Drik), если
 у вайшнавов день другой, это указано в поле "уточнение".
 """
-from datetime import date, datetime, timedelta
+from datetime import datetime, timedelta
 
 import database as db
 
