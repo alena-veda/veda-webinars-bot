@@ -134,7 +134,7 @@ FIELD_LABELS = {
     "invite_link": "ссылка",
     "video_link": "ссылка на запись (YouTube и т.п.)",
     "intro_text": "текст-приглашение (сообщение 1, до кнопки «Войти в глубину»)",
-    "laws_text": "текст с законами (сообщение 2, до кнопки «Инициировать шаг»; можно вставить {price} - подставится цена этого человека)",
+    "laws_text": "текст с законами (сообщение 2, до кнопки «Хочу оплатить подписку»; можно вставить {price} - подставится цена этого человека)",
 }
 
 CODE_TO_FIELD = {"t": "title", "d": "description", "dt": "date_text", "p": "price", "l": "invite_link", "v": "video_link"}
@@ -790,6 +790,7 @@ ADMIN_PERMISSION_SECTIONS = [
     ("💠 Общие тексты бота", [
         ("adm_welcome_text", "✏️ Текст приветствия (/start)"),
         ("adm_photo_welcome", "🖼 Фото приветствия (/start)"),
+        ("adm_intro_message", "🌟 Вводное сообщение новичку"),
         ("adm_about", "💠 Текст «Философия Alena Veda»"),
         ("adm_photo_about", "🖼 Фото «Философия Alena Veda»"),
         ("adm_faq", "❓ Текст «Частые вопросы»"),
@@ -1086,32 +1087,12 @@ async def name_received(message: Message, state: FSMContext):
         # не страшно, он уже в главном меню с полноценной навигацией
         await _send_webinar_card(message, pending_webinar_id, message.from_user.id)
         return
-    await _send_welcome(message)
-    # небольшая пауза перед "Первым Касанием" — чтобы оба сообщения не
-    # выскакивали одним потоком сразу друг за другом
-    await asyncio.sleep(2)
-    # "Первое Касание" — одноразовое сообщение только настоящим новичкам,
-    # сразу после того, как они представились в самый первый раз (сюда не
-    # попадают ни возвращающиеся люди, ни те, кто пришёл по ссылке на
-    # конкретный вебинар — см. ветку выше)
-    user_row = db.get_user(message.from_user.id)
-    text = db.get_setting(ASCENSION_TEXT_KEYS[1])
-    photo = db.get_setting("ascension_level1_photo")
-    kb_rows = []
-    if user_row and user_row["referred_by"]:
-        # кнопка на Sanctum здесь уместна именно для пришедших по ссылке —
-        # закрывает обещание "подробнее далее" из особого приветствия
-        kb_rows.append([InlineKeyboardButton(text="⚜️ Что такое VEDA SANCTUM", callback_data="open_sanctum")])
-    # календарь ритуалов - показываем на самом первом экране, который видит
-    # АБСОЛЮТНО каждый новый человек, чтобы не-участники узнавали о нём
-    # активно, а не только натыкались случайно через "Инфо"
-    kb_rows.append([_ritual_calendar_btn()])
-    kb = InlineKeyboardMarkup(inline_keyboard=kb_rows)
-    await _send_with_optional_photo(message.bot, message.from_user.id, _personalize(text, user_row), photo, kb)
-    # запоминаем момент показа - если человек ни разу не откроет календарь ни
-    # отсюда, ни из "Инфо", ни из профиля, через ritual_nudge_days придёт
-    # одно (не повторяющееся) напоминание (см. check_reengagement)
-    rituals.mark_ritual_intro_shown(message.from_user.id)
+    if _intro_enabled():
+        # сначала короткая просьба читать внимательно и кнопка; приветствие и
+        # «Первое Касание» придут после её нажатия (см. intro_continue)
+        await _send_intro_message(message.bot, message.from_user.id)
+        return
+    await _welcome_sequence(message.bot, message.from_user.id)
 
 
 @router.message(Command("cancel"))
@@ -1338,11 +1319,12 @@ async def wb_reg(callback: CallbackQuery, state: FSMContext):
         .replace("{реквизиты}", _payment_block("payment_purpose_webinar"))
     )
     kb_rows = []
-    personal_kb = _personal_link_kb("💌 Написать Алёне лично")
+    personal_kb = _personal_link_kb(REQUEST_REQUISITES_LABEL)
     if personal_kb:
         kb_rows.extend(personal_kb.inline_keyboard)
     kb_rows.append([InlineKeyboardButton(text="⬅️ Назад", callback_data=f"wb_view_{webinar_id}")])
     await callback.message.answer(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=kb_rows))
+    await _send_payment_screenshot_hint(callback.message)
     await callback.answer()
 
 
@@ -1471,7 +1453,7 @@ async def sanctum_laws(callback: CallbackQuery):
     if ritual_line:
         text += "\n\n" + ritual_line
     kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="Инициировать шаг оплаты", callback_data="sanctum_apply")]
+        [InlineKeyboardButton(text="Хочу оплатить подписку", callback_data="sanctum_apply")]
     ])
     await _answer_long(callback.message, text, reply_markup=kb, protect_content=_protect_for(callback.from_user.id))
     await callback.answer()
@@ -1505,7 +1487,7 @@ async def sanctum_apply(callback: CallbackQuery, state: FSMContext):
     await state.set_state(ReceiptStates.waiting_receipt)
     await state.update_data(reg_id=reg_id)
     kb_rows = []
-    personal_kb = _personal_link_kb("💌 Написать Алёне лично")
+    personal_kb = _personal_link_kb(REQUEST_REQUISITES_LABEL)
     if personal_kb:
         kb_rows.extend(personal_kb.inline_keyboard)
     kb_rows.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="sanctum_back")])
@@ -1515,6 +1497,7 @@ async def sanctum_apply(callback: CallbackQuery, state: FSMContext):
         .replace("{реквизиты}", _payment_block("payment_purpose_sanctum"))
     )
     await callback.message.answer(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=kb_rows))
+    await _send_payment_screenshot_hint(callback.message)
     await callback.answer()
 
 
@@ -2232,7 +2215,17 @@ async def reg_confirm(callback: CallbackQuery):
         ]
         is_first_sanctum_payment = not prior_sanctum_payments
         old_level = compute_ascension_level(reg["user_id"])
-        valid_until, locked_price = _extend_sanctum_membership(reg["user_id"], price=reg["price"])
+        # если у человека действует закреплённая цена, берём её, а не цену из заявки:
+        # заявка запоминает цену на момент нажатия оплаты и могла быть создана ДО
+        # того, как Вы внесли человека с его прежней ценой
+        membership_now = db.get_sanctum_membership(reg["user_id"])
+        keep_locked_price = bool(
+            membership_now and membership_now["price"] and not membership_now["lifetime_free"]
+            and not _price_lock_expired(membership_now)
+        )
+        valid_until, locked_price = _extend_sanctum_membership(
+            reg["user_id"], price=None if keep_locked_price else reg["price"]
+        )
         text += (
             db.get_setting("payment_confirmed_sanctum_line")
             .replace("{дата}", valid_until.strftime('%d.%m.%Y'))
@@ -2915,7 +2908,7 @@ def _reengage_screen_text() -> str:
         f"Текст: {html.escape(winback_text[:150])}{'…' if len(winback_text) > 150 else ''}\n\n"
         f"<b>4. Посмотрел Sanctum, но не начал оформление</b> - {_on_off(nudge_enabled)}\n"
         f"Через {nudge_hours} ч. после того, как открыл(а) экран VEDA SANCTUM, если так и не нажал(а) "
-        "«Инициировать шаг». Получает это напоминание ВМЕСТО «Пришёл и пропал», не вместе с ним.\n"
+        "«Хочу оплатить подписку». Получает это напоминание ВМЕСТО «Пришёл и пропал», не вместе с ним.\n"
         f"Текст: {html.escape(nudge_text[:150])}{'…' if len(nudge_text) > 150 else ''}\n\n"
         "<b>5. Правила ухода из Sanctum</b>\n"
         f"Цена сохраняется {db.get_setting('price_lock_days') or '30'} дн. после ухода (потом - как для новых). "
@@ -3067,7 +3060,7 @@ async def adm_reengage_field_start(callback: CallbackQuery, state: FSMContext):
     elif field == "sanctum_nudge_hours":
         prompt = (
             f"{current_block}Через сколько часов после просмотра VEDA SANCTUM напоминать, если человек "
-            "так и не нажал «Инициировать шаг»? Пришлите число (например, 5):"
+            "так и не нажал «Хочу оплатить подписку»? Пришлите число (например, 5):"
         )
     elif field == "stall_text":
         prompt = (
@@ -3969,6 +3962,7 @@ HTML_TRUSTED_FIELDS = {
     ("sanctum", "price"),
     ("sanctum", "invite_link"),
     ("about", "about_text"),
+    ("intro_setting", "intro_msg_text"),
     ("faq", "faq_text"),
     ("faq_suggestion_invite", "faq_suggestion_invite_text"),
     ("faq_suggestion_confirm", "faq_suggestion_confirm_text"),
@@ -4087,7 +4081,7 @@ SANCTUM_SCREEN_TEXT_LABELS = {
     "sanctum_price_current_line": "строка цены ВНУТРИ экрана «закончился» выше, если прежняя цена уже не сохраняется - альтернатива строке выше, кнопки те же",
     "sanctum_already_lifetime_text": "всплывающая подсказка (alert) при попытке нажать оплату, если доступ уже пожизненный - не отдельное сообщение, кнопок нет",
     "sanctum_pending_request_text": "если уже есть заявка на Sanctum, ожидающая проверки - вместо реквизитов ниже, при повторном нажатии оплаты. Без кнопок",
-    "sanctum_payment_instructions_text": "сообщение с реквизитами оплаты Sanctum - приходит после нажатия «Инициировать шаг»/«Продлить»/«Возобновить». Кнопки: «💌 Написать Алёне лично» (если личная ссылка задана) и «⬅️ Назад»; дальше человек либо присылает чек (раздел «✏️ Тексты оплаты и чека»), либо нажимает «Оплачу позже» (цепочка ниже)",
+    "sanctum_payment_instructions_text": "сообщение с реквизитами оплаты Sanctum - приходит после нажатия «Хочу оплатить подписку»/«Продлить»/«Возобновить». Кнопки: «💌 Написать Алёне лично» (если личная ссылка задана) и «⬅️ Назад»; дальше человек либо присылает чек (раздел «✏️ Тексты оплаты и чека»), либо нажимает «Оплачу позже» (цепочка ниже)",
     "sanctum_promise_prompt_text": "1) «На какую дату планируете оплату» - приходит после кнопки «⏰ Оплачу позже». Без кнопок - человек присылает дату текстом",
     "sanctum_promise_invalid_date_text": "2а) если дату не удалось распознать - просит прислать ещё раз, цепочка не сдвигается. Без кнопок",
     "sanctum_promise_past_date_text": "2б) если названная дата уже в прошлом - тоже просит другую дату. Без кнопок",
@@ -4118,7 +4112,7 @@ async def adm_sanctum_screens_texts(callback: CallbackQuery):
     text = (
         "<b>✏️ Тексты экранов VEDA SANCTUM</b>\n\n"
         "Это не напоминания (они в соседнем разделе), а сами экраны, которые человек видит, "
-        "когда сам заходит в раздел ⚜️ VEDA SANCTUM, нажимает «Инициировать шаг оплаты» или "
+        "когда сам заходит в раздел ⚜️ VEDA SANCTUM, нажимает «Хочу оплатить подписку» или "
         "«⏰ Оплачу позже», а также то, что уходит при ручной выдаче доступа.\n\n"
         "Нажмите на нужный текст ниже, чтобы отредактировать (форматирование - жирный, курсив - "
         "сохраняется, если выделяете прямо при вводе в Telegram)."
@@ -4163,6 +4157,7 @@ PAYMENT_FLOW_TEXT_LABELS = {
     "resend_receipt_already_confirmed_text": "если оплата уже успела подтвердиться, пока он жал кнопку - редкий случай. Всплывающая подсказка (alert) - кнопок нет",
     "resend_receipt_already_sent_text": "если чек уже отправлен и ждёт проверки - предупреждение вместо повтора. Всплывающая подсказка (alert) - кнопок нет",
     "resend_receipt_prompt_text": "обычный случай - просьба прислать чек ещё раз, возвращает к шагу 1 выше. Без кнопок",
+    "payment_screenshot_text": "0) «после оплаты пришлите скриншот чека» - приходит ВТОРЫМ сообщением сразу после экрана с реквизитами (вебинара или Sanctum), то есть ДО шага 1. Без кнопок - человек просто присылает картинку",
 }
 
 PAYMENT_FLOW_TEXT_PLACEHOLDERS = {
@@ -4416,7 +4411,7 @@ ASCENSION_TEXT_LABELS = {
     "ascension_level1_brief_text": "краткая сводка «Первое Касание» - видна в профиле, короткая версия полного послания ниже",
     "ascension_level1_text": "полное послание «Первое Касание» - приходит сразу после ПЕРВОГО знакомства (имя + общее приветствие), самое первое послание, до него ничего нет. Кнопки: «⚜️ Что такое VEDA SANCTUM» (только для пришедших по реферальной ссылке) и «🌙 Календарь ритуалов» (всегда); при повторном чтении из профиля - без кнопок",
     "ascension_level2_brief_text": "краткая сводка «Искра» - видна в профиле, короткая версия полного послания ниже",
-    "ascension_level2_text": "полное послание «Искра» - приходит сразу после ПЕРВОЙ оплаты VEDA SANCTUM; следом за ним, отдельным сообщением, уходит приглашение написать намерение (раздел «🕯 Тексты о намерении»). Кнопка «📝 Написать намерение» - и при самом переходе, и при повторном чтении из профиля",
+    "ascension_level2_text": "полное послание «Искра» - приходит, когда в поле накопится 2 месяца оплат (60 дней: обычно после второй или третьей оплаты, не после первой); следом за ним, отдельным сообщением, уходит приглашение написать намерение (раздел «🕯 Тексты о намерении»). Кнопка «📝 Написать намерение» - и при самом переходе, и при повторном чтении из профиля",
     "ascension_level3_brief_text": "краткая сводка «Исследователь Глубины» - видна в профиле, короткая версия полного послания ниже",
     "ascension_level3_text": "полное послание «Исследователь Глубины» - приходит при переходе на эту ступень (обычно через 6 месяцев в Sanctum после «Искры»). Без кнопок - ни при переходе, ни при повторном чтении из профиля",
     "ascension_overview_text": "«Как устроен Путь?» - отдельная справка, открывается кнопкой ℹ️ в профиле по желанию человека, не часть автоматической цепочки. Сама справка - без кнопок",
@@ -5521,6 +5516,33 @@ async def edit_field_value(message: Message, state: FSMContext):
     elif target in ("ritual_text", "ritual_event", "ritual_add"):
         if await _ritual_edit_value(message, state, data, target, field, value):
             return
+    elif target == "intro_setting":
+        if field == "intro_msg_text":
+            if not value.strip():
+                await message.answer("Текст не может быть пустым. Пришлите текст ещё раз или /cancel")
+                return
+            db.set_setting(field, value.strip())
+            reply = "Текст вводного сообщения обновлён ✅"
+            if "{имя}" not in value and "(имя)" in value:
+                reply += "\n\n⚠️ Вместо {имя} (фигурные скобки) написано (имя) - оно не заменится."
+            await message.answer(reply, parse_mode=None)
+        elif field == "intro_msg_button":
+            label = value.strip()
+            if not label or len(label) > 60:
+                await message.answer("Название кнопки - от 1 до 60 символов. Пришлите ещё раз или /cancel")
+                return
+            db.set_setting(field, label)
+            await message.answer("Название кнопки обновлено ✅")
+        elif field == "welcome_pause_seconds":
+            try:
+                n = int(value.strip())
+                if n < 0 or n > 120:
+                    raise ValueError
+            except ValueError:
+                await message.answer("Нужно целое число секунд от 0 до 120 (например, 30). Пришлите ещё раз или /cancel")
+                return
+            db.set_setting(field, str(n))
+            await message.answer(f"Готово ✅ Пауза между приветствием и «Первым Касанием»: {n} сек.")
     elif target == "ritual_nudge_days":
         try:
             n = int(value.strip())
@@ -5785,6 +5807,8 @@ async def photo_upload_value(message: Message, state: FSMContext):
         db.set_setting("meditation_photo", file_id)
     elif target == "about":
         db.set_setting("about_photo", file_id)
+    elif target == "intro_message":
+        db.set_setting("intro_msg_photo", file_id)
     elif target == "sanctum_intro":
         db.update_sanctum_field("intro_photo", file_id)
     elif target == "webinar":
@@ -6415,7 +6439,7 @@ async def check_reengagement(bot: Bot):
         stall_hours = int(db.get_setting("stall_hours") or "24")
         cutoff = (now - timedelta(hours=stall_hours)).strftime("%Y-%m-%d %H:%M:%S")
         template = db.get_setting("stall_text") or ""
-        for reg in db.get_stalled_registrations(cutoff):
+        for reg in db.get_stalled_registrations(cutoff, _today().isoformat()):
             user_row = db.get_user(reg["user_id"])
             text = _personalize(template, user_row).replace("{product}", reg["product_title"] or "")
             try:
@@ -7989,6 +8013,194 @@ def _broadcast_length_note(kind: str, text: str):
     if kind == "text" and n > 3800:
         return f"ℹ️ Текст длинный ({n} символов): бот разошлёт его несколькими сообщениями подряд."
     return None
+
+
+# ---------- вводное сообщение новичку, пауза, «Первое Касание» ----------
+
+REQUEST_REQUISITES_LABEL = "💌 Запросить реквизиты у Алёны"
+_INTRO_RUNNING: set = set()
+
+
+def _intro_enabled() -> bool:
+    return (db.get_setting("intro_msg_enabled") or "1") == "1"
+
+
+def _welcome_pause_seconds() -> int:
+    try:
+        n = int(db.get_setting("welcome_pause_seconds") or "30")
+    except ValueError:
+        n = 30
+    return max(0, min(n, 120))
+
+
+async def _send_intro_message(bot, user_id: int):
+    user_row = db.get_user(user_id)
+    text = _personalize(db.get_setting("intro_msg_text") or "", user_row)
+    label = db.get_setting("intro_msg_button") or "Продолжить ➡️"
+    kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text=label, callback_data="intro_continue")]])
+    photo = db.get_setting("intro_msg_photo")
+    protect = _protect_for(user_id)
+    if photo:
+        await _send_with_optional_photo(bot, user_id, text, photo, kb, protect)
+    else:
+        await _send_long(bot, user_id, text, reply_markup=kb, protect_content=protect)
+
+
+async def _send_welcome_to(bot, user_id: int):
+    welcome_photo = db.get_setting("welcome_photo")
+    if welcome_photo:
+        await bot.send_photo(user_id, welcome_photo)
+    await _send_long(
+        bot, user_id, db.get_setting("welcome_text"),
+        reply_markup=main_menu_kb(user_id), protect_content=_protect_for(user_id),
+    )
+
+
+async def _typing_pause(bot, chat_id: int, seconds: int):
+    """Ждём, показывая человеку «печатает…», чтобы он успел прочитать приветствие."""
+    left = seconds
+    while left > 0:
+        try:
+            await bot.send_chat_action(chat_id, "typing")
+        except Exception:
+            pass
+        step = min(4, left)
+        await asyncio.sleep(step)
+        left -= step
+
+
+async def _send_first_touch(bot, user_id: int):
+    """«Первое Касание» - одноразовое сообщение настоящим новичкам. Кнопки: сначала
+    «Что такое VEDA SANCTUM» (следующий шаг к подписке), затем «Календарь ритуалов»."""
+    user_row = db.get_user(user_id)
+    text = db.get_setting(ASCENSION_TEXT_KEYS[1])
+    photo = db.get_setting("ascension_level1_photo")
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="⚜️ Что такое VEDA SANCTUM", callback_data="open_sanctum")],
+        [_ritual_calendar_btn()],
+    ])
+    await _send_with_optional_photo(bot, user_id, _personalize(text, user_row), photo, kb)
+    # запоминаем момент показа: если человек ни разу не откроет календарь ни
+    # отсюда, ни из "Инфо", ни из профиля, через ritual_nudge_days придёт одно
+    # (не повторяющееся) напоминание (см. check_reengagement)
+    rituals.mark_ritual_intro_shown(user_id)
+
+
+async def _welcome_sequence(bot, user_id: int):
+    await _send_welcome_to(bot, user_id)
+    await _typing_pause(bot, user_id, _welcome_pause_seconds())
+    await _send_first_touch(bot, user_id)
+
+
+async def _send_payment_screenshot_hint(msg):
+    text = (db.get_setting("payment_screenshot_text") or "").strip()
+    if text:
+        await _answer_long(msg, text)
+
+
+@router.callback_query(F.data == "intro_continue")
+async def intro_continue(callback: CallbackQuery):
+    user_id = callback.from_user.id
+    await callback.answer()
+    user_row = db.get_user(user_id)
+    # приветствие и «Первое Касание» приходят один раз: повторное нажатие
+    # (двойной тап, старое сообщение) ничего не дублирует
+    if user_id in _INTRO_RUNNING or (user_row and user_row["ritual_intro_shown_at"]):
+        return
+    _INTRO_RUNNING.add(user_id)
+    try:
+        try:
+            await callback.message.edit_reply_markup(reply_markup=None)
+        except Exception:
+            pass
+        await _welcome_sequence(callback.bot, user_id)
+    finally:
+        _INTRO_RUNNING.discard(user_id)
+
+
+def _intro_screen():
+    enabled = _intro_enabled()
+    photo = "есть" if db.get_setting("intro_msg_photo") else "нет"
+    preview = _plain_text(db.get_setting("intro_msg_text") or "")
+    if len(preview) > 400:
+        preview = preview[:400] + "..."
+    text = (
+        "<b>🌟 Вводное сообщение новичку</b>\n\n"
+        "Приходит человеку сразу после того, как он назвал своё имя, ДО приветствия. Под ним одна кнопка, "
+        "приветствие и «Первое Касание» приходят после её нажатия. Тем, кто пришёл по ссылке на конкретный "
+        "вебинар, это сообщение не показывается.\n\n"
+        f"Сейчас: {'включено ✅' if enabled else 'выключено 🚫'}\n"
+        f"Название кнопки: «{html.escape(db.get_setting('intro_msg_button') or '')}»\n"
+        f"Пауза между приветствием и «Первым Касанием»: {_welcome_pause_seconds()} сек.\n"
+        f"Картинка: {photo}\n\n"
+        f"Начало текста:\n{html.escape(preview)}"
+    )
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🚫 Выключить" if enabled else "✅ Включить", callback_data="adm_intro_toggle")],
+        [InlineKeyboardButton(text="✏️ Текст сообщения", callback_data="adm_intro_e_intro_msg_text")],
+        [InlineKeyboardButton(text="✏️ Название кнопки", callback_data="adm_intro_e_intro_msg_button")],
+        [InlineKeyboardButton(text="⏱ Пауза перед «Первым Касанием»", callback_data="adm_intro_e_welcome_pause_seconds")],
+        [InlineKeyboardButton(text="🖼 Картинка (необязательно)", callback_data="adm_intro_photo")],
+        [InlineKeyboardButton(text="⬅️ Назад", callback_data="adm_back")],
+    ])
+    return text, kb
+
+
+@router.callback_query(F.data == "adm_intro_message")
+async def adm_intro_message(callback: CallbackQuery):
+    if not await _require_permission(callback, "adm_intro_message"):
+        return
+    text, kb = _intro_screen()
+    await _edit_keep(callback, text, kb)
+    await callback.answer()
+
+
+@router.callback_query(F.data == "adm_intro_toggle")
+async def adm_intro_toggle(callback: CallbackQuery):
+    if not await _require_permission(callback, "adm_intro_message"):
+        return
+    db.set_setting("intro_msg_enabled", "0" if _intro_enabled() else "1")
+    text, kb = _intro_screen()
+    await _edit_keep(callback, text, kb)
+    await callback.answer("Включено" if _intro_enabled() else "Выключено")
+
+
+INTRO_EDIT_PROMPTS = {
+    "intro_msg_text": "Пришлите новый текст сообщения. Можно вставить {имя} - подставится имя человека (именно фигурные скобки). "
+                      "Жирный шрифт и курсив сохранятся, если выделите их прямо в Telegram.",
+    "intro_msg_button": "Пришлите новое название кнопки (до 60 символов), например: Понятно. Продолжить ➡️",
+    "welcome_pause_seconds": "Сколько секунд ждать между приветствием и «Первым Касанием»? Пришлите число от 0 до 120. "
+                             "Пока бот ждёт, у человека вверху показывается «печатает…».",
+}
+
+
+@router.callback_query(F.data.startswith("adm_intro_e_"))
+async def adm_intro_edit(callback: CallbackQuery, state: FSMContext):
+    field = callback.data[len("adm_intro_e_"):]
+    if field not in INTRO_EDIT_PROMPTS:
+        await callback.answer()
+        return
+    if not await _require_permission(callback, "adm_intro_message"):
+        return
+    await state.set_state(EditFieldStates.waiting_value)
+    await state.update_data(target="intro_setting", field=field)
+    current = db.get_setting(field) or ""
+    await _answer_long(callback.message, f"Сейчас:\n{current}\n\n{INTRO_EDIT_PROMPTS[field]}\n\n(или /cancel)")
+    await callback.answer()
+
+
+@router.callback_query(F.data == "adm_intro_photo")
+async def adm_intro_photo(callback: CallbackQuery, state: FSMContext):
+    if not await _require_permission(callback, "adm_intro_message"):
+        return
+    await state.set_state(PhotoUploadStates.waiting_photo)
+    await state.update_data(target="intro_message")
+    current = "уже установлена" if db.get_setting("intro_msg_photo") else "не установлена"
+    await callback.message.answer(
+        f"Пришлите картинку, которая будет идти вместе с вводным сообщением (сейчас {current}). "
+        "Например, подсказку, где в Telegram найти меню.\n\nИли отправьте «-», чтобы убрать картинку."
+    )
+    await callback.answer()
 
 
 async def main():

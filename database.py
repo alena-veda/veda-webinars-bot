@@ -1020,6 +1020,11 @@ def init_db():
         "resend_receipt_already_confirmed_text": "Эта оплата уже подтверждена ✅",
         "resend_receipt_already_sent_text": "Чек уже отправлен и ожидает проверки 🙏",
         "resend_receipt_prompt_text": "Пришлите, пожалуйста, скриншот чека по «{название}» 📸",
+        "payment_screenshot_text": (
+            "📸 После оплаты по реквизитам Алёны пришлите скриншот Вашего чека (просто картинкой) "
+            "прямо сюда, под этим сообщением.\n"
+            "Ничего писать в строке ввода текста не нужно, только картинка Вашего скриншота чека об оплате."
+        ),
     }
     for key, value in _payment_flow_defaults.items():
         c.execute("SELECT value FROM settings WHERE key = ?", (key,))
@@ -1110,6 +1115,39 @@ def init_db():
         c.execute("SELECT value FROM settings WHERE key = ?", (key,))
         if not c.fetchone():
             c.execute("INSERT INTO settings (key, value) VALUES (?, ?)", (key, value))
+
+    # ---------- 2026-10-08: вводное сообщение после имени и пауза перед «Первым Касанием» ----------
+    _intro_defaults = {
+        "intro_msg_enabled": "1",
+        "intro_msg_text": (
+            "{имя}, благодарю Вас 🙏\n\n"
+            "У меня к Вам ВАЖНАЯ ПРОСЬБА: читайте каждое сообщение внимательно и до конца. "
+            "Всё, что нужно делать - уже написано в каждом сообщении и в кнопках под ними.\n"
+            "Не спешите, и путь станет понятным."
+        ),
+        "intro_msg_button": "Понятно. Продолжить ➡️",
+        "intro_msg_photo": "",
+        "welcome_pause_seconds": "30",
+    }
+    for key, value in _intro_defaults.items():
+        c.execute("SELECT value FROM settings WHERE key = ?", (key,))
+        if not c.fetchone():
+            c.execute("INSERT INTO settings (key, value) VALUES (?, ?)", (key, value))
+
+    # переименование кнопки (2026-10-08): «Инициировать шаг оплаты» -> «Хочу оплатить подписку».
+    # Заменяем только точное название кнопки внутри её уже написанных текстов, один раз.
+    c.execute("SELECT value FROM settings WHERE key = 'migr_pay_button_rename'")
+    if not c.fetchone():
+        for _k, _v in c.execute("SELECT key, value FROM settings WHERE value LIKE '%Инициировать шаг оплаты%'").fetchall():
+            c.execute(
+                "UPDATE settings SET value = ? WHERE key = ?",
+                (_v.replace("Инициировать шаг оплаты", "Хочу оплатить подписку"), _k),
+            )
+        c.execute(
+            "UPDATE sanctum SET laws_text = REPLACE(laws_text, 'Инициировать шаг оплаты', 'Хочу оплатить подписку') "
+            "WHERE laws_text LIKE '%Инициировать шаг оплаты%'"
+        )
+        c.execute("INSERT INTO settings (key, value) VALUES ('migr_pay_button_rename', '1')")
 
     # аудит 2026-09-29: поздравления Люминаров раньше писали дар прямо в тексте,
     # {дар} нигде реально не подставлялся - теперь дар вынесен в отдельную
@@ -1514,15 +1552,24 @@ def get_all_awaiting_receipt():
     return rows
 
 
-def get_stalled_registrations(cutoff_datetime_str):
+def get_stalled_registrations(cutoff_datetime_str, today_iso=None):
     """Заявки, которые всё ещё ждут чек (человек не прислал скриншот оплаты)
-    дольше настроенного срока — и которым ещё не отправляли напоминание."""
+    дольше настроенного срока — и которым ещё не отправляли напоминание.
+    Заявки на Sanctum тех, кто сам назвал дату оплаты («Оплачу позже»), которая
+    ещё не прошла, не трогаем: им придёт своё напоминание за день до даты."""
     conn = get_conn()
-    rows = conn.execute(
+    sql = (
         "SELECT * FROM registrations WHERE status = 'awaiting_receipt' "
-        "AND created_at <= ? AND (stall_reminder_sent IS NULL OR stall_reminder_sent = 0)",
-        (cutoff_datetime_str,),
-    ).fetchall()
+        "AND created_at <= ? AND (stall_reminder_sent IS NULL OR stall_reminder_sent = 0)"
+    )
+    params = [cutoff_datetime_str]
+    if today_iso:
+        sql += (
+            " AND NOT (product_type = 'sanctum' AND user_id IN ("
+            "SELECT user_id FROM sanctum_membership WHERE promise_date IS NOT NULL AND promise_date >= ?))"
+        )
+        params.append(today_iso)
+    rows = conn.execute(sql, params).fetchall()
     conn.close()
     return rows
 
