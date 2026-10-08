@@ -537,23 +537,15 @@ def _personal_link_kb(label: str):
 async def _send_with_optional_photo(
     bot: Bot, user_id: int, text: str, photo: str, reply_markup=None, protect_content=False
 ):
-    """Отправляет текст-поздравление; если для этого сообщения задано фото -
-    старается прислать одним сообщением (фото с подписью), как она просила.
-    У Telegram подпись к фото ограничена 1024 символами - если текст длиннее
-    (сейчас так у «Первое Касание», ~1670 символов) или Telegram отклонит по
-    другой причине, присылаем фото и полный текст отдельно, но подряд - чтобы
-    ни фото, ни хотя бы слово из текста не потерялись. Используется и для
-    поздравлений со ступенями/Люминарами, и для рассылок с фото (см.
-    adm_broadcast_execute) - там же самый риск: длинная подпись к фото."""
+    """Текст-поздравление или рассылка; если задано фото - фото с подписью одним
+    сообщением, а если текст длиннее подписи (1024 символа) - фото и полный
+    текст отдельно, но подряд (см. _send_media_with_text)."""
     if photo:
-        try:
-            await bot.send_photo(
-                user_id, photo, caption=text or None, reply_markup=reply_markup, protect_content=protect_content
-            )
-            return
-        except TelegramBadRequest:
-            await bot.send_photo(user_id, photo, protect_content=protect_content)
-    await bot.send_message(user_id, text, reply_markup=reply_markup, protect_content=protect_content)
+        await _send_media_with_text(
+            bot, user_id, "photo", photo, text, reply_markup=reply_markup, protect_content=protect_content
+        )
+        return
+    await _send_long(bot, user_id, text, reply_markup=reply_markup, protect_content=protect_content)
 
 
 class IntentionStates(StatesGroup):
@@ -898,6 +890,14 @@ class GrantAccessStates(StatesGroup):
     waiting_accumulated_months = State()
 
 
+class SearchStates(StatesGroup):
+    waiting_query = State()
+
+
+class AppendTextStates(StatesGroup):
+    waiting_text = State()
+
+
 class LuminarManualStates(StatesGroup):
     waiting_user_id = State()
     waiting_rank = State()
@@ -1175,11 +1175,23 @@ async def wb_past_list(callback: CallbackQuery):
     if not past:
         await callback.answer(db.get_setting("webinars_past_empty_text"), show_alert=True)
         return
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text=_strip_html_tags(w["title"]), callback_data=f"wb_past_view_{w['id']}")]
-        for w in past
-    ])
-    await callback.message.answer(db.get_setting("webinars_past_header_text"), reply_markup=kb)
+    text, kb = _build_past_webinars_view(past, 0)
+    await callback.message.answer(text, reply_markup=kb)
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("wb_pl_"))
+async def wb_past_page(callback: CallbackQuery):
+    past = db.get_past_webinars()
+    if not past:
+        await callback.answer(db.get_setting("webinars_past_empty_text"), show_alert=True)
+        return
+    try:
+        page = int(callback.data[len("wb_pl_"):])
+    except ValueError:
+        page = 0
+    text, kb = _build_past_webinars_view(past, page)
+    await _edit_keep(callback, text, kb)
     await callback.answer()
 
 
@@ -1410,7 +1422,7 @@ async def show_sanctum(message: Message, user_id: int = None):
         await message.answer_photo(s["intro_photo"])
     # intro_text и laws_text хранят готовую HTML-разметку (жирный текст и т.п.),
     # поэтому НЕ экранируем их, в отличие от остальных админ-текстов в боте.
-    await message.answer(s["intro_text"], reply_markup=kb, protect_content=_protect_for(user_id))
+    await _answer_long(message, s["intro_text"], reply_markup=kb, protect_content=_protect_for(user_id))
 
 
 @router.callback_query(F.data == "open_sanctum")
@@ -1461,7 +1473,7 @@ async def sanctum_laws(callback: CallbackQuery):
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="Инициировать шаг оплаты", callback_data="sanctum_apply")]
     ])
-    await callback.message.answer(text, reply_markup=kb, protect_content=_protect_for(callback.from_user.id))
+    await _answer_long(callback.message, text, reply_markup=kb, protect_content=_protect_for(callback.from_user.id))
     await callback.answer()
 
 
@@ -1602,11 +1614,7 @@ async def show_meditation_bot(message: Message):
         # призывом "⤵️" в никуда, кнопки под ним нет и не будет, пока ссылка
         # не появится (см. _meditation_button)
         text += "\n\n" + db.get_setting("meditation_coming_soon_text")
-    await message.answer(
-        text,
-        reply_markup=kb,
-        protect_content=_protect_for(message.from_user.id),
-    )
+    await _answer_long(message, text, reply_markup=kb, protect_content=_protect_for(message.from_user.id))
 
 
 # ---------- обо мне ----------
@@ -1617,7 +1625,7 @@ async def show_about(message: Message):
     if about_photo:
         await message.answer_photo(about_photo)
     text = db.get_setting("about_text")
-    await message.answer(text, protect_content=_protect_for(message.from_user.id))
+    await _answer_long(message, text, protect_content=_protect_for(message.from_user.id))
 
 
 # ---------- инфо и правила ----------
@@ -1770,18 +1778,16 @@ async def feed_months(callback: CallbackQuery):
 async def _send_feed_post_content(message: Message, post, protect: bool, viewer_id: int):
     content_type = post["content_type"]
     text = _personalize(post["text"] or "", db.get_user(viewer_id))
+    bot, chat_id = message.bot, message.chat.id
     if content_type == "text":
-        await message.answer(text, protect_content=protect)
-    elif content_type == "photo":
-        await message.answer_photo(post["file_id"], caption=text or None, protect_content=protect)
-    elif content_type == "video":
-        await message.answer_video(post["file_id"], caption=text or None, protect_content=protect)
+        await _send_long(bot, chat_id, text, protect_content=protect)
+    elif content_type in ("photo", "video"):
+        await _send_media_with_text(bot, chat_id, content_type, post["file_id"], text, protect_content=protect)
     elif content_type == "video_note":
         await message.answer_video_note(post["file_id"], protect_content=protect)
     elif content_type == "album":
         file_ids = json.loads(post["file_ids_json"] or "[]")
-        media = [InputMediaPhoto(media=fid, caption=(text or None) if i == 0 else None) for i, fid in enumerate(file_ids)]
-        await message.answer_media_group(media, protect_content=protect)
+        await _send_album_with_text(bot, chat_id, file_ids, text, protect_content=protect)
 
 
 async def _show_feed_post_at(message: Message, year_month: str, idx: int, posts, viewer_id: int):
@@ -2015,8 +2021,10 @@ async def show_profile(message: Message):
     ]
     webinar_lines = [db.get_setting("profile_webinars_header_text")]
     if regs:
-        for r in regs:
+        for r in regs[:40]:
             webinar_lines.append(f"• {r['product_title']}")
+        if len(regs) > 40:
+            webinar_lines.append(f"... и ещё {len(regs) - 40}")
     else:
         webinar_lines.append(db.get_setting("profile_webinars_empty_text"))
     blocks.append("\n".join(webinar_lines))
@@ -2518,7 +2526,7 @@ async def wq_public_webinar(callback: CallbackQuery):
     lines = [f"<b>{html.escape(db.get_setting('qa_public_header_text'))}</b>\n"]
     for q in qa:
         lines.append(f"❓ {html.escape(q['question_text'])}\n💬 {q['answer_text']}\n")
-    await callback.message.answer("\n".join(lines))
+    await _answer_long(callback.message, "\n".join(lines))
     await callback.answer()
 
 
@@ -2532,7 +2540,7 @@ async def wq_public_feed(callback: CallbackQuery):
     lines = [f"<b>{html.escape(db.get_setting('qa_public_header_text'))}</b>\n"]
     for q in qa:
         lines.append(f"❓ {html.escape(q['question_text'])}\n💬 {q['answer_text']}\n")
-    await callback.message.answer("\n".join(lines))
+    await _answer_long(callback.message, "\n".join(lines))
     await callback.answer()
 
 
@@ -2715,7 +2723,7 @@ async def adm_analytics_webinars(callback: CallbackQuery):
         declined = counts.get("declined", 0)
         lines.append(f"• {title or '(без названия)'} - ✅{confirmed} ⏳{pending} ❌{declined}")
 
-    await callback.message.answer("\n".join(lines))
+    await _answer_long(callback.message, "\n".join(lines))
     await callback.answer()
 
 
@@ -3078,23 +3086,16 @@ async def adm_reengage_field_start(callback: CallbackQuery, state: FSMContext):
             f"{current_block}Пришлите новый {REENGAGE_FIELD_LABELS[field]}.\n\n"
             "Можно вставить <code>{имя}</code> - бот подставит имя человека (или «друг», если имени нет)."
         )
-    await callback.message.answer(prompt)
+    await _answer_long(callback.message, prompt)
     await callback.answer()
 
 
 # ---------- админ-панель: вебинары ----------
 
-async def _render_webinars_list(callback: CallbackQuery):
-    webinars = db.get_all_webinars()
-    rows = []
-    for w in webinars:
-        status = "🟢" if w["is_active"] else "🔴"
-        rows.append([InlineKeyboardButton(
-            text=f"{status} {_strip_html_tags(w['title'])}", callback_data=f"adm_wb_edit_{w['id']}"
-        )])
-    rows.append([InlineKeyboardButton(text="➕ Добавить вебинар", callback_data="adm_wb_add")])
-    rows.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="adm_back")])
-    await callback.message.edit_text("Вебинары:", reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
+async def _render_webinars_list(callback: CallbackQuery, page: int = 0):
+    text, kb, page = _build_webinars_admin_view(page)
+    _remember_page(callback.from_user.id, "wl", page)
+    await _edit_keep(callback, text, kb)
 
 
 async def _render_webinar_card(callback: CallbackQuery, webinar_id: int) -> bool:
@@ -3307,9 +3308,11 @@ async def wb_reviews_view(callback: CallbackQuery):
     await callback.message.answer(header, protect_content=protect)
     for r in reviews:
         if r["photo"]:
-            await callback.message.answer_photo(r["photo"], caption=r["text"] or None, protect_content=protect)
+            await _send_media_with_text(
+                callback.message.bot, callback.message.chat.id, "photo", r["photo"], r["text"] or "", protect_content=protect
+            )
         else:
-            await callback.message.answer(r["text"], protect_content=protect)
+            await _answer_long(callback.message, r["text"], protect_content=protect)
     await callback.answer()
 
 
@@ -3474,7 +3477,7 @@ async def adm_wb_field_start(callback: CallbackQuery, state: FSMContext):
             f"{current_block}Введите новую дату и время в формате ДД.ММ.ГГГГ ЧЧ:ММ (например: 15.09.2026 18:00):"
         )
     else:
-        await callback.message.answer(f"{current_block}Введите новое значение для «{FIELD_LABELS[field]}»:")
+        await _answer_long(callback.message, f"{current_block}Введите новое значение для «{FIELD_LABELS[field]}»:")
     await callback.answer()
 
 
@@ -3594,7 +3597,7 @@ async def adm_sanctum_field_start(callback: CallbackQuery, state: FSMContext):
             "просто пришлите текст обычным сообщением, а жирные места укажите мне отдельно - "
             "разметку я расставлю."
         )
-    await callback.message.answer(f"{current_block}Введите новое значение для «{FIELD_LABELS[field]}»:{hint}")
+    await _answer_long(callback.message, f"{current_block}Введите новое значение для «{FIELD_LABELS[field]}»:{hint}")
     await callback.answer()
 
 
@@ -3643,8 +3646,8 @@ async def _grant_ask_user_id(answer, state: FSMContext):
     await answer(
         f"Кому выдать/продлить доступ в {html.escape(SANCTUM_FULL_NAME)}? Нажмите на человека в списке "
         "(✅ доступ активен, ❌ закончился, 🚫 убран; рядом - до какого числа оплачено и по какой цене). "
-        "Если человека нет в списке - нажмите «Другой подписчик» или пришлите его Telegram ID "
-        "(или /cancel для отмены).\n\n"
+        "Если человека нет в списке - нажмите «Другой подписчик» или просто напишите его имя, @ник "
+        "или Telegram ID (или /cancel для отмены).\n\n"
         "Важно: этот человек должен был хотя бы раз нажать /start в этом боте - иначе бот не сможет ему написать.",
         reply_markup=_grant_pick_kb(),
     )
@@ -3746,10 +3749,26 @@ async def adm_grant_access_user_id(message: Message, state: FSMContext):
     text = await _require_text(message)
     if text is None:
         return
+    raw = text.strip()
     try:
-        target_user_id = int(text.strip())
+        target_user_id = int(raw)
     except ValueError:
-        await message.answer("ID должен быть числом. Попробуйте ещё раз или отправьте /cancel")
+        found = [u for u in db.get_all_users_full() if _user_matches(u, raw)][:SEARCH_LIMIT]
+        if not found:
+            await message.answer(
+                "Не нашла такого человека среди подписчиков бота. Напишите имя, @ник или числовой ID "
+                "ещё раз, либо отправьте /cancel"
+            )
+            return
+        rows = [
+            [InlineKeyboardButton(text=f"{_user_display_name(u)} - ID {u['user_id']}"[:64],
+                                  callback_data=f"adm_grant_pick_{u['user_id']}")]
+            for u in found
+        ]
+        await message.answer(
+            f"Нашла: {len(found)}. Нажмите на нужного человека:",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=rows),
+        )
         return
     await _grant_after_target(message.answer, state, target_user_id)
 
@@ -3768,20 +3787,11 @@ async def adm_grant_others(callback: CallbackQuery, state: FSMContext):
     которых только предстоит внести)."""
     if not await _require_permission(callback, "adm_grant_access"):
         return
-    in_sanctum = {m["user_id"] for m in db.get_all_sanctum_memberships()}
-    others = [u for u in db.get_all_users_full() if u["user_id"] not in in_sanctum]
-    rows = [
-        [InlineKeyboardButton(text=f"{_user_display_name(u)} - ID {u['user_id']}"[:64],
-                              callback_data=f"adm_grant_pick_{u['user_id']}")]
-        for u in others[:GRANT_LIST_LIMIT]
-    ]
-    if not rows:
+    text, kb, page = _build_grant_others_view(0)
+    if kb is None:
         await callback.answer("Все подписчики бота уже есть в списке Sanctum", show_alert=True)
         return
-    await callback.message.answer(
-        "Подписчики бота, которых ещё нет в Sanctum. Нажмите на нужного или пришлите его ID:",
-        reply_markup=InlineKeyboardMarkup(inline_keyboard=rows),
-    )
+    await callback.message.answer(text, reply_markup=kb)
     await callback.answer()
 
 
@@ -3881,88 +3891,13 @@ async def adm_grant_access_finish(message: Message, state: FSMContext):
 async def adm_sanctum_list(callback: CallbackQuery):
     if not await _require_permission(callback, "adm_sanctum_list"):
         return
-    today = _today()
-    reminder_from = today + timedelta(days=config.SANCTUM_REMINDER_DAYS_BEFORE)
-    current_base_price = db.get_sanctum()["price"]
-    members = db.get_all_sanctum_memberships()
-
-    if not members:
+    if not db.get_all_sanctum_memberships():
         await callback.message.answer("Пока нет ни одного подписчика VEDA SANCTUM.")
         await callback.answer()
         return
-
-    n_attention = len(db.get_sanctum_needs_attention(today.isoformat()))
-    await callback.message.answer(
-        f"❗ Просрочили и не назвали дату оплаты: {n_attention} чел." if n_attention
-        else "✅ Просроченных без даты оплаты сейчас нет.",
-        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text=f"❗ Показать список ({n_attention})", callback_data="adm_sanctum_attention")]
-        ]) if n_attention else None,
-    )
-
-    lines = [f"<b>📋 Подписчики {html.escape(SANCTUM_FULL_NAME)}</b>\n"]
-    for m in members:
-        valid_until = _parse_date(m["valid_until"])
-        name = f"@{m['username']}" if m["username"] else (m["preferred_name"] or m["first_name"] or str(m["user_id"]))
-
-        if m["lifetime_free"]:
-            status = "🏆 пожизненно"
-        elif m["status"] == "removed":
-            status = "🚫 удалён"
-        elif valid_until is None:
-            status = "❔"
-        elif valid_until < today:
-            status = "❌ просрочено"
-        elif valid_until <= reminder_from:
-            status = "⚠️ скоро истекает"
-        else:
-            status = "✅ активна"
-
-        full = db.get_sanctum_membership(m["user_id"])
-        acc_days = (full["accumulated_days"] or 0) if full else 0
-        level = compute_ascension_level(m["user_id"])
-        id_link = f'<a href="tg://user?id={m["user_id"]}">ID {m["user_id"]}</a>'
-        if m["lifetime_free"]:
-            line = (
-                f"{status} - {html.escape(name)} ({id_link}) - дар Люминара III, платить больше не нужно\n"
-                f"   🪜 {_ascension_level_name(level)} - в поле по оплатам: {acc_days} дн. (~{acc_days / 30:.1f} мес.)"
-            )
-        else:
-            date_text = valid_until.strftime("%d.%m.%Y") if valid_until else "-"
-            price = m["price"] or "-"
-            # сравниваем без учёта форматирования (жирный/ссылки) — иначе одна и та же
-            # цена, оформленная по-разному, ошибочно считалась бы "разной"
-            rate_tag = "🆕 новая цена" if _strip_html_tags(price) == _strip_html_tags(current_base_price) else "🕰 старая цена"
-            line = (
-                f"{status} - {html.escape(name)} ({id_link}) - до {date_text} - {price} ({rate_tag})\n"
-                f"   🪜 {_ascension_level_name(level)} - в поле по оплатам: {acc_days} дн. (~{acc_days / 30:.1f} мес.)"
-            )
-        if m["promise_date"]:
-            promise = _parse_date(m["promise_date"])
-            if promise:
-                line += f"\n   ⏰ обещал оплатить: {promise.strftime('%d.%m.%Y')}"
-        lines.append(line)
-
-    await callback.message.answer("\n".join(lines))
-
-    active_members = [m for m in members if m["status"] != "removed"]
-    if active_members:
-        rows = []
-        for m in active_members:
-            name = f"@{m['username']}" if m["username"] else (m["preferred_name"] or m["first_name"] or str(m["user_id"]))
-            rows.append([InlineKeyboardButton(text=f"🚫 Убрать {name}", callback_data=f"adm_sanctum_kick_{m['user_id']}")])
-        rows.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="adm_back")])
-        await callback.message.answer(
-            "Нажмите, чтобы убрать человека из VEDA SANCTUM:",
-            reply_markup=InlineKeyboardMarkup(inline_keyboard=rows),
-        )
-    else:
-        await callback.message.answer(
-            "Действующих подписчиков сейчас нет.",
-            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="⬅️ Назад", callback_data="adm_back")]
-            ]),
-        )
+    text, kb, page = _build_sanctum_view(0)
+    _remember_page(callback.from_user.id, "sl", page)
+    await callback.message.answer(text, reply_markup=kb)
     await callback.answer()
 
 
@@ -3974,31 +3909,9 @@ async def adm_sanctum_attention(callback: CallbackQuery):
     мере роста базы."""
     if not await _require_permission(callback, "adm_sanctum_list"):
         return
-    today = _today()
-    people = db.get_sanctum_needs_attention(today.isoformat())
-    text = (
-        "❗ <b>Просрочили оплату и не назвали дату</b>\n\n"
-        "Действующий доступ закончился, человек не убран вручную, и в боте не отмечено "
-        "ни одной ещё не наступившей даты «Оплачу позже».\n\n"
-    )
-    rows = []
-    if not people:
-        text += "✅ Таких людей сейчас нет."
-    else:
-        lines = []
-        for m in people:
-            name = f"@{m['username']}" if m["username"] else (m["preferred_name"] or m["first_name"] or str(m["user_id"]))
-            valid_until = _parse_date(m["valid_until"])
-            overdue_days = (today - valid_until).days if valid_until else "?"
-            id_link = f'<a href="tg://user?id={m["user_id"]}">ID {m["user_id"]}</a>'
-            line = f"• {html.escape(name)} ({id_link}) - просрочено {overdue_days} дн., цена {m['price'] or '-'}"
-            if m["promise_date"]:
-                line += f" (обещал оплатить {_fmt_date(_parse_date(m['promise_date']))} - дата уже прошла)"
-            lines.append(line)
-            rows.append([InlineKeyboardButton(text=f"🚫 Убрать {name}", callback_data=f"adm_sanctum_kick_{m['user_id']}")])
-        text += "\n".join(lines)
-    rows.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="adm_sanctum_list")])
-    await callback.message.answer(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
+    text, kb, page = _build_attention_view(0)
+    _remember_page(callback.from_user.id, "sa", page)
+    await callback.message.answer(text, reply_markup=kb)
     await callback.answer()
 
 
@@ -4029,7 +3942,12 @@ async def adm_sanctum_kick(callback: CallbackQuery):
         except Exception:
             logging.exception("Не удалось отправить письмо об уходе из Sanctum пользователю %s", user_id)
     note = "письмо с правилами возврата отправлено" if delivered else "письмо отправить не получилось (нет карточки или человек закрыл бота)"
-    await callback.message.edit_text(f"🚫 Убран из VEDA SANCTUM ✅\n{note}")
+    await callback.message.edit_text(
+        f"🚫 Убран из VEDA SANCTUM ✅\n{note}",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="⬅️ К списку подписчиков", callback_data="adm_sanctum_list")]
+        ]),
+    )
     await callback.answer()
 
 
@@ -4228,7 +4146,7 @@ async def adm_sanctum_screen_text_field_start(callback: CallbackQuery, state: FS
     if placeholders:
         ph_hint = ", ".join(f"<code>{html.escape(p)}</code>" for p in placeholders)
         prompt += f"\n\nВажно: именно фигурные скобки - {ph_hint} (не круглые), иначе не подставится."
-    await callback.message.answer(prompt)
+    await _answer_long(callback.message, prompt)
     await callback.answer()
 
 
@@ -4288,7 +4206,7 @@ async def adm_payment_flow_text_field_start(callback: CallbackQuery, state: FSMC
     if placeholders:
         ph_hint = ", ".join(f"<code>{html.escape(p)}</code>" for p in placeholders)
         prompt += f"\n\nВажно: именно фигурные скобки - {ph_hint} (не круглые), иначе не подставится."
-    await callback.message.answer(prompt)
+    await _answer_long(callback.message, prompt)
     await callback.answer()
 
 
@@ -4418,7 +4336,7 @@ async def adm_webinar_screen_text_field_start(callback: CallbackQuery, state: FS
     if placeholders:
         ph_hint = ", ".join(f"<code>{html.escape(p)}</code>" for p in placeholders)
         prompt += f"\n\nВажно: именно фигурные скобки - {ph_hint} (не круглые), иначе не подставится."
-    await callback.message.answer(prompt)
+    await _answer_long(callback.message, prompt)
     await callback.answer()
 
 
@@ -4488,7 +4406,7 @@ async def adm_general_screen_text_field_start(callback: CallbackQuery, state: FS
     if placeholders:
         ph_hint = ", ".join(f"<code>{html.escape(p)}</code>" for p in placeholders)
         prompt += f"\n\nВажно: именно фигурные скобки - {ph_hint} (не круглые), иначе не подставится."
-    await callback.message.answer(prompt)
+    await _answer_long(callback.message, prompt)
     await callback.answer()
 
 
@@ -4568,7 +4486,7 @@ async def adm_ascension_text_field_start(callback: CallbackQuery, state: FSMCont
     if placeholders:
         ph_hint = ", ".join(f"<code>{html.escape(p)}</code>" for p in placeholders)
         prompt += f"\n\nВажно: именно фигурные скобки - {ph_hint} (не круглые), иначе не подставится."
-    await callback.message.answer(prompt)
+    await _answer_long(callback.message, prompt)
     await callback.answer()
 
 
@@ -4628,7 +4546,7 @@ async def adm_intention_text_field_start(callback: CallbackQuery, state: FSMCont
     if placeholders:
         ph_hint = ", ".join(f"<code>{html.escape(p)}</code>" for p in placeholders)
         prompt += f"\n\nВажно: именно фигурные скобки - {ph_hint} (не круглые), иначе не подставится."
-    await callback.message.answer(prompt)
+    await _answer_long(callback.message, prompt)
     await callback.answer()
 
 
@@ -4739,28 +4657,14 @@ async def adm_payment_field_start(callback: CallbackQuery, state: FSMContext):
 async def adm_about(callback: CallbackQuery, state: FSMContext):
     if not await _require_permission(callback, "adm_about"):
         return
-    current = db.get_setting("about_text")
-    await state.set_state(EditFieldStates.waiting_value)
-    await state.update_data(target="about", field="about_text")
-    await callback.message.answer(
-        f"Текущий текст «Философия Alena Veda»:\n\n{current}\n\n"
-        f"Пришлите новый текст (он будет показан пользователю по кнопке «{html.escape(BTN_ABOUT)}»):"
-    )
-    await callback.answer()
+    await _open_long_text_editor(callback, state, "about")
 
 
 @router.callback_query(F.data == "adm_faq")
 async def adm_faq(callback: CallbackQuery, state: FSMContext):
     if not await _require_permission(callback, "adm_faq"):
         return
-    current = db.get_setting("faq_text")
-    await state.set_state(EditFieldStates.waiting_value)
-    await state.update_data(target="faq", field="faq_text")
-    await callback.message.answer(
-        f"Текущий текст «Частые вопросы»:\n\n{current}\n\n"
-        f"Пришлите новый текст (он показывается по кнопке «{html.escape(BTN_INFO)}» → «❓ Частые вопросы»):"
-    )
-    await callback.answer()
+    await _open_long_text_editor(callback, state, "faq")
 
 
 @router.callback_query(F.data == "adm_faq_suggestion_invite")
@@ -4799,30 +4703,8 @@ async def adm_faq_suggestions(callback: CallbackQuery):
     переносит нужное в текст FAQ (adm_faq) вручную, и отмечает «Учтено»."""
     if not await _require_permission(callback, "adm_faq_suggestions"):
         return
-    rows_data = db.get_pending_faq_suggestions()
-    if not rows_data:
-        text = "<b>💡 Вопросы от людей для FAQ</b>\n\nПока никто ничего не предложил."
-        kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Назад", callback_data="adm_back")]])
-        await callback.message.edit_text(text, reply_markup=kb)
-        await callback.answer()
-        return
-
-    lines = [
-        "<b>💡 Вопросы от людей для FAQ</b>",
-        "",
-        "Перенесите нужное в текст «Частые вопросы» (✏️ Текст «Частые вопросы») вручную, "
-        "затем отметьте здесь «Учтено», чтобы вопрос ушёл из списка.",
-    ]
-    rows = []
-    for r in rows_data:
-        name = f"@{r['username']}" if r["username"] else (r["preferred_name"] or r["first_name"] or str(r["user_id"]))
-        date_part = (r["created_at"] or "").split(" ")[0]
-        lines.append(f"\n<b>{html.escape(name)}</b> ({date_part}):\n«{html.escape(r['question_text'])}»")
-        rows.append([InlineKeyboardButton(
-            text=f"✅ Учтено - {name}", callback_data=f"adm_faq_sugg_done_{r['id']}"
-        )])
-    rows.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="adm_back")])
-    await callback.message.edit_text("\n".join(lines), reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
+    text, kb, page = _build_faq_sugg_view(0)
+    await _edit_keep(callback, text, kb)
     await callback.answer()
 
 
@@ -4839,28 +4721,14 @@ async def adm_faq_suggestion_done(callback: CallbackQuery):
 async def adm_rules(callback: CallbackQuery, state: FSMContext):
     if not await _require_permission(callback, "adm_rules"):
         return
-    current = db.get_setting("rules_text")
-    await state.set_state(EditFieldStates.waiting_value)
-    await state.update_data(target="rules", field="rules_text")
-    await callback.message.answer(
-        f"Текущий текст «Правила пространства»:\n\n{current}\n\n"
-        f"Пришлите новый текст (он показывается по кнопке «{html.escape(BTN_INFO)}» → «📜 Правила пространства»):"
-    )
-    await callback.answer()
+    await _open_long_text_editor(callback, state, "rules")
 
 
 @router.callback_query(F.data == "adm_bot_guide")
 async def adm_bot_guide(callback: CallbackQuery, state: FSMContext):
     if not await _require_permission(callback, "adm_bot_guide"):
         return
-    current = db.get_setting("bot_guide_text")
-    await state.set_state(EditFieldStates.waiting_value)
-    await state.update_data(target="bot_guide", field="bot_guide_text")
-    await callback.message.answer(
-        f"Текущий текст «Как пользоваться ботом»:\n\n{current}\n\n"
-        f"Пришлите новый текст (он показывается по кнопке «{html.escape(BTN_INFO)}» → «🧭 Как пользоваться»):"
-    )
-    await callback.answer()
+    await _open_long_text_editor(callback, state, "guide")
 
 
 @router.callback_query(F.data == "adm_welcome_text")
@@ -5188,7 +5056,7 @@ async def adm_profile_text_field_start(callback: CallbackQuery, state: FSMContex
     if placeholders:
         ph_hint = ", ".join(f"<code>{html.escape(p)}</code>" for p in placeholders)
         prompt += f"\n\nВажно: именно фигурные скобки - {ph_hint} (не круглые), иначе не подставится."
-    await callback.message.answer(prompt)
+    await _answer_long(callback.message, prompt)
     await callback.answer()
 
 
@@ -5198,28 +5066,17 @@ def _user_display_name(u) -> str:
     return f"@{u['username']}" if u["username"] else (u["preferred_name"] or u["first_name"] or str(u["user_id"]))
 
 
-def _users_list_kb(users) -> InlineKeyboardMarkup:
-    rows = []
-    for u in users:
-        joined = (u["created_at"] or "").split(" ")[0]
-        mark = "🚫" if u["blocked"] else ("👋" if u["self_departed"] else "✅")
-        label = f"{mark} {_user_display_name(u)} - с {joined}"
-        rows.append([InlineKeyboardButton(text=label[:64], callback_data=f"adm_user_view_{u['user_id']}")])
-    rows.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="adm_back")])
-    return InlineKeyboardMarkup(inline_keyboard=rows)
-
-
 @router.callback_query(F.data == "adm_users_list")
 async def adm_users_list(callback: CallbackQuery):
     if not await _require_permission(callback, "adm_users_list"):
         return
-    users = db.get_all_users_full()
-    if not users:
+    if not db.get_all_users_full():
         await callback.message.edit_text("Пока никто не запускал бота.")
         await callback.answer()
         return
-    text = f"<b>👥 Подписчики бота ({len(users)})</b>\n\nНажмите на имя, чтобы посмотреть и управлять."
-    await callback.message.edit_text(text, reply_markup=_users_list_kb(users))
+    text, kb, page = _build_users_view(0)
+    _remember_page(callback.from_user.id, "ul", page)
+    await _edit_keep(callback, text, kb)
     await callback.answer()
 
 
@@ -5229,7 +5086,9 @@ async def _render_user_detail(callback: CallbackQuery, user_id: int):
         await callback.message.edit_text(
             "Этого человека больше нет среди подписчиков бота.",
             reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="⬅️ К списку", callback_data="adm_users_list")]
+                [InlineKeyboardButton(
+                    text="⬅️ К списку", callback_data=f"adm_pg_ul_{_recall_page(callback.from_user.id, 'ul')}"
+                )]
             ]),
         )
         return
@@ -5262,7 +5121,9 @@ async def _render_user_detail(callback: CallbackQuery, user_id: int):
         [InlineKeyboardButton(text=meditation_label, callback_data=f"adm_user_meditation_toggle_{user_id}")],
         [InlineKeyboardButton(text=block_label, callback_data=f"adm_user_toggle_{user_id}")],
         [InlineKeyboardButton(text="🔄 Обнулить только имя (заново познакомится)", callback_data=f"adm_user_reset_{user_id}")],
-        [InlineKeyboardButton(text="⬅️ К списку", callback_data="adm_users_list")],
+        [InlineKeyboardButton(
+            text="⬅️ К списку", callback_data=f"adm_pg_ul_{_recall_page(callback.from_user.id, 'ul')}"
+        )],
     ])
     await callback.message.edit_text(text, reply_markup=kb)
 
@@ -5323,14 +5184,12 @@ async def adm_user_reset(callback: CallbackQuery):
         return
     user_id = int(callback.data.split("_")[-1])
     db.reset_user_onboarding(user_id)
-    users = db.get_all_users_full()
-    text = (
-        f"<b>👥 Подписчики бота ({len(users)})</b>\n\n"
+    text, kb, page = _build_users_view(_recall_page(callback.from_user.id, "ul"))
+    note = (
         "Имя сброшено: при следующем /start бот заново спросит имя и повторит знакомство. "
         "Ступень, ранг Люминара, покупка медитаций, Sanctum и цена остались как были.\n\n"
-        "Нажмите на имя, чтобы посмотреть и управлять."
     )
-    await callback.message.edit_text(text, reply_markup=_users_list_kb(users))
+    await _edit_keep(callback, note + text, kb)
     await callback.answer("Имя сброшено 🔄")
 
 
@@ -5488,6 +5347,13 @@ async def edit_field_value(message: Message, state: FSMContext):
         )
     )
     value = message.html_text if html_trusted else message.text
+    if target not in ("about", "faq", "rules", "bot_guide") and _visible_len(value or "") > 3500:
+        await message.answer(
+            f"⚠️ Текст длинный: {_visible_len(value)} символов. Лимит Telegram - 4096 символов в одном сообщении, "
+            "а бот иногда добавляет к тексту ещё строки (имя, дата, цена). Если люди перестанут получать это "
+            "сообщение, сократите текст.",
+            parse_mode=None,
+        )
 
     if target == "webinar":
         if field == "date_text":
@@ -5988,7 +5854,7 @@ async def adm_stalled(callback: CallbackQuery):
             f"👤 {html.escape(name)} (ID {reg['user_id']}) - {html.escape(reg['product_title'] or '-')} - "
             f"{reg['price']} - начал(а) {started}"
         )
-    await callback.message.answer("\n".join(lines))
+    await _answer_long(callback.message, "\n".join(lines))
     await callback.answer()
 
 
@@ -6208,6 +6074,9 @@ async def adm_broadcast_content(message: Message, state: FSMContext):
     if message.photo:
         await state.update_data(photos=[message.photo[-1].file_id], text=message.html_text or "")
         await _bc_push(state, "content")
+        note = _broadcast_length_note("photo", message.html_text or "")
+        if note:
+            await message.answer(note)
         await _bc_ask_more_photos(message.answer, state)
         return
     elif message.video:
@@ -6225,6 +6094,9 @@ async def adm_broadcast_content(message: Message, state: FSMContext):
 
     await state.update_data(content_type=content_type, text=message.html_text or "", file_id=file_id)
     await _bc_push(state, "content")
+    note = _broadcast_length_note(content_type, message.html_text or "")
+    if note:
+        await message.answer(note)
     await _bc_ask_button_choice(message.answer, state)
 
 
@@ -6464,24 +6336,15 @@ async def adm_broadcast_send(callback: CallbackQuery, state: FSMContext):
                     callback.bot, user_id, text or "", data["file_id"], reply_markup=kb, protect_content=protect
                 )
             elif data["content_type"] == "video":
-                try:
-                    await callback.bot.send_video(
-                        user_id, data["file_id"], caption=text or None, reply_markup=kb, protect_content=protect
-                    )
-                except TelegramBadRequest:
-                    # тот же лимит подписи (1024 символа), что и у фото - видео
-                    # отдельно, полный текст следом, чтобы ничего не потерять
-                    await callback.bot.send_video(user_id, data["file_id"], protect_content=protect)
-                    await callback.bot.send_message(user_id, text, reply_markup=kb, protect_content=protect)
+                await _send_media_with_text(
+                    callback.bot, user_id, "video", data["file_id"], text or "", reply_markup=kb, protect_content=protect
+                )
             elif data["content_type"] == "video_note":
                 await callback.bot.send_video_note(user_id, data["file_id"], reply_markup=kb, protect_content=protect)
             elif data["content_type"] == "album":
-                media_group = [InputMediaPhoto(media=fid) for fid in data["file_ids"]]
-                if text:
-                    media_group[0] = InputMediaPhoto(media=data["file_ids"][0], caption=text)
-                await callback.bot.send_media_group(user_id, media_group, protect_content=protect)
+                await _send_album_with_text(callback.bot, user_id, data["file_ids"], text or "", protect_content=protect)
             else:
-                await callback.bot.send_message(user_id, text, reply_markup=kb, protect_content=protect)
+                await _send_long(callback.bot, user_id, text, reply_markup=kb, protect_content=protect)
             sent += 1
         except Exception:
             failed += 1
@@ -6767,32 +6630,8 @@ async def check_webinar_reminders(bot: Bot):
 async def adm_intentions_list(callback: CallbackQuery):
     if not await _require_permission(callback, "adm_intentions_list"):
         return
-    rows_data = db.get_all_intentions_for_admin()
-    if not rows_data:
-        text = "<b>🕯 Намерения участников</b>\n\nПока никто не написал намерение."
-        kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Назад", callback_data="adm_back")]])
-        await callback.message.edit_text(text, reply_markup=kb)
-        await callback.answer()
-        return
-
-    lines = [
-        "<b>🕯 Намерения участников</b>",
-        "",
-        "Напоминание приходит всем 8 и 22 числа. Отметьте «Разбор дан», когда лично разберёте намерение "
-        "человека - кнопка «написать лично» перестанет приходить ему в напоминаниях (само напоминание "
-        "останется). Если человек потом изменит текст намерения - отметка снимется сама.",
-    ]
-    rows = []
-    for r in rows_data:
-        name = f"@{r['username']}" if r["username"] else (r["preferred_name"] or r["first_name"] or str(r["user_id"]))
-        status_icon = "✅" if r["intention_reviewed"] else "◻️"
-        lines.append(f"\n{status_icon} <b>{html.escape(name)}</b>:\n«{html.escape(r['intention_text'])}»")
-        toggle_label = "◻️ Снять отметку" if r["intention_reviewed"] else "✅ Разбор дан"
-        rows.append([InlineKeyboardButton(
-            text=f"{toggle_label} - {name}", callback_data=f"adm_intent_toggle_{r['user_id']}"
-        )])
-    rows.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="adm_back")])
-    await callback.message.edit_text("\n".join(lines), reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
+    text, kb, page = _build_intentions_view(0, "a")
+    await _edit_keep(callback, text, kb)
     await callback.answer()
 
 
@@ -6800,11 +6639,16 @@ async def adm_intentions_list(callback: CallbackQuery):
 async def adm_intent_toggle(callback: CallbackQuery):
     if not await _require_permission(callback, "adm_intentions_list"):
         return
-    user_id = int(callback.data[len("adm_intent_toggle_"):])
+    parts = callback.data[len("adm_intent_toggle_"):].split("_")
+    user_id = int(parts[0])
+    page = int(parts[1]) if len(parts) > 1 and parts[1].isdigit() else 0
+    flt = parts[2] if len(parts) > 2 and parts[2] in ("a", "u") else "a"
     membership = db.get_sanctum_membership(user_id)
     currently_reviewed = bool(membership["intention_reviewed"]) if membership else False
     db.set_intention_reviewed(user_id, not currently_reviewed)
-    await adm_intentions_list(callback)
+    text, kb, page = _build_intentions_view(page, flt)
+    await _edit_keep(callback, text, kb)
+    await callback.answer()
 
 
 # ---------- напоминание о намерении (ступень «Искра», 8 и 22 числа каждого месяца) ----------
@@ -6955,13 +6799,95 @@ def _split_message(text: str, limit: int = 3900) -> list:
     return chunks
 
 
+_TAG_PARTS_RE = re.compile(r"<(/?)([A-Za-z][A-Za-z0-9-]*)((?:\s[^<>]*)?)>")
+CAPTION_LIMIT = 1024
+
+
+def _plain_text(text: str) -> str:
+    return html.unescape(_HTML_TAG_RE.sub("", text or ""))
+
+
+def _visible_len(text: str) -> int:
+    """Сколько символов видит человек: лимиты Telegram считаются без HTML-тегов."""
+    return len(_plain_text(text))
+
+
+def _balance_html_chunks(chunks: list) -> list:
+    """Если длинный текст порезан внутри <b>...</b> (или другого тега), в конце
+    куска теги закрываются, а в начале следующего открываются заново - иначе
+    Telegram отклонил бы кусок с незакрытым тегом."""
+    result, open_tags = [], []
+    for chunk in chunks:
+        body = "".join(tag for _, tag in open_tags) + chunk
+        stack = []
+        for m in _TAG_PARTS_RE.finditer(body):
+            closing, name = m.group(1), m.group(2).lower()
+            if closing:
+                for i in range(len(stack) - 1, -1, -1):
+                    if stack[i][0] == name:
+                        del stack[i:]
+                        break
+            else:
+                stack.append((name, m.group(0)))
+        result.append(body + "".join("</%s>" % n for n, _ in reversed(stack)))
+        open_tags = stack
+    return result
+
+
 async def _send_long(bot, chat_id: int, text: str, reply_markup=None, protect_content=False):
-    chunks = _split_message(text)
+    """Длинный текст уходит несколькими сообщениями подряд (кнопки - под последним).
+    Если Telegram не принял разметку, кусок уходит обычным текстом без тегов,
+    а не пропадает."""
+    chunks = _balance_html_chunks(_split_message(text)) if len(text) > 3900 else [text]
     for i, chunk in enumerate(chunks):
-        last = i == len(chunks) - 1
-        await bot.send_message(
-            chat_id, chunk, reply_markup=reply_markup if last else None, protect_content=protect_content
-        )
+        markup = reply_markup if i == len(chunks) - 1 else None
+        try:
+            await bot.send_message(chat_id, chunk, reply_markup=markup, protect_content=protect_content)
+        except TelegramBadRequest as e:
+            if "parse entities" not in str(e).lower():
+                raise
+            await bot.send_message(
+                chat_id, _plain_text(chunk), reply_markup=markup, protect_content=protect_content, parse_mode=None
+            )
+
+
+async def _answer_long(msg, text: str, reply_markup=None, protect_content=False):
+    await _send_long(msg.bot, msg.chat.id, text, reply_markup=reply_markup, protect_content=protect_content)
+
+
+async def _send_media_with_text(bot, chat_id: int, kind: str, file_id: str, text: str,
+                                reply_markup=None, protect_content=False):
+    """Фото/видео с текстом. Подпись у Telegram - до 1024 видимых символов: короткий
+    текст уходит подписью одним сообщением, длинный - сначала само фото/видео,
+    а следом полный текст (несколькими сообщениями, если нужно)."""
+    send = bot.send_photo if kind == "photo" else bot.send_video
+    text = text or ""
+    if text and _visible_len(text) <= CAPTION_LIMIT:
+        try:
+            await send(chat_id, file_id, caption=text, reply_markup=reply_markup, protect_content=protect_content)
+            return
+        except TelegramBadRequest:
+            pass
+    await send(chat_id, file_id, reply_markup=None if text else reply_markup, protect_content=protect_content)
+    if text:
+        await _send_long(bot, chat_id, text, reply_markup=reply_markup, protect_content=protect_content)
+
+
+async def _send_album_with_text(bot, chat_id: int, file_ids: list, text: str, protect_content=False):
+    """Альбом из фото: подпись только у первого фото и только если она влезает
+    в 1024 символа, иначе - альбом, а текст следом."""
+    text = text or ""
+    media = [InputMediaPhoto(media=fid) for fid in file_ids]
+    if text and _visible_len(text) <= CAPTION_LIMIT:
+        media[0] = InputMediaPhoto(media=file_ids[0], caption=text)
+        try:
+            await bot.send_media_group(chat_id, media, protect_content=protect_content)
+            return
+        except TelegramBadRequest:
+            media[0] = InputMediaPhoto(media=file_ids[0])
+    await bot.send_media_group(chat_id, media, protect_content=protect_content)
+    if text:
+        await _send_long(bot, chat_id, text, protect_content=protect_content)
 
 
 def _ritual_two_months():
@@ -7504,6 +7430,565 @@ async def adm_rit_announce_go(callback: CallbackQuery):
         f"Анонс отправлен: {sent} чел." + (f", не дошло: {failed}." if failed else "."),
         reply_markup=InlineKeyboardMarkup(inline_keyboard=[RITUAL_ADMIN_BACK]),
     )
+
+
+# ---------- админ-панель: листание длинных списков и поиск ----------
+
+USERS_PER_PAGE = 20
+SEARCH_LIMIT = 20
+LIST_MAX_CHARS = 3200
+_LAST_PAGE: dict = {}
+
+
+def _remember_page(admin_id: int, kind: str, page: int):
+    _LAST_PAGE[(admin_id, kind)] = page
+
+
+def _recall_page(admin_id: int, kind: str) -> int:
+    return _LAST_PAGE.get((admin_id, kind), 0)
+
+
+def _page_clamp(total_pages: int, page: int) -> int:
+    return max(0, min(page, total_pages - 1))
+
+
+def _chunk_pages(rendered: list, max_items: int, max_chars: int) -> list:
+    """Делит уже готовые строки на страницы: не больше max_items на странице и
+    не больше max_chars символов, чтобы страница гарантированно влезала в одно
+    сообщение Telegram. Возвращает список страниц, каждая - список индексов."""
+    pages, current, chars = [], [], 0
+    for i, block in enumerate(rendered):
+        if current and (len(current) >= max_items or chars + len(block) + 1 > max_chars):
+            pages.append(current)
+            current, chars = [], 0
+        current.append(i)
+        chars += len(block) + 1
+    if current:
+        pages.append(current)
+    return pages or [[]]
+
+
+def _pager_row(kind: str, page: int, pages: int, extra: str = "") -> list:
+    if pages <= 1:
+        return []
+    suffix = f"_{extra}" if extra else ""
+    row = []
+    if page > 0:
+        row.append(InlineKeyboardButton(text="⬅️", callback_data=f"adm_pg_{kind}_{page - 1}{suffix}"))
+    row.append(InlineKeyboardButton(text=f"стр. {page + 1} из {pages}", callback_data="noop"))
+    if page < pages - 1:
+        row.append(InlineKeyboardButton(text="➡️", callback_data=f"adm_pg_{kind}_{page + 1}{suffix}"))
+    return [row]
+
+
+async def _edit_keep(callback: CallbackQuery, text: str, kb):
+    """Правит текущее сообщение; если ничего не изменилось (повторное нажатие) -
+    спокойно молчит, а не падает с ошибкой Telegram."""
+    try:
+        await callback.message.edit_text(text, reply_markup=kb)
+    except TelegramBadRequest as e:
+        if "not modified" not in str(e).lower():
+            raise
+
+
+def _user_matches(u, query: str) -> bool:
+    q = (query or "").strip().lower().lstrip("@")
+    if not q:
+        return True
+    hay = " ".join(str(u[k] or "") for k in ("username", "first_name", "preferred_name", "user_id")).lower()
+    return q in hay
+
+
+# -- подписчики бота --
+
+def _build_users_view(page: int, query: str = ""):
+    users = db.get_all_users_full()
+    total = len(users)
+    if query:
+        users = [u for u in users if _user_matches(u, query)][:SEARCH_LIMIT]
+        pages, page = 1, 0
+        head = (
+            f"<b>👥 Подписчики бота ({total})</b>\n\nПоиск «{html.escape(query)}»: найдено {len(users)}. "
+            "Нажмите на имя, чтобы посмотреть и управлять."
+        )
+    else:
+        pages = max(1, -(-total // USERS_PER_PAGE))
+        page = _page_clamp(pages, page)
+        users = users[page * USERS_PER_PAGE:(page + 1) * USERS_PER_PAGE]
+        head = f"<b>👥 Подписчики бота ({total})</b>\n\nНажмите на имя, чтобы посмотреть и управлять."
+    rows = []
+    for u in users:
+        joined = (u["created_at"] or "").split(" ")[0]
+        mark = "🚫" if u["blocked"] else ("👋" if u["self_departed"] else "✅")
+        label = f"{mark} {_user_display_name(u)} - с {joined}"
+        rows.append([InlineKeyboardButton(text=label[:64], callback_data=f"adm_user_view_{u['user_id']}")])
+    if not query:
+        rows.extend(_pager_row("ul", page, pages))
+    rows.append([InlineKeyboardButton(text="🔎 Найти человека", callback_data="adm_fd_ul")])
+    if query:
+        rows.append([InlineKeyboardButton(text="⬅️ К списку", callback_data="adm_pg_ul_0")])
+    rows.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="adm_back")])
+    return head, InlineKeyboardMarkup(inline_keyboard=rows), page
+
+
+# -- подписчики VEDA SANCTUM --
+
+def _sanctum_member_block(m, today, reminder_from, current_base_price):
+    valid_until = _parse_date(m["valid_until"])
+    name = f"@{m['username']}" if m["username"] else (m["preferred_name"] or m["first_name"] or str(m["user_id"]))
+
+    if m["lifetime_free"]:
+        status = "🏆 пожизненно"
+    elif m["status"] == "removed":
+        status = "🚫 удалён"
+    elif valid_until is None:
+        status = "❔"
+    elif valid_until < today:
+        status = "❌ просрочено"
+    elif valid_until <= reminder_from:
+        status = "⚠️ скоро истекает"
+    else:
+        status = "✅ активна"
+
+    full = db.get_sanctum_membership(m["user_id"])
+    acc_days = (full["accumulated_days"] or 0) if full else 0
+    level = compute_ascension_level(m["user_id"])
+    id_link = f'<a href="tg://user?id={m["user_id"]}">ID {m["user_id"]}</a>'
+    if m["lifetime_free"]:
+        line = (
+            f"{status} - {html.escape(name)} ({id_link}) - дар Люминара III, платить больше не нужно\n"
+            f"   🪜 {_ascension_level_name(level)} - в поле по оплатам: {acc_days} дн. (~{acc_days / 30:.1f} мес.)"
+        )
+    else:
+        date_text = valid_until.strftime("%d.%m.%Y") if valid_until else "-"
+        price = m["price"] or "-"
+        rate_tag = "🆕 новая цена" if _strip_html_tags(price) == _strip_html_tags(current_base_price) else "🕰 старая цена"
+        line = (
+            f"{status} - {html.escape(name)} ({id_link}) - до {date_text} - {price} ({rate_tag})\n"
+            f"   🪜 {_ascension_level_name(level)} - в поле по оплатам: {acc_days} дн. (~{acc_days / 30:.1f} мес.)"
+        )
+    if m["promise_date"]:
+        promise = _parse_date(m["promise_date"])
+        if promise:
+            line += f"\n   ⏰ обещал оплатить: {promise.strftime('%d.%m.%Y')}"
+    return name, line
+
+
+def _build_sanctum_view(page: int, query: str = ""):
+    today = _today()
+    reminder_from = today + timedelta(days=config.SANCTUM_REMINDER_DAYS_BEFORE)
+    current_base_price = db.get_sanctum()["price"]
+    members = db.get_all_sanctum_memberships()
+    total = len(members)
+    if query:
+        members = [m for m in members if _user_matches(m, query)][:SEARCH_LIMIT]
+    blocks = [_sanctum_member_block(m, today, reminder_from, current_base_price) for m in members]
+    if query:
+        pages_idx, page = [list(range(len(blocks)))], 0
+    else:
+        pages_idx = _chunk_pages([b[1] for b in blocks], 20, LIST_MAX_CHARS)
+        page = _page_clamp(len(pages_idx), page)
+    idx = pages_idx[page]
+
+    n_attention = len(db.get_sanctum_needs_attention(today.isoformat()))
+    head = f"<b>📋 Подписчики {html.escape(SANCTUM_FULL_NAME)}</b> ({total})"
+    if query:
+        head += f"\nПоиск «{html.escape(query)}»: найдено {len(blocks)}"
+    head += (
+        f"\n❗ Просрочили и не назвали дату оплаты: {n_attention} чел."
+        if n_attention else "\n✅ Просроченных без даты оплаты сейчас нет."
+    )
+    text = head + "\n\n" + "\n".join(blocks[i][1] for i in idx) if idx else head + "\n\nНикого не нашла."
+    rows = []
+    if n_attention and not query:
+        rows.append([InlineKeyboardButton(text=f"❗ Показать список ({n_attention})", callback_data="adm_sanctum_attention")])
+    for i in idx:
+        m = members[i]
+        if m["status"] != "removed":
+            rows.append([InlineKeyboardButton(
+                text=f"🚫 Убрать {blocks[i][0]}"[:60], callback_data=f"adm_sanctum_kick_{m['user_id']}"
+            )])
+    if not query:
+        rows.extend(_pager_row("sl", page, len(pages_idx)))
+    rows.append([InlineKeyboardButton(text="🔎 Найти человека", callback_data="adm_fd_sl")])
+    if query:
+        rows.append([InlineKeyboardButton(text="⬅️ К списку", callback_data="adm_sanctum_list")])
+    rows.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="adm_back")])
+    return text, InlineKeyboardMarkup(inline_keyboard=rows), page
+
+
+def _build_attention_view(page: int):
+    today = _today()
+    people = db.get_sanctum_needs_attention(today.isoformat())
+    head = (
+        "❗ <b>Просрочили оплату и не назвали дату</b>\n\n"
+        "Действующий доступ закончился, человек не убран вручную, и в боте не отмечено "
+        "ни одной ещё не наступившей даты «Оплачу позже».\n\n"
+    )
+    names, lines = [], []
+    for m in people:
+        name = f"@{m['username']}" if m["username"] else (m["preferred_name"] or m["first_name"] or str(m["user_id"]))
+        valid_until = _parse_date(m["valid_until"])
+        overdue_days = (today - valid_until).days if valid_until else "?"
+        id_link = f'<a href="tg://user?id={m["user_id"]}">ID {m["user_id"]}</a>'
+        line = f"• {html.escape(name)} ({id_link}) - просрочено {overdue_days} дн., цена {m['price'] or '-'}"
+        if m["promise_date"]:
+            line += f" (обещал оплатить {_fmt_date(_parse_date(m['promise_date']))} - дата уже прошла)"
+        names.append(name)
+        lines.append(line)
+    if not people:
+        return head + "✅ Таких людей сейчас нет.", InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="⬅️ Назад", callback_data="adm_sanctum_list")]
+        ]), 0
+    pages_idx = _chunk_pages(lines, 20, LIST_MAX_CHARS)
+    page = _page_clamp(len(pages_idx), page)
+    idx = pages_idx[page]
+    text = head + f"Всего: {len(people)}\n\n" + "\n".join(lines[i] for i in idx)
+    rows = [
+        [InlineKeyboardButton(
+            text=f"🚫 Убрать {names[i]}"[:60], callback_data=f"adm_sanctum_kick_{people[i]['user_id']}"
+        )]
+        for i in idx
+    ]
+    rows.extend(_pager_row("sa", page, len(pages_idx)))
+    rows.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="adm_sanctum_list")])
+    return text, InlineKeyboardMarkup(inline_keyboard=rows), page
+
+
+# -- намерения участников --
+
+def _build_intentions_view(page: int, flt: str = "a"):
+    rows_data = db.get_all_intentions_for_admin()
+    if not rows_data:
+        return (
+            "<b>🕯 Намерения участников</b>\n\nПока никто не написал намерение.",
+            InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Назад", callback_data="adm_back")]]),
+            0,
+        )
+    items = [r for r in rows_data if not r["intention_reviewed"]] if flt == "u" else rows_data
+    head = (
+        "<b>🕯 Намерения участников</b>\n\n"
+        "Напоминание приходит всем 8 и 22 числа. Отметьте «Разбор дан», когда лично разберёте намерение "
+        "человека - кнопка «написать лично» перестанет приходить ему в напоминаниях (само напоминание "
+        "останется). Если человек потом изменит текст намерения - отметка снимется сама."
+    )
+    head += f"\n\nВсего: {len(rows_data)}, ещё без разбора: {sum(1 for r in rows_data if not r['intention_reviewed'])}."
+    if flt == "u":
+        head += " Показаны только те, у кого разбор не дан."
+    names, blocks = [], []
+    for r in items:
+        name = f"@{r['username']}" if r["username"] else (r["preferred_name"] or r["first_name"] or str(r["user_id"]))
+        icon = "✅" if r["intention_reviewed"] else "◻️"
+        body = r["intention_text"]
+        if len(body) > 2500:
+            body = body[:2500] + "..."
+        names.append(name)
+        blocks.append(f"\n{icon} <b>{html.escape(name)}</b>:\n«{html.escape(body)}»")
+    other = "a" if flt == "u" else "u"
+    filter_label = "👁 Показать все" if flt == "u" else "👁 Только без отметки разбора"
+    filter_row = [InlineKeyboardButton(text=filter_label, callback_data=f"adm_pg_il_0_{other}")]
+    back_row = [InlineKeyboardButton(text="⬅️ Назад", callback_data="adm_back")]
+    if not items:
+        return head + "\n\n✅ Все намерения уже разобраны.", InlineKeyboardMarkup(inline_keyboard=[filter_row, back_row]), 0
+    pages_idx = _chunk_pages(blocks, 5, LIST_MAX_CHARS)
+    page = _page_clamp(len(pages_idx), page)
+    idx = pages_idx[page]
+    text = head + "\n" + "".join(blocks[i] for i in idx)
+    rows = []
+    for i in idx:
+        r = items[i]
+        toggle_label = "◻️ Снять отметку" if r["intention_reviewed"] else "✅ Разбор дан"
+        rows.append([InlineKeyboardButton(
+            text=f"{toggle_label} - {names[i]}"[:60], callback_data=f"adm_intent_toggle_{r['user_id']}_{page}_{flt}"
+        )])
+    rows.extend(_pager_row("il", page, len(pages_idx), flt))
+    rows.append(filter_row)
+    rows.append(back_row)
+    return text, InlineKeyboardMarkup(inline_keyboard=rows), page
+
+
+# -- вопросы от людей для FAQ --
+
+def _build_faq_sugg_view(page: int):
+    rows_data = db.get_pending_faq_suggestions()
+    if not rows_data:
+        return (
+            "<b>💡 Вопросы от людей для FAQ</b>\n\nПока никто ничего не предложил.",
+            InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Назад", callback_data="adm_back")]]),
+            0,
+        )
+    head = (
+        "<b>💡 Вопросы от людей для FAQ</b>\n\n"
+        "Перенесите нужное в текст «Частые вопросы» (✏️ Текст «Частые вопросы») вручную, "
+        "затем отметьте здесь «Учтено», чтобы вопрос ушёл из списка."
+    )
+    names, blocks = [], []
+    for r in rows_data:
+        name = f"@{r['username']}" if r["username"] else (r["preferred_name"] or r["first_name"] or str(r["user_id"]))
+        date_part = (r["created_at"] or "").split(" ")[0]
+        body = r["question_text"]
+        if len(body) > 1500:
+            body = body[:1500] + "..."
+        names.append(name)
+        blocks.append(f"\n<b>{html.escape(name)}</b> ({date_part}):\n«{html.escape(body)}»")
+    pages_idx = _chunk_pages(blocks, 5, LIST_MAX_CHARS)
+    page = _page_clamp(len(pages_idx), page)
+    idx = pages_idx[page]
+    text = head + f"\n\nВсего: {len(rows_data)}\n" + "".join(blocks[i] for i in idx)
+    rows = [
+        [InlineKeyboardButton(text=f"✅ Учтено - {names[i]}"[:60], callback_data=f"adm_faq_sugg_done_{rows_data[i]['id']}")]
+        for i in idx
+    ]
+    rows.extend(_pager_row("fs", page, len(pages_idx)))
+    rows.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="adm_back")])
+    return text, InlineKeyboardMarkup(inline_keyboard=rows), page
+
+
+# -- выдача доступа: «Другой подписчик бота» --
+
+def _build_grant_others_view(page: int):
+    in_sanctum = {m["user_id"] for m in db.get_all_sanctum_memberships()}
+    others = [u for u in db.get_all_users_full() if u["user_id"] not in in_sanctum]
+    if not others:
+        return "", None, 0
+    pages = max(1, -(-len(others) // 20))
+    page = _page_clamp(pages, page)
+    chunk = others[page * 20:(page + 1) * 20]
+    rows = [
+        [InlineKeyboardButton(text=f"{_user_display_name(u)} - ID {u['user_id']}"[:64],
+                              callback_data=f"adm_grant_pick_{u['user_id']}")]
+        for u in chunk
+    ]
+    rows.extend(_pager_row("go", page, pages))
+    text = (
+        f"Подписчики бота, которых ещё нет в Sanctum ({len(others)}). Нажмите на нужного или просто напишите "
+        "здесь имя, @ник или ID человека:"
+    )
+    return text, InlineKeyboardMarkup(inline_keyboard=rows), page
+
+
+# -- вебинары: список в админке и «Прошедшие» у людей --
+
+WEBINARS_PER_PAGE = 20
+
+
+def _build_webinars_admin_view(page: int):
+    webinars = db.get_all_webinars()
+    pages = max(1, -(-len(webinars) // WEBINARS_PER_PAGE))
+    page = _page_clamp(pages, page)
+    rows = []
+    for w in webinars[page * WEBINARS_PER_PAGE:(page + 1) * WEBINARS_PER_PAGE]:
+        status = "🟢" if w["is_active"] else "🔴"
+        rows.append([InlineKeyboardButton(
+            text=f"{status} {_strip_html_tags(w['title'])}"[:64], callback_data=f"adm_wb_edit_{w['id']}"
+        )])
+    rows.extend(_pager_row("wl", page, pages))
+    rows.append([InlineKeyboardButton(text="➕ Добавить вебинар", callback_data="adm_wb_add")])
+    rows.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="adm_back")])
+    return "Вебинары:", InlineKeyboardMarkup(inline_keyboard=rows), page
+
+
+def _build_past_webinars_view(past, page: int):
+    pages = max(1, -(-len(past) // WEBINARS_PER_PAGE))
+    page = _page_clamp(pages, page)
+    rows = [
+        [InlineKeyboardButton(text=_strip_html_tags(w["title"])[:64], callback_data=f"wb_past_view_{w['id']}")]
+        for w in past[page * WEBINARS_PER_PAGE:(page + 1) * WEBINARS_PER_PAGE]
+    ]
+    if pages > 1:
+        nav = []
+        if page > 0:
+            nav.append(InlineKeyboardButton(text="⬅️", callback_data=f"wb_pl_{page - 1}"))
+        nav.append(InlineKeyboardButton(text=f"стр. {page + 1} из {pages}", callback_data="noop"))
+        if page < pages - 1:
+            nav.append(InlineKeyboardButton(text="➡️", callback_data=f"wb_pl_{page + 1}"))
+        rows.append(nav)
+    return db.get_setting("webinars_past_header_text"), InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+# -- общий переключатель страниц --
+
+_PAGE_PERMISSIONS = {
+    "ul": "adm_users_list", "sl": "adm_sanctum_list", "sa": "adm_sanctum_list", "il": "adm_intentions_list",
+    "fs": "adm_faq_suggestions", "go": "adm_grant_access", "wl": "adm_webinars",
+}
+
+
+@router.callback_query(F.data.startswith("adm_pg_"))
+async def adm_page_nav(callback: CallbackQuery):
+    parts = callback.data[len("adm_pg_"):].split("_")
+    try:
+        kind, page = parts[0], int(parts[1])
+    except (IndexError, ValueError):
+        await callback.answer()
+        return
+    extra = parts[2] if len(parts) > 2 else ""
+    perm = _PAGE_PERMISSIONS.get(kind)
+    if not perm:
+        await callback.answer()
+        return
+    if not await _require_permission(callback, perm):
+        return
+    if kind == "ul":
+        text, kb, page = _build_users_view(page)
+    elif kind == "sl":
+        text, kb, page = _build_sanctum_view(page)
+    elif kind == "sa":
+        text, kb, page = _build_attention_view(page)
+    elif kind == "il":
+        text, kb, page = _build_intentions_view(page, extra if extra in ("a", "u") else "a")
+    elif kind == "fs":
+        text, kb, page = _build_faq_sugg_view(page)
+    elif kind == "go":
+        text, kb, page = _build_grant_others_view(page)
+        if kb is None:
+            await callback.answer("Все подписчики бота уже есть в списке Sanctum", show_alert=True)
+            return
+    else:
+        text, kb, page = _build_webinars_admin_view(page)
+    _remember_page(callback.from_user.id, kind, page)
+    await _edit_keep(callback, text, kb)
+    await callback.answer()
+
+
+# -- поиск человека --
+
+_FIND_PERMISSIONS = {"ul": "adm_users_list", "sl": "adm_sanctum_list"}
+
+
+@router.callback_query(F.data.startswith("adm_fd_"))
+async def adm_find_start(callback: CallbackQuery, state: FSMContext):
+    kind = callback.data[len("adm_fd_"):]
+    perm = _FIND_PERMISSIONS.get(kind)
+    if not perm:
+        await callback.answer()
+        return
+    if not await _require_permission(callback, perm):
+        return
+    await state.set_state(SearchStates.waiting_query)
+    await state.update_data(kind=kind)
+    await callback.message.answer("Напишите имя, @ник или ID человека (или /cancel для отмены):")
+    await callback.answer()
+
+
+@router.message(SearchStates.waiting_query)
+async def adm_find_result(message: Message, state: FSMContext):
+    text = await _require_text(message)
+    if text is None:
+        return
+    kind = (await state.get_data()).get("kind")
+    perm = _FIND_PERMISSIONS.get(kind)
+    await state.clear()
+    if not perm or not db.has_permission(message.from_user.id, perm):
+        await message.answer("У Вас нет доступа к этому разделу")
+        return
+    query = text.strip()
+    if kind == "ul":
+        out, kb, _ = _build_users_view(0, query)
+    else:
+        out, kb, _ = _build_sanctum_view(0, query)
+    await message.answer(out, reply_markup=kb)
+
+
+# ---------- админ-панель: длинные тексты (Правила, FAQ, Философия, Как пользоваться) ----------
+
+LONG_TEXTS = {
+    "about": {
+        "setting": "about_text", "target": "about", "perm": "adm_about", "title": "Философия Alena Veda",
+        "where": f"показывается по кнопке «{BTN_ABOUT}»",
+    },
+    "faq": {
+        "setting": "faq_text", "target": "faq", "perm": "adm_faq", "title": "Частые вопросы",
+        "where": f"показывается по кнопке «{BTN_INFO}» → «❓ Частые вопросы»",
+    },
+    "rules": {
+        "setting": "rules_text", "target": "rules", "perm": "adm_rules", "title": "Правила пространства",
+        "where": f"показываются по кнопке «{BTN_INFO}» → «📜 Правила пространства»",
+    },
+    "guide": {
+        "setting": "bot_guide_text", "target": "bot_guide", "perm": "adm_bot_guide", "title": "Как пользоваться ботом",
+        "where": f"показывается по кнопке «{BTN_INFO}» → «🧭 Как пользоваться»",
+    },
+}
+
+
+async def _open_long_text_editor(callback: CallbackQuery, state: FSMContext, key: str):
+    cfg = LONG_TEXTS[key]
+    await state.clear()
+    current = db.get_setting(cfg["setting"]) or ""
+    await _answer_long(callback.message, f"Текущий текст «{cfg['title']}»:\n\n{current}")
+    await callback.message.answer(
+        f"Сейчас в тексте «{cfg['title']}» {_visible_len(current)} символов. Он {cfg['where']}. "
+        "Если текст не помещается в одно сообщение, бот сам покажет его людям несколькими сообщениями подряд.\n\n"
+        "Что сделать?",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="➕ Добавить в конец", callback_data=f"adm_lt_a_{key}")],
+            [InlineKeyboardButton(text="✏️ Заменить весь текст", callback_data=f"adm_lt_r_{key}")],
+            [InlineKeyboardButton(text="⬅️ Назад", callback_data="adm_back")],
+        ]),
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("adm_lt_"))
+async def adm_long_text_action(callback: CallbackQuery, state: FSMContext):
+    mode, _, key = callback.data[len("adm_lt_"):].partition("_")
+    cfg = LONG_TEXTS.get(key)
+    if not cfg or mode not in ("a", "r"):
+        await callback.answer()
+        return
+    if not await _require_permission(callback, cfg["perm"]):
+        return
+    if mode == "r":
+        await state.set_state(EditFieldStates.waiting_value)
+        await state.update_data(target=cfg["target"], field=cfg["setting"])
+        await callback.message.answer(
+            f"Пришлите новый текст «{cfg['title']}» целиком - он полностью заменит прежний. "
+            "Жирный шрифт, курсив и ссылки сохранятся, если выделите их прямо в Telegram.\n\n(или /cancel)"
+        )
+    else:
+        await state.set_state(AppendTextStates.waiting_text)
+        await state.update_data(key=key)
+        await callback.message.answer(
+            f"Пришлите то, что нужно ДОБАВИТЬ в конец текста «{cfg['title']}» (например, новый вопрос с ответом). "
+            "Оно встанет после текущего текста через пустую строку, а прежний текст не изменится. "
+            "Жирный шрифт, курсив и ссылки сохранятся.\n\n(или /cancel)"
+        )
+    await callback.answer()
+
+
+@router.message(AppendTextStates.waiting_text)
+async def adm_long_text_append(message: Message, state: FSMContext):
+    if not message.text:
+        await message.answer("Пришлите, пожалуйста, обычным текстом 🙏")
+        return
+    cfg = LONG_TEXTS.get((await state.get_data()).get("key"))
+    await state.clear()
+    if not cfg or not db.has_permission(message.from_user.id, cfg["perm"]):
+        await message.answer("У Вас нет доступа к этому разделу")
+        return
+    addition = (message.html_text or "").strip()
+    current = db.get_setting(cfg["setting"]) or ""
+    new_value = f"{current.rstrip()}\n\n{addition}" if current.strip() else addition
+    db.set_setting(cfg["setting"], new_value)
+    await message.answer(
+        f"Добавлено ✅ Теперь в тексте «{cfg['title']}» {_visible_len(new_value)} символов.",
+        parse_mode=None,
+    )
+
+
+# ---------- рассылка: подсказка о длине ----------
+
+def _broadcast_length_note(kind: str, text: str):
+    n = _visible_len(text)
+    if kind in ("photo", "video", "album") and n > CAPTION_LIMIT:
+        return (
+            f"ℹ️ Подпись длиннее {CAPTION_LIMIT} символов ({n}): это лимит Telegram. Фото или видео уйдёт сначала, "
+            "а полный текст следом отдельным сообщением."
+        )
+    if kind == "text" and n > 3800:
+        return f"ℹ️ Текст длинный ({n} символов): бот разошлёт его несколькими сообщениями подряд."
+    return None
 
 
 async def main():
