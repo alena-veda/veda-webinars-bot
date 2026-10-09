@@ -105,30 +105,37 @@ TEXT_DEFAULTS = {
         "Хорошо, календарь 1-го числа больше не пришлю. Открыть его всегда можно в «Инфо» и в профиле."
     ),
     "ritual_optout_off_text": "Календарь снова будет приходить 1-го числа каждого месяца ✅",
+    "ritual_mantra_amavasya": "",
+    "ritual_mantra_purnima": "",
+    "ritual_mantra_ekadashi": "",
+    "ritual_mantra_shivaratri": "",
+    "ritual_mantra_navaratri": "",
+    "ritual_mantra_equinox": "",
+    "ritual_mantra_solstice": "",
 }
 
 TEXT_LABELS = {
     "ritual_teaser_text": "текст для тех, кто НЕ в Sanctum - вместо самого календаря. Приходит в двух случаях: сам открыл «Инфо» → «Календарь ритуалов», или одноразовое автонапоминание, если видел кнопку календаря, но ни разу не нажал. Кнопки под ним: «⚜️ Что такое VEDA SANCTUM» и «Оформить подписку»",
     "ritual_monthly_intro": "начало ежемесячного сообщения - приходит САМО 1-го числа каждого месяца в 11:11 всем участникам (метки {имя}, {месяц}). Кнопки под всем сообщением (общие с «концом» ниже): «📖 О практиках месяца», «🔔/🔕 Напоминать в день», «🔔/🔕 Присылать календарь»",
-    "ritual_monthly_footer": "конец того же ежемесячного сообщения, сразу после списка дат - кнопки те же, что у начала выше (это один общий текст)",
+    "ritual_monthly_footer": "конец того же ежемесячного сообщения, сразу после списка дат - кнопки те же, что у начала выше. Само сообщение: начало, список дат с личной фразой каждого праздника и этот конец (практик в нём нет, они приходят утром в день события и по кнопке «📖 О практиках месяца»)",
     "ritual_day_text": "начало напоминания В ДЕНЬ события - отдельная, более короткая рассылка, приходит только тем, кто включил 🔔 (метка {имя}). Кнопка под ним: «🌙 Календарь ритуалов»",
     "ritual_announce_text": "разовый анонс календаря участникам - отдельный, одноразовый текст, не часть ежемесячной цепочки выше (метка {имя}). Кнопка под ним: «🌙 Открыть календарь ритуалов»",
     "ritual_paid_line": "строка в сообщении «оплата подтверждена» для новых участников - добавляется только при первой оплате Sanctum; вместе с ней появляется кнопка «🌙 Календарь ритуалов» (которой иначе в этом сообщении не было бы)",
     "ritual_sanctum_line": "строка про календарь в экране «Войти в глубину»",
-    "ritual_meaning_amavasya": "смысл Амавасьи (на все даты сразу)",
-    "ritual_meaning_purnima": "смысл Пурнимы (на все даты сразу)",
-    "ritual_meaning_ekadashi": "общий смысл Экадаши (на все даты сразу)",
-    "ritual_meaning_shivaratri": "смысл Маха-Шиваратри (на все даты сразу)",
-    "ritual_meaning_navaratri": "общий смысл Навратри (на все даты сразу)",
-    "ritual_meaning_equinox": "смысл равноденствия (на все даты сразу)",
-    "ritual_meaning_solstice": "смысл солнцестояния (на все даты сразу)",
-    "ritual_practice_amavasya": "практика на Амавасью (на все даты сразу)",
-    "ritual_practice_purnima": "практика на Пурниму (на все даты сразу)",
-    "ritual_practice_ekadashi": "практика на Экадаши (на все даты сразу)",
-    "ritual_practice_shivaratri": "практика на Маха-Шиваратри (на все даты сразу)",
-    "ritual_practice_navaratri": "практика на Навратри (на все даты сразу)",
-    "ritual_practice_equinox": "практика на равноденствие (на все даты сразу)",
-    "ritual_practice_solstice": "практика на солнцестояние (на все даты сразу)",
+    "ritual_meaning_amavasya": "смысл Амавасьи (на все даты сразу). Показывается под личной фразой дня; «-» очищает",
+    "ritual_meaning_purnima": "смысл Пурнимы (на все даты сразу). Показывается под личной фразой дня; «-» очищает",
+    "ritual_meaning_ekadashi": "общий смысл Экадаши (на все даты сразу). Показывается под личной фразой дня; «-» очищает",
+    "ritual_meaning_shivaratri": "смысл Маха-Шиваратри (на все даты сразу). Показывается под личной фразой дня; «-» очищает",
+    "ritual_meaning_navaratri": "общий смысл Навратри (на все даты сразу). Показывается под личной фразой дня; «-» очищает",
+    "ritual_meaning_equinox": "смысл равноденствия (на все даты сразу). Показывается под личной фразой дня; «-» очищает",
+    "ritual_meaning_solstice": "смысл солнцестояния (на все даты сразу). Показывается под личной фразой дня; «-» очищает",
+    "ritual_practice_amavasya": "практика на Амавасью (на все даты сразу). Если у даты своей практики нет, показывается эта; «-» очищает",
+    "ritual_practice_purnima": "практика на Пурниму (на все даты сразу). Если у даты своей практики нет, показывается эта; «-» очищает",
+    "ritual_practice_ekadashi": "практика на Экадаши (на все даты сразу). Если у даты своей практики нет, показывается эта; «-» очищает",
+    "ritual_practice_shivaratri": "практика на Маха-Шиваратри (на все даты сразу). Если у даты своей практики нет, показывается эта; «-» очищает",
+    "ritual_practice_navaratri": "практика на Навратри (на все даты сразу). Если у даты своей практики нет, показывается эта; «-» очищает",
+    "ritual_practice_equinox": "практика на равноденствие (на все даты сразу). Если у даты своей практики нет, показывается эта; «-» очищает",
+    "ritual_practice_solstice": "практика на солнцестояние (на все даты сразу). Если у даты своей практики нет, показывается эта; «-» очищает",
     "ritual_calendar_header_text": "заголовок экрана календаря на 2 месяца вперёд - под этим экраном (вместе с «месяц пуст» и «часовой пояс» ниже) кнопки: «📖 О практиках месяца», «🔔/🔕 Напоминать в день», «🔔/🔕 Присылать календарь»",
     "ritual_month_empty_text": "если в одном из двух месяцев пока нет дат",
     "ritual_kyiv_time_text": "подпись под двухмесячным календарём про часовой пояс",
@@ -138,6 +145,13 @@ TEXT_LABELS = {
     "ritual_reminder_off_text": "подсказка при выключении напоминания на день события",
     "ritual_optout_on_text": "подсказка при отключении ежемесячной рассылки календаря",
     "ritual_optout_off_text": "подсказка при включении ежемесячной рассылки календаря обратно",
+    "ritual_mantra_amavasya": "ссылка на мантру для Амавасьи (на все даты сразу). Ссылка с https://, например с YouTube; «-» убирает",
+    "ritual_mantra_purnima": "ссылка на мантру для Пурнимы (на все даты сразу). Ссылка с https://, например с YouTube; «-» убирает",
+    "ritual_mantra_ekadashi": "ссылка на мантру для Экадаши (на все даты сразу). Ссылка с https://, например с YouTube; «-» убирает",
+    "ritual_mantra_shivaratri": "ссылка на мантру для Маха-Шиваратри (на все даты сразу). Ссылка с https://, например с YouTube; «-» убирает",
+    "ritual_mantra_navaratri": "ссылка на мантру для Навратри (на все даты сразу). Ссылка с https://, например с YouTube; «-» убирает",
+    "ritual_mantra_equinox": "ссылка на мантру для равноденствия (на все даты сразу). Ссылка с https://, например с YouTube; «-» убирает",
+    "ritual_mantra_solstice": "ссылка на мантру для солнцестояния (на все даты сразу). Ссылка с https://, например с YouTube; «-» убирает",
 }
 
 # одноразовое напоминание тем, кто увидел кнопку календаря (например, на
@@ -295,6 +309,10 @@ def init_rituals():
             practice TEXT DEFAULT ''
         )
     """)
+    try:
+        c.execute("ALTER TABLE ritual_events ADD COLUMN mantra TEXT DEFAULT ''")
+    except Exception:
+        pass
     for col in ("ritual_optout INTEGER DEFAULT 0", "ritual_reminders INTEGER DEFAULT 0",
                 "ritual_last_month TEXT", "ritual_last_day TEXT",
                 # для одноразового напоминания тем, кто увидел кнопку календаря
@@ -370,7 +388,7 @@ def add_event(event_date, kind, title, detail="", meaning="", practice=""):
     return new_id
 
 
-EVENT_FIELDS = {"event_date", "title", "detail", "meaning", "practice"}
+EVENT_FIELDS = {"event_date", "title", "detail", "meaning", "practice", "mantra"}
 
 
 def update_event(event_id, field, value):
@@ -380,6 +398,35 @@ def update_event(event_id, field, value):
     conn.execute(f"UPDATE ritual_events SET {field} = ? WHERE id = ?", (value, event_id))
     conn.commit()
     conn.close()
+
+
+def same_title_dates(event_id):
+    """Даты ДРУГИХ праздников с точно таким же названием (например, «Экадаши Индира» в разные годы)."""
+    e = get_event(event_id)
+    if not e:
+        return []
+    conn = db.get_conn()
+    rows = conn.execute(
+        "SELECT event_date FROM ritual_events WHERE title = ? AND id != ? ORDER BY event_date", (e["title"], event_id)
+    ).fetchall()
+    conn.close()
+    return [r["event_date"] for r in rows]
+
+
+def copy_to_same_title(event_id):
+    """Переносит личную фразу, практику и мантру этой даты на все другие даты с тем же названием."""
+    e = get_event(event_id)
+    if not e:
+        return 0
+    conn = db.get_conn()
+    cur = conn.execute(
+        "UPDATE ritual_events SET meaning = ?, practice = ?, mantra = ? WHERE title = ? AND id != ?",
+        (e["meaning"] or "", e["practice"] or "", e["mantra"] or "", e["title"], event_id),
+    )
+    conn.commit()
+    n = cur.rowcount
+    conn.close()
+    return n
 
 
 def delete_event(event_id):
@@ -488,8 +535,26 @@ def month_title(ym):
     return f"{RU_MONTHS_LOWER[int(m) - 1]} {y}"
 
 
+def personal_phrase(ev):
+    """Личная фраза дня без служебного знака «!»."""
+    raw = (ev["meaning"] or "").strip()
+    return raw[1:].lstrip() if raw.startswith("!") else raw
+
+
 def meaning_of(ev):
-    return ev["meaning"] or db.get_setting(f"ritual_meaning_{ev['kind']}") or ""
+    """Смысл дня: сверху личная фраза именно этой даты, под ней общий текст типа события.
+    Если личная фраза начинается с «!», показывается только она (без общего текста)."""
+    raw = (ev["meaning"] or "").strip()
+    exclusive = raw.startswith("!")
+    personal = personal_phrase(ev)
+    general = "" if exclusive else (db.get_setting(f"ritual_meaning_{ev['kind']}") or "").strip()
+    return "\n\n".join(p for p in (personal, general) if p)
+
+
+def mantra_of(ev):
+    """Ссылка на мантру: своя у даты, а если её нет, общая для типа события."""
+    own = (ev["mantra"] or "").strip() if "mantra" in ev.keys() else ""
+    return own or (db.get_setting(f"ritual_mantra_{ev['kind']}") or "").strip()
 
 
 def practice_of(ev):
@@ -500,32 +565,48 @@ def practice_of(ev):
 
 
 def month_text(ym, name=None):
-    """Ежемесячное сообщение: вступление, список дат, практики (если есть), подпись.
-    None, если на месяц нет ни одной даты."""
+    """Ежемесячное сообщение: вступление, список дат с личной фразой каждого
+    праздника, подпись. Практики в него не входят: они приходят утром в день
+    события и по кнопке «О практиках месяца». None, если на месяц нет дат."""
     evs = events_of_month(ym)
     if not evs:
         return None
     intro = (db.get_setting("ritual_monthly_intro") or "").replace("{месяц}", month_title(ym))
     intro = intro.replace("{имя}", name or "друг")
-    parts = [intro, "\n".join(fmt_line(e) for e in evs)]
-    practices = [(e, practice_of(e)) for e in evs]
-    practices = [(e, p) for e, p in practices if p]
-    if practices:
-        parts.append("\n\n".join(f"<b>{e['title']}</b>\n{p}" for e, p in practices))
+    blocks = []
+    for e in evs:
+        line = fmt_line(e)
+        phrase = personal_phrase(e)
+        blocks.append(f"{line}\n{phrase}" if phrase else line)
+    parts = [intro, "\n\n".join(blocks)]
     footer = db.get_setting("ritual_monthly_footer")
     if footer:
         parts.append(footer)
     return "\n\n".join(parts)
 
 
-def about_text(ym):
-    """Смысл каждого дня месяца - по кнопке «О практиках месяца»."""
-    evs = events_of_month(ym)
-    if not evs:
-        return None
+def about_blocks(ym):
+    """По одному блоку на каждый праздник месяца: название и дата, смысл (личная
+    фраза и общий текст), практика. Для кнопки «О практиках месяца»."""
     blocks = []
-    for e in evs:
+    for e in events_of_month(ym):
         d = datetime.strptime(e["event_date"], "%Y-%m-%d").strftime("%d.%m")
         emoji = KINDS.get(e["kind"], ("•", ""))[0]
-        blocks.append(f"{emoji} <b>{d} - {e['title']}</b>\n{meaning_of(e)}")
-    return "\n\n".join(blocks)
+        title = e["title"] + (f" ({e['detail']})" if e["detail"] else "")
+        text = f"{emoji} <b>{d} - {title}</b>"
+        meaning = meaning_of(e)
+        if meaning:
+            text += f"\n\n{meaning}"
+        practice = practice_of(e)
+        if practice:
+            text += f"\n\n{practice}"
+        blocks.append({"text": text, "mantra": mantra_of(e)})
+    return blocks
+
+
+def about_text(ym):
+    """Все блоки «О практиках месяца» одним текстом (для проверок)."""
+    blocks = about_blocks(ym)
+    if not blocks:
+        return None
+    return "\n\n".join(b["text"] for b in blocks)

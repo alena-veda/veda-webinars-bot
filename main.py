@@ -5334,7 +5334,8 @@ async def edit_field_value(message: Message, state: FSMContext):
     # перечислить в HTML_TRUSTED_FIELDS заранее — доверяем ему всегда,
     # раз исходный текст поста тоже сохранялся с HTML-разметкой при рассылке
     html_trusted = (
-        (target, field) in HTML_TRUSTED_FIELDS or target == "feed_post" or target == "ritual_text"
+        (target, field) in HTML_TRUSTED_FIELDS or target == "feed_post"
+        or (target == "ritual_text" and not str(field).startswith("ritual_mantra_"))
         or (target == "ritual_event" and field in ("meaning", "practice"))
         or target in (
             "sanctum_screen_text", "payment_flow_text", "webinar_screen_text",
@@ -6914,6 +6915,33 @@ async def _send_album_with_text(bot, chat_id: int, file_ids: list, text: str, pr
         await _send_long(bot, chat_id, text, protect_content=protect_content)
 
 
+MANTRA_LABEL = "🎧 Слушать мантру"
+
+
+def _clean_url(raw):
+    """Ссылка для кнопки: только https://, без пробелов, не длиннее 500 символов; иначе None."""
+    raw = (raw or "").strip()
+    if re.fullmatch(r"https://\S{3,}", raw) and len(raw) <= 500:
+        return raw
+    return None
+
+
+def _ritual_mantra_kb(evs, with_calendar=False):
+    """Кнопки «🎧 Слушать мантру» для праздников дня (одинаковые ссылки не повторяем)."""
+    rows, seen = [], set()
+    pairs = [(e, _clean_url(rituals.mantra_of(e))) for e in evs]
+    pairs = [(e, u) for e, u in pairs if u]
+    for e, url in pairs:
+        if url in seen:
+            continue
+        seen.add(url)
+        label = MANTRA_LABEL if len(pairs) == 1 else f"🎧 Мантра: {_plain_text(e['title'])}"[:60]
+        rows.append([InlineKeyboardButton(text=label, url=url)])
+    if with_calendar:
+        rows.append([_ritual_calendar_btn()])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
 def _ritual_two_months():
     today = _today()
     first = today.replace(day=1)
@@ -6957,11 +6985,15 @@ async def ritual_about(callback: CallbackQuery):
         await callback.answer(db.get_setting("ritual_members_only_text"), show_alert=True)
         return
     ym = callback.data[len("rit_about_"):]
-    text = rituals.about_text(ym)
-    if not text:
+    blocks = rituals.about_blocks(ym)
+    if not blocks:
         await callback.answer(db.get_setting("ritual_month_no_dates_text"), show_alert=True)
         return
-    await _send_long(callback.bot, callback.message.chat.id, text)
+    # каждый праздник отдельным сообщением; под ним кнопка мантры, если она задана
+    for b in blocks:
+        url = _clean_url(b["mantra"])
+        kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text=MANTRA_LABEL, url=url)]]) if url else None
+        await _send_long(callback.bot, callback.message.chat.id, b["text"], kb)
     await callback.answer()
 
 
@@ -7035,7 +7067,8 @@ async def send_ritual_monthly(bot: Bot):
 
 async def send_ritual_daily(bot: Bot):
     """Каждое утро: тем, кто включил «Напоминать в день», если сегодня в
-    календаре есть событие."""
+    календаре есть событие. В сообщении название, смысл (личная фраза и общий
+    текст), практика; под ним кнопки мантры (если заданы) и «Календарь ритуалов»."""
     logging.info("[планировщик] send_ritual_daily: старт")
     today_iso = _today().isoformat()
     evs = rituals.events_on(today_iso)
@@ -7045,12 +7078,15 @@ async def send_ritual_daily(bot: Bot):
     for e in evs:
         emoji = rituals.KINDS.get(e["kind"], ("•", ""))[0]
         title = e["title"] + (f" ({e['detail']})" if e["detail"] else "")
-        block = f"{emoji} <b>{title}</b>\n{rituals.meaning_of(e)}"
+        block = f"{emoji} <b>{title}</b>"
+        meaning = rituals.meaning_of(e)
+        if meaning:
+            block += f"\n{meaning}"
         practice = rituals.practice_of(e)
         if practice:
             block += f"\n\n{practice}"
         blocks.append(block)
-    kb = InlineKeyboardMarkup(inline_keyboard=[[_ritual_calendar_btn()]])
+    kb = _ritual_mantra_kb(evs, with_calendar=True)
     sent = 0
     for u in rituals.active_members():
         if not u["ritual_reminders"] or u["ritual_last_day"] == today_iso:
@@ -7179,35 +7215,97 @@ async def adm_rit_month(callback: CallbackQuery):
     await callback.answer()
 
 
+def _ritual_preview(text, n=130) -> str:
+    plain = _plain_text(text or "").strip().replace("\n", " ")
+    if not plain:
+        return "(нет)"
+    return html.escape(plain[:n] + ("…" if len(plain) > n else ""))
+
+
 def _ritual_event_screen(event_id: int):
     e = rituals.get_event(event_id)
     if not e:
         return "Такой даты уже нет.", InlineKeyboardMarkup(inline_keyboard=[RITUAL_ADMIN_BACK])
     d = datetime.strptime(e["event_date"], "%Y-%m-%d").strftime("%d.%m.%Y")
     kind_name = rituals.KINDS.get(e["kind"], ("", e["kind"]))[1]
+    own_meaning = (e["meaning"] or "").strip()
+    exclusive = own_meaning.startswith("!")
+    general_meaning = (db.get_setting(f"ritual_meaning_{e['kind']}") or "").strip()
     own_practice = (e["practice"] or "").strip()
     general_practice = (db.get_setting(f"ritual_practice_{e['kind']}") or "").strip()
+    own_mantra = (e["mantra"] or "").strip()
+    general_mantra = (db.get_setting(f"ritual_mantra_{e['kind']}") or "").strip()
+    meaning_note = " (только она: стоит «!»)" if exclusive else ""
+    general_note = " - не показывается, у даты стоит «!»" if exclusive else ""
+    practice_src = "своя у даты" if own_practice else ("общая для типа" if general_practice else "нигде не задана")
+    mantra_src = "своя у даты" if own_mantra else ("общая для типа" if general_mantra else "нигде не задана")
     text = (
         f"{rituals.KINDS.get(e['kind'], ('•', ''))[0]} <b>{e['title']}</b>\n"
         f"Тип: {kind_name}\nДата: {d}\n"
         f"Уточнение: {e['detail'] or '(нет)'}\n\n"
-        f"<b>Смысл:</b> {rituals.meaning_of(e) or '(нет)'}"
-        f"{'' if e['meaning'] else ' (общий для типа)'}\n\n"
-        f"<b>Практика для этой даты:</b> {own_practice or '(не задана - используется общая для типа, если есть)'}\n"
-        f"<b>Общая практика для «{kind_name}»:</b> {general_practice or '(не задана)'}\n"
-        f"<b>В сообщениях сейчас покажется:</b> {rituals.practice_of(e) or '(ничего - практика нигде не задана)'}"
+        f"<b>Личная фраза дня:</b> {_ritual_preview(personal_phrase_text(own_meaning))}{meaning_note}\n"
+        f"<b>Общий смысл для «{kind_name}»:</b> {_ritual_preview(general_meaning)}{general_note}\n\n"
+        f"<b>Практика для этой даты:</b> {_ritual_preview(own_practice) if own_practice else '(не задана - берётся общая для типа)'}\n"
+        f"<b>Общая практика для «{kind_name}»:</b> {_ritual_preview(general_practice)}\n\n"
+        f"<b>Мантра для этой даты:</b> {html.escape(own_mantra) if own_mantra else '(не задана)'}\n"
+        f"<b>Общая мантра для «{kind_name}»:</b> {html.escape(general_mantra) if general_mantra else '(не задана)'}\n\n"
+        f"<b>Людям покажется:</b> смысл - личная фраза{' и общий текст' if not exclusive and general_meaning else ''}; "
+        f"практика - {practice_src}; мантра - {mantra_src}."
     )
     ym = e["event_date"][:7]
-    kb = InlineKeyboardMarkup(inline_keyboard=[
+    rows = [
         [InlineKeyboardButton(text="✏️ Дату", callback_data=f"adm_rit_ef_{event_id}_event_date"),
          InlineKeyboardButton(text="✏️ Название", callback_data=f"adm_rit_ef_{event_id}_title")],
         [InlineKeyboardButton(text="✏️ Уточнение", callback_data=f"adm_rit_ef_{event_id}_detail"),
-         InlineKeyboardButton(text="✏️ Смысл", callback_data=f"adm_rit_ef_{event_id}_meaning")],
-        [InlineKeyboardButton(text="✍️ Практика", callback_data=f"adm_rit_ef_{event_id}_practice")],
-        [InlineKeyboardButton(text="🗑 Удалить дату", callback_data=f"adm_rit_del_{event_id}")],
-        [InlineKeyboardButton(text="⬅️ К месяцу", callback_data=f"adm_rit_m_{ym}")],
-    ])
-    return text, kb
+         InlineKeyboardButton(text="✏️ Личная фраза", callback_data=f"adm_rit_ef_{event_id}_meaning")],
+        [InlineKeyboardButton(text="✍️ Практика", callback_data=f"adm_rit_ef_{event_id}_practice"),
+         InlineKeyboardButton(text="🎧 Мантра (ссылка)", callback_data=f"adm_rit_ef_{event_id}_mantra")],
+    ]
+    if rituals.same_title_dates(event_id):
+        rows.append([InlineKeyboardButton(
+            text="📋 Скопировать на такие же названия", callback_data=f"adm_rit_cp_{event_id}"
+        )])
+    rows.append([InlineKeyboardButton(text="🗑 Удалить дату", callback_data=f"adm_rit_del_{event_id}")])
+    rows.append([InlineKeyboardButton(text="⬅️ К месяцу", callback_data=f"adm_rit_m_{ym}")])
+    return text, InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def personal_phrase_text(raw: str) -> str:
+    raw = (raw or "").strip()
+    return raw[1:].lstrip() if raw.startswith("!") else raw
+
+
+@router.callback_query(F.data.startswith("adm_rit_cp_"))
+async def adm_rit_copy_ask(callback: CallbackQuery):
+    if not await _require_permission(callback, "adm_rituals"):
+        return
+    event_id = int(callback.data[len("adm_rit_cp_"):])
+    e = rituals.get_event(event_id)
+    others = rituals.same_title_dates(event_id) if e else []
+    if not others:
+        await callback.answer("Других дат с таким названием нет", show_alert=True)
+        return
+    dates = ", ".join(datetime.strptime(x, "%Y-%m-%d").strftime("%d.%m.%Y") for x in others)
+    await callback.message.edit_text(
+        f"Скопировать личную фразу, практику и мантру этой даты на другие даты с названием "
+        f"«{_plain_text(e['title'])}»?\n\nДаты: {dates}\n\nИх прежние личная фраза, практика и мантра будут заменены.",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="✅ Да, скопировать", callback_data=f"adm_rit_cpy_{event_id}")],
+            [InlineKeyboardButton(text="Отмена", callback_data=f"adm_rit_e_{event_id}")],
+        ]),
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("adm_rit_cpy_"))
+async def adm_rit_copy_do(callback: CallbackQuery):
+    if not await _require_permission(callback, "adm_rituals"):
+        return
+    event_id = int(callback.data[len("adm_rit_cpy_"):])
+    n = rituals.copy_to_same_title(event_id)
+    text, kb = _ritual_event_screen(event_id)
+    await callback.message.edit_text(f"Готово ✅ Скопировано на дат: {n}.\n\n" + text, reply_markup=kb)
+    await callback.answer()
 
 
 @router.callback_query(F.data.startswith("adm_rit_e_"))
@@ -7224,9 +7322,13 @@ RITUAL_FIELD_PROMPTS = {
     "title": "Пришлите новое название (например, «Экадаши Рама»):",
     "detail": "Пришлите уточнение в скобках (например, «новолуние 09.11 в 09:02» или «у вайшнавов: 19.01»). "
               "Отправьте «-», чтобы убрать:",
-    "meaning": "Пришлите короткий смысл именно этого дня. Отправьте «-», чтобы вернуть общий смысл типа:",
+    "meaning": "Пришлите ЛИЧНУЮ ФРАЗУ именно этого дня: она покажется людям сверху, а под ней общий текст типа "
+               "(если он есть). Если для этой даты нужен ТОЛЬКО Ваш текст без общего, начните его со знака «!» "
+               "(сам знак людям не виден). Отправьте «-», чтобы убрать личную фразу:",
     "practice": "Пришлите практику именно для ЭТОЙ даты - она заменит собой общую практику для этого типа "
                 "события (если она есть). Отправьте «-», чтобы убрать и снова показывать общую:",
+    "mantra": "Пришлите ссылку на мантру именно для ЭТОЙ даты (например, с YouTube, ссылка начинается с https://). "
+              "У людей появится кнопка «🎧 Слушать мантру». Отправьте «-», чтобы убрать и снова брать общую мантру типа:",
 }
 
 
@@ -7314,6 +7416,36 @@ async def _ritual_edit_value(message: Message, state: FSMContext, data: dict, ta
     Возвращает True, если диалог продолжается (состояние сбрасывать нельзя)."""
     if target == "ritual_text":
         rituals_text_key = field
+        raw_value = value.strip()
+        if rituals_text_key.startswith("ritual_mantra_"):
+            if raw_value == "-":
+                db.set_setting(rituals_text_key, "")
+                await message.answer("Ссылка на мантру убрана ✅")
+                return False
+            url = _clean_url(raw_value)
+            if not url:
+                await message.answer(
+                    "Это не похоже на ссылку. Пришлите ссылку, которая начинается с https:// (например, с YouTube), "
+                    "или «-», чтобы убрать. (или /cancel)"
+                )
+                return True
+            db.set_setting(rituals_text_key, url)
+            await message.answer("Ссылка на мантру сохранена ✅")
+            return False
+        if raw_value == "-":
+            if rituals_text_key.startswith(("ritual_meaning_", "ritual_practice_")):
+                db.set_setting(rituals_text_key, "")
+                await message.answer(
+                    f"Текст «{rituals.TEXT_LABELS.get(field, field)}» очищен ✅ Теперь он людям не показывается.",
+                    parse_mode=None,
+                )
+                return False
+            await message.answer(
+                "Этот текст нельзя сделать пустым: иначе сообщение уйдёт людям без текста. "
+                "Пришлите новый текст или /cancel",
+                parse_mode=None,
+            )
+            return True
         db.set_setting(rituals_text_key, value)
         reply = f"Текст «{rituals.TEXT_LABELS.get(field, field)}» обновлён ✅"
         for ph in ("{имя}", "{месяц}"):
@@ -7340,6 +7472,18 @@ async def _ritual_edit_value(message: Message, state: FSMContext, data: dict, ta
             rituals.update_event(event_id, "title", html.escape(raw))
         elif field == "detail":
             rituals.update_event(event_id, "detail", "" if raw == "-" else html.escape(raw))
+        elif field == "mantra":
+            if raw == "-":
+                rituals.update_event(event_id, "mantra", "")
+            else:
+                url = _clean_url(raw)
+                if not url:
+                    await message.answer(
+                        "Это не похоже на ссылку. Пришлите ссылку, которая начинается с https:// "
+                        "(например, с YouTube), или «-», чтобы убрать:"
+                    )
+                    return True
+                rituals.update_event(event_id, "mantra", url)
         else:  # meaning / practice: доверенный HTML (жирный и т.п. сохраняется)
             rituals.update_event(event_id, field, "" if raw == "-" else value)
         text, kb = _ritual_event_screen(event_id)
@@ -7393,9 +7537,10 @@ async def adm_rit_text_edit(callback: CallbackQuery, state: FSMContext):
         return
     await state.set_state(EditFieldStates.waiting_value)
     await state.update_data(target="ritual_text", field=key)
-    await callback.message.answer(
+    await _answer_long(
+        callback.message,
         f"Сейчас:\n\n{db.get_setting(key)}\n\nПришлите новый текст: {rituals.TEXT_LABELS[key]}.\n"
-        "(или /cancel)"
+        "(или /cancel)",
     )
     await callback.answer()
 
