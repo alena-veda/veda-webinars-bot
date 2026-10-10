@@ -792,7 +792,7 @@ ADMIN_PERMISSION_SECTIONS = [
     ("💠 Общие тексты бота", [
         ("adm_welcome_text", "✏️ Текст приветствия (/start)"),
         ("adm_photo_welcome", "🖼 Фото приветствия (/start)"),
-        ("adm_intro_message", "🌟 Вводное сообщение новичку"),
+        ("adm_intro_message", "🌟 Вводное сообщение и напоминания новичку"),
         ("adm_about", "💠 Текст «Философия Alena Veda»"),
         ("adm_photo_about", "🖼 Фото «Философия Alena Veda»"),
         ("adm_faq", "❓ Текст «Частые вопросы»"),
@@ -1004,6 +1004,7 @@ async def _send_referral_welcome(message: Message, referrer):
 async def referral_continue_cb(callback: CallbackQuery, state: FSMContext):
     await state.set_state(NameStates.waiting_name)
     await callback.message.answer(_name_question_text())
+    db.mark_name_asked(callback.from_user.id)
     await callback.answer()
 
 
@@ -1053,6 +1054,7 @@ async def cmd_start(message: Message, state: FSMContext):
                     # вопрос об имени ниже, а не останется совсем без ответа
         await state.set_state(NameStates.waiting_name)
         await message.answer(_name_question_text())
+        db.mark_name_asked(message.from_user.id)
         return
     await _send_welcome(message)
 
@@ -1292,6 +1294,7 @@ async def wb_view(callback: CallbackQuery, state: FSMContext):
         await state.set_state(NameStates.waiting_name)
         await state.update_data(pending_webinar_id=webinar_id)
         await callback.message.answer(_name_question_text())
+        db.mark_name_asked(callback.from_user.id)
         await callback.answer()
         return
     ok = await _send_webinar_card(callback.message, webinar_id, callback.from_user.id)
@@ -4042,6 +4045,7 @@ HTML_TRUSTED_FIELDS = {
     ("about", "about_text"),
     ("intro_setting", "intro_msg_text"),
     ("intro_setting", "intro_nudge_text"),
+    ("intro_setting", "name_nudge_text"),
     ("faq", "faq_text"),
     ("faq_suggestion_invite", "faq_suggestion_invite_text"),
     ("faq_suggestion_confirm", "faq_suggestion_confirm_text"),
@@ -5603,7 +5607,7 @@ async def edit_field_value(message: Message, state: FSMContext):
         if await _ritual_edit_value(message, state, data, target, field, value):
             return
     elif target == "intro_setting":
-        if field in ("intro_msg_text", "intro_nudge_text"):
+        if field in ("intro_msg_text", "intro_nudge_text", "name_nudge_text"):
             if not value.strip():
                 await message.answer("Текст не может быть пустым. Пришлите текст ещё раз или /cancel")
                 return
@@ -5612,7 +5616,7 @@ async def edit_field_value(message: Message, state: FSMContext):
             if "{имя}" not in value and "(имя)" in value:
                 reply += "\n\n⚠️ Вместо {имя} (фигурные скобки) написано (имя) - оно не заменится."
             await message.answer(reply, parse_mode=None)
-        elif field == "intro_nudge_hours":
+        elif field in ("intro_nudge_hours", "name_nudge_hours"):
             try:
                 n = int(value.strip())
                 if n < 1 or n > 168:
@@ -5621,7 +5625,7 @@ async def edit_field_value(message: Message, state: FSMContext):
                 await message.answer("Нужно целое число часов от 1 до 168 (например, 24). Пришлите ещё раз или /cancel")
                 return
             db.set_setting(field, str(n))
-            await message.answer(f"Готово ✅ Напоминание уйдёт через {n} ч. после вводного сообщения (днём, с 9 до 21 по Киеву).")
+            await message.answer(f"Готово ✅ Напоминание уйдёт через {n} ч. (днём, с 9 до 21 по Киеву).")
         elif field == "intro_msg_button":
             label = value.strip()
             if not label or len(label) > 60:
@@ -8307,14 +8311,53 @@ INTRO_NUDGE_FROM_HOUR = 9
 INTRO_NUDGE_TO_HOUR = 21
 
 
-async def check_intro_nudges(bot: Bot):
-    """Одно мягкое напоминание тому, кто получил вводное сообщение, не нажал кнопку и после
-    этого ничего не делал в боте. Идёт днём (с 9 до 21 по Киеву), один раз на человека."""
+def _name_nudge_enabled() -> bool:
+    return (db.get_setting("name_nudge_enabled") or "1") == "1"
+
+
+def _name_nudge_hours() -> int:
     try:
-        if not _intro_nudge_enabled() or not _intro_enabled():
-            return
+        n = int(db.get_setting("name_nudge_hours") or "24")
+    except ValueError:
+        n = 24
+    return max(1, min(n, 168))
+
+
+async def _send_name_nudges(bot: Bot):
+    """Одно напоминание тому, кто нажал «Старт», увидел вопрос про имя и не ответил. Кнопки нет:
+    нужен текст с именем, поэтому заодно возвращаем человека в состояние «жду имя», чтобы его
+    ответ точно приняли за имя (даже если состояние сбросилось, например командой /cancel)."""
+    if not _name_nudge_enabled():
+        return
+    template = (db.get_setting("name_nudge_text") or "").strip()
+    if not template:
+        return
+    cutoff = (datetime.now() - timedelta(hours=_name_nudge_hours())).strftime("%Y-%m-%d %H:%M:%S")
+    for user_row in db.get_name_nudge_due(cutoff):
+        uid = user_row["user_id"]
+        # отмечаем ДО отправки: напоминание одноразовое, даже если отправка не удалась
+        db.mark_name_nudge_sent(uid)
+        try:
+            await _send_long(bot, uid, _personalize(template, user_row), protect_content=_protect_for(uid))
+            key = StorageKey(bot_id=bot.id, chat_id=uid, user_id=uid)
+            await fsm_storage.set_state(key, NameStates.waiting_name)
+        except Exception:
+            logging.exception("Не удалось отправить напоминание про имя пользователю %s", uid)
+
+
+async def check_intro_nudges(bot: Bot):
+    """Одно мягкое напоминание (на каждый случай): 1) тому, кто нажал «Старт» и не назвал имя;
+    2) тому, кто получил вводное сообщение, не нажал кнопку и после этого ничего не делал в боте.
+    Идёт днём (с 9 до 21 по Киеву), каждое напоминание один раз на человека."""
+    try:
         hour = datetime.now(TZ).hour
         if hour < INTRO_NUDGE_FROM_HOUR or hour >= INTRO_NUDGE_TO_HOUR:
+            return
+        try:
+            await _send_name_nudges(bot)
+        except Exception:
+            logging.exception("Сбой в напоминаниях про имя")
+        if not _intro_nudge_enabled() or not _intro_enabled():
             return
         # время в базе хранится тем же способом, что и в db._now() (местное время сервера)
         cutoff = (datetime.now() - timedelta(hours=_intro_nudge_hours())).strftime("%Y-%m-%d %H:%M:%S")
@@ -8411,6 +8454,7 @@ async def intro_continue(callback: CallbackQuery):
 def _intro_screen():
     enabled = _intro_enabled()
     nudge_on = _intro_nudge_enabled()
+    name_on = _name_nudge_enabled()
     photo = "есть" if db.get_setting("intro_msg_photo") else "нет"
     preview = _plain_text(db.get_setting("intro_msg_text") or "")
     if len(preview) > 400:
@@ -8428,7 +8472,11 @@ def _intro_screen():
         "<b>Напоминание, если кнопку не нажали</b>\n"
         "Один раз, мягким сообщением с такой же кнопкой, и только тому, кто после вводного сообщения "
         "больше ничего не делал в боте. Идёт днём, с 9 до 21 по Киеву.\n"
-        f"Сейчас: {'включено ✅' if nudge_on else 'выключено 🚫'}, через {_intro_nudge_hours()} ч."
+        f"Сейчас: {'включено ✅' if nudge_on else 'выключено 🚫'}, через {_intro_nudge_hours()} ч.\n\n"
+        "<b>Напоминание, если человек не назвал имя</b>\n"
+        "Один раз, без кнопки: человек нажал «Старт», увидел вопрос «Как я могу к Вам обращаться?» и не ответил. "
+        "Достаточно написать имя. Тоже днём, с 9 до 21 по Киеву.\n"
+        f"Сейчас: {'включено ✅' if name_on else 'выключено 🚫'}, через {_name_nudge_hours()} ч."
     )
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="🚫 Выключить" if enabled else "✅ Включить", callback_data="adm_intro_toggle")],
@@ -8441,6 +8489,12 @@ def _intro_screen():
         )],
         [InlineKeyboardButton(text="✏️ Текст напоминания", callback_data="adm_intro_e_intro_nudge_text")],
         [InlineKeyboardButton(text="⏱ Через сколько часов напомнить", callback_data="adm_intro_e_intro_nudge_hours")],
+        [InlineKeyboardButton(
+            text="🚫 Выключить напоминание про имя" if name_on else "✅ Включить напоминание про имя",
+            callback_data="adm_name_nudge_toggle",
+        )],
+        [InlineKeyboardButton(text="✏️ Текст напоминания про имя", callback_data="adm_intro_e_name_nudge_text")],
+        [InlineKeyboardButton(text="⏱ Через сколько часов (имя)", callback_data="adm_intro_e_name_nudge_hours")],
         [InlineKeyboardButton(text="⬅️ Назад", callback_data="adm_back")],
     ])
     return text, kb
@@ -8475,7 +8529,22 @@ async def adm_intro_nudge_toggle(callback: CallbackQuery):
     await callback.answer("Напоминание включено" if _intro_nudge_enabled() else "Напоминание выключено")
 
 
+@router.callback_query(F.data == "adm_name_nudge_toggle")
+async def adm_name_nudge_toggle(callback: CallbackQuery):
+    if not await _require_permission(callback, "adm_intro_message"):
+        return
+    db.set_setting("name_nudge_enabled", "0" if _name_nudge_enabled() else "1")
+    text, kb = _intro_screen()
+    await _edit_keep(callback, text, kb)
+    await callback.answer("Напоминание про имя включено" if _name_nudge_enabled() else "Напоминание про имя выключено")
+
+
 INTRO_EDIT_PROMPTS = {
+    "name_nudge_text": "Пришлите новый текст напоминания человеку, который не назвал имя. Кнопки под сообщением не будет: "
+                       "человек отвечает текстом, поэтому в тексте лучше прямо попросить написать имя в строке сообщения. "
+                       "Если нужно имя человека из профиля Telegram, можно вставить {имя}.",
+    "name_nudge_hours": "Через сколько часов после вопроса «Как я могу к Вам обращаться?» напоминать тому, кто не ответил? "
+                        "Пришлите число от 1 до 168. Отправляется только днём, с 9 до 21 по Киеву.",
     "intro_nudge_text": "Пришлите новый текст напоминания. Можно вставить {имя} (имя человека) и {кнопка} (название кнопки, "
                         "как оно сейчас задано). Под сообщением автоматически будет такая же кнопка.",
     "intro_nudge_hours": "Через сколько часов после вводного сообщения напоминать тому, кто не нажал кнопку? "

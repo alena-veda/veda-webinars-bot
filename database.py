@@ -149,6 +149,15 @@ def init_db():
     except Exception:
         pass
     try:
+        # когда человеку задали вопрос «Как я могу к Вам обращаться?» и напоминали ли ему про имя
+        c.execute("ALTER TABLE users ADD COLUMN name_asked_at TEXT")
+    except Exception:
+        pass
+    try:
+        c.execute("ALTER TABLE users ADD COLUMN name_nudge_sent INTEGER DEFAULT 0")
+    except Exception:
+        pass
+    try:
         # когда человек впервые открыл экран VEDA SANCTUM (не сбрасывается, нужен для отчёта «Путь новичков»)
         c.execute("ALTER TABLE users ADD COLUMN sanctum_first_opened_at TEXT")
     except Exception:
@@ -1157,10 +1166,17 @@ def init_db():
         "intro_nudge_enabled": "1",
         "intro_nudge_hours": "24",
         "intro_nudge_text": (
-            "{имя}, Вы остановились на первом шаге, и это совсем не страшно 🌿\n\n"
+            "{имя}, вижу, Вы остановились на первом шаге в моём пространстве ⚜️\n\n"
             "Выше в чате лежит моё сообщение с важной просьбой читать всё внимательно. "
-            "Чтобы идти дальше, нужно только нажать кнопку «{кнопка}». Писать ничего не нужно.\n\n"
-            "Такая же кнопка есть и под этим сообщением, можно нажать её здесь."
+            "Чтобы идти дальше, нужно ТОЛЬКО НАЖАТЬ кнопку «{кнопка}» под этим сообщением. "
+            "Писать ничего не нужно."
+        ),
+        "name_nudge_enabled": "1",
+        "name_nudge_hours": "24",
+        "name_nudge_text": (
+            "Я рада, что Вы пришли в моё пространство ⚜️ Буду рада нашему знакомству. "
+            "Напишите, пожалуйста, как могу к Вам обращаться? ⬇️ Достаточно Вашего имени, в строке сообщения внизу экрана. "
+            "Кнопки нажимать не нужно, и я покажу следующий шаг."
         ),
     }
     for key, value in _intro_defaults.items():
@@ -1343,6 +1359,37 @@ def get_intro_nudge_due(cutoff_datetime_str):
     return rows
 
 
+def mark_name_asked(user_id):
+    """Момент, когда человеку задали вопрос про имя (повторный вопрос начинает отсчёт заново)."""
+    conn = get_conn()
+    conn.execute("UPDATE users SET name_asked_at = ? WHERE user_id = ?", (_now(), user_id))
+    conn.commit()
+    conn.close()
+
+
+def mark_name_nudge_sent(user_id):
+    conn = get_conn()
+    conn.execute("UPDATE users SET name_nudge_sent = 1 WHERE user_id = ?", (user_id,))
+    conn.commit()
+    conn.close()
+
+
+def get_name_nudge_due(cutoff_datetime_str):
+    """Люди, которым давно задали вопрос про имя, а они так и не ответили; напоминание ещё не отправляли."""
+    conn = get_conn()
+    rows = conn.execute("""
+        SELECT u.* FROM users u
+        WHERE u.name_asked_at IS NOT NULL AND u.name_asked_at <= ?
+        AND (u.name_nudge_sent IS NULL OR u.name_nudge_sent = 0)
+        AND (u.preferred_name IS NULL OR TRIM(u.preferred_name) = '')
+        AND (u.blocked IS NULL OR u.blocked = 0)
+        AND (u.self_departed IS NULL OR u.self_departed = 0)
+        AND u.user_id NOT IN (SELECT admin_id FROM admins)
+    """, (cutoff_datetime_str,)).fetchall()
+    conn.close()
+    return rows
+
+
 def get_newcomer_funnel(since_str=None):
     """Воронка новичков за период (people = нажавшие «Старт» не раньше since_str, без админов).
     Возвращает словарь с числами по шагам и список последних действий тех, кто не оплатил."""
@@ -1471,7 +1518,10 @@ def reset_user_onboarding(user_id):
     сохранённому имени (preferred_name), поэтому сбрасываем ровно его -
     ступень, Sanctum, цена, заявки, Люминар, покупки и пригласивший не трогаются."""
     conn = get_conn()
-    conn.execute("UPDATE users SET preferred_name = NULL WHERE user_id = ?", (user_id,))
+    conn.execute(
+        "UPDATE users SET preferred_name = NULL, name_asked_at = NULL, name_nudge_sent = 0 WHERE user_id = ?",
+        (user_id,),
+    )
     conn.commit()
     conn.close()
 
