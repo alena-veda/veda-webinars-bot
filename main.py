@@ -10,7 +10,7 @@ import urllib.parse
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
-from aiogram import Bot, Dispatcher, Router, F
+from aiogram import BaseMiddleware, Bot, Dispatcher, Router, F
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
 from aiogram.exceptions import TelegramBadRequest
@@ -816,6 +816,7 @@ ADMIN_PERMISSION_SECTIONS = [
     ]),
     ("👥 Люди", [
         ("adm_users_list", "👥 Подписчики бота (блокировка - прямо там)"),
+        ("adm_newcomers", "🌱 Новички: не назвали имя (и уведомления о новичках)"),
         ("adm_admins", "👥 Администраторы"),
     ]),
 ]
@@ -1022,6 +1023,7 @@ async def cmd_start(message: Message, state: FSMContext):
     db.add_user(
         message.from_user.id, message.from_user.username, message.from_user.first_name, referred_by=referred_by
     )
+    _remember_action(message.from_user.id, "Нажал «Старт»")
     user_row = db.get_user(message.from_user.id)
     # знакомство считаем завершённым только когда сохранено имя — не просто
     # по факту существования записи в базе. Реальный случай (2026-09-06):
@@ -1078,6 +1080,16 @@ async def name_received(message: Message, state: FSMContext):
     data = await state.get_data()
     pending_webinar_id = data.get("pending_webinar_id")
     await state.clear()
+    # уведомление владельцу: человек назвал имя и идёт дальше; «где он сейчас»
+    # зависит от того, что бот сейчас ему отправит
+    if pending_webinar_id:
+        where = "пришёл по ссылке на вебинар, видит карточку вебинара"
+    elif _intro_enabled():
+        where = f"получил вводное сообщение, ждёт нажатия «{_plain_text(db.get_setting('intro_msg_button') or '')}»"
+    else:
+        where = "получил приветствие и «Первое Касание»"
+    _remember_action(message.from_user.id, f"Назвал имя: {where}")
+    await _notify_newcomer(message.bot, message.from_user.id, where)
     if pending_webinar_id:
         await message.answer(
             db.get_setting("name_thanks_text").replace("{имя}", text.strip()),
@@ -5109,6 +5121,12 @@ async def _render_user_detail(callback: CallbackQuery, user_id: int):
         f"VEDA HEALING FLOW: {meditation_status}\n"
         f"✨ Люминар: {luminar_status}"
     )
+    if not (u["preferred_name"] or "").strip():
+        text += "\n🌱 Имя не назвал (на вопросе об имени)"
+    if u["last_action"]:
+        text += f"\n🕓 Последнее действие: {html.escape(u['last_action'])} ({_fmt_action_time(u['last_action_at'])})"
+    else:
+        text += "\n🕓 Последнее действие: нет данных (записывается с версии от 10.10.2026)"
     block_label = "✅ Разблокировать" if u["blocked"] else "🚫 Заблокировать"
     meditation_label = "↩️ Снять отметку VEDA HEALING FLOW" if u["bought_meditation_bot"] else "🧘 Отметить покупку VEDA HEALING FLOW"
     kb = InlineKeyboardMarkup(inline_keyboard=[
@@ -7979,7 +7997,7 @@ def _build_past_webinars_view(past, page: int):
 
 _PAGE_PERMISSIONS = {
     "ul": "adm_users_list", "sl": "adm_sanctum_list", "sa": "adm_sanctum_list", "il": "adm_intentions_list",
-    "fs": "adm_faq_suggestions", "go": "adm_grant_access", "wl": "adm_webinars",
+    "fs": "adm_faq_suggestions", "go": "adm_grant_access", "wl": "adm_webinars", "nc": "adm_newcomers",
 }
 
 
@@ -8008,6 +8026,8 @@ async def adm_page_nav(callback: CallbackQuery):
         text, kb, page = _build_intentions_view(page, extra if extra in ("a", "u") else "a")
     elif kind == "fs":
         text, kb, page = _build_faq_sugg_view(page)
+    elif kind == "nc":
+        text, kb, page = _build_newcomers_view(page)
     elif kind == "go":
         text, kb, page = _build_grant_others_view(page)
         if kb is None:
@@ -8346,6 +8366,167 @@ async def adm_intro_photo(callback: CallbackQuery, state: FSMContext):
         "Например, подсказку, где в Telegram найти меню.\n\nИли отправьте «-», чтобы убрать картинку."
     )
     await callback.answer()
+
+
+# ---------- новички: последнее действие, уведомления, «застрявшие на имени» ----------
+
+_MENU_BUTTON_TEXTS = {BTN_WEBINARS, BTN_SANCTUM, BTN_MEDITATION, BTN_PROFILE, BTN_ABOUT, BTN_FEED, BTN_INFO}
+
+
+def _remember_action(user_id: int, label: str):
+    try:
+        db.set_last_action(user_id, label)
+    except Exception:
+        logging.exception("Не удалось записать последнее действие пользователя %s", user_id)
+
+
+def _fmt_action_time(value) -> str:
+    """'2026-10-10 14:32:05' -> '10.10 14:32'."""
+    try:
+        d, t = str(value).split(" ")
+        y, m, day = d.split("-")
+        return f"{day}.{m} {t[:5]}"
+    except Exception:
+        return "-"
+
+
+def _button_text_for(callback: CallbackQuery) -> str:
+    """Название кнопки, на которую нажал человек: ищем её среди кнопок сообщения."""
+    msg = getattr(callback, "message", None)
+    markup = getattr(msg, "reply_markup", None)
+    rows = getattr(markup, "inline_keyboard", None) or []
+    for row in rows:
+        for b in row:
+            if getattr(b, "callback_data", None) == callback.data:
+                return " ".join(str(b.text).split())
+    return ""
+
+
+def _action_for_event(event):
+    """Человеческая запись «что человек сделал» или None, если записывать нечего."""
+    if isinstance(event, CallbackQuery):
+        if event.data == "noop":
+            return None
+        text = _button_text_for(event)
+        return f"Нажал: {text[:70]}" if text else "Нажал кнопку"
+    text = getattr(event, "text", None)
+    if text:
+        if text.startswith("/"):
+            return f"Команда {text.split()[0][:30]}"
+        if text in _MENU_BUTTON_TEXTS:
+            return f"Меню: {text[:70]}"
+        return "Написал сообщение"
+    if getattr(event, "photo", None):
+        return "Прислал картинку"
+    return "Прислал сообщение (не текст)"
+
+
+class LastActionMiddleware(BaseMiddleware):
+    """Перед каждым действием обычного человека (не администратора) запоминает,
+    что именно он сделал. Ошибка здесь никогда не мешает боту отвечать."""
+
+    async def __call__(self, handler, event, data):
+        try:
+            user = getattr(event, "from_user", None)
+            if user and not user.is_bot and not db.is_admin(user.id):
+                label = _action_for_event(event)
+                if label:
+                    db.set_last_action(user.id, label)
+        except Exception:
+            logging.exception("Не удалось записать последнее действие")
+        return await handler(event, data)
+
+
+router.message.outer_middleware(LastActionMiddleware())
+router.callback_query.outer_middleware(LastActionMiddleware())
+
+
+def _newcomer_notify_enabled() -> bool:
+    return (db.get_setting("newcomer_notify_enabled") or "1") == "1"
+
+
+async def _notify_newcomer(bot: Bot, user_id: int, where: str):
+    """Владельцу (и помощникам с правом «Новички») - человек назвал имя и идёт дальше."""
+    try:
+        if not _newcomer_notify_enabled() or db.is_admin(user_id):
+            return
+        u = db.get_user(user_id)
+        if not u:
+            return
+        name = (u["preferred_name"] or "").strip()
+        handle = f" (@{u['username']})" if u["username"] else ""
+        origin = "сам"
+        if u["referred_by"]:
+            ref = db.get_user(u["referred_by"])
+            origin = f"по ссылке {html.escape(_user_display_name(ref))}" if ref else "по чьей-то ссылке"
+        text = (
+            f"🆕 <b>Назвал имя и идёт дальше:</b> {html.escape(name)}{html.escape(handle)}\n"
+            f'ID: <a href="tg://user?id={user_id}">{user_id}</a>\n'
+            f"Пришёл: {origin}\n"
+            f"Сейчас: {html.escape(where)}"
+        )
+        kb = InlineKeyboardMarkup(inline_keyboard=[[
+            InlineKeyboardButton(text="👤 Профиль", callback_data=f"adm_user_view_{user_id}"),
+            InlineKeyboardButton(text="✍️ Написать", callback_data=f"admin_reply_{user_id}"),
+        ]])
+        for admin_id in db.get_all_admin_ids():
+            if not db.has_permission(admin_id, "adm_newcomers"):
+                continue
+            try:
+                await bot.send_message(admin_id, text, reply_markup=kb)
+            except Exception:
+                logging.exception("Не удалось отправить уведомление о новичке администратору %s", admin_id)
+    except Exception:
+        logging.exception("Не удалось подготовить уведомление о новичке %s", user_id)
+
+
+def _build_newcomers_view(page: int):
+    enabled = _newcomer_notify_enabled()
+    people = [u for u in db.get_unnamed_users() if not db.is_admin(u["user_id"])]
+    head = (
+        "<b>🌱 Новички, которые нажали «Старт» и не назвали имя</b>\n\n"
+        "Пока человек не назовёт имя, дальше в боте он не проходит. Как только назовёт, он сам пропадёт "
+        "из этого списка, а Вам придёт сообщение «🆕 Назвал имя и идёт дальше» (если уведомления включены).\n\n"
+        f"Уведомления о новичках: {'включены ✅' if enabled else 'выключены 🚫'}\n"
+        "Нажмите на человека, чтобы открыть его профиль и написать ему лично."
+    )
+    pages = max(1, -(-len(people) // USERS_PER_PAGE))
+    page = _page_clamp(pages, page)
+    chunk = people[page * USERS_PER_PAGE:(page + 1) * USERS_PER_PAGE]
+    rows = [[InlineKeyboardButton(
+        text="🚫 Выключить уведомления" if enabled else "✅ Включить уведомления", callback_data="adm_newc_toggle"
+    )]]
+    for u in chunk:
+        mark = "🚫 " if u["blocked"] else ("👋 " if u["self_departed"] else "")
+        label = f"{mark}{_user_display_name(u)} - {_fmt_action_time(u['created_at'])}"
+        rows.append([InlineKeyboardButton(text=label[:64], callback_data=f"adm_user_view_{u['user_id']}")])
+    rows.extend(_pager_row("nc", page, pages))
+    rows.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="adm_back")])
+    if people:
+        head += f"\n\nВсего без имени: {len(people)}"
+    else:
+        head += "\n\n✅ Сейчас таких людей нет."
+    return head, InlineKeyboardMarkup(inline_keyboard=rows), page
+
+
+@router.callback_query(F.data == "adm_newcomers")
+async def adm_newcomers(callback: CallbackQuery):
+    if not await _require_permission(callback, "adm_newcomers"):
+        return
+    text, kb, page = _build_newcomers_view(0)
+    _remember_page(callback.from_user.id, "nc", page)
+    await _edit_keep(callback, text, kb)
+    await callback.answer()
+
+
+@router.callback_query(F.data == "adm_newc_toggle")
+async def adm_newc_toggle(callback: CallbackQuery):
+    if not await _require_permission(callback, "adm_newcomers"):
+        return
+    db.set_setting("newcomer_notify_enabled", "0" if _newcomer_notify_enabled() else "1")
+    text, kb, page = _build_newcomers_view(_recall_page(callback.from_user.id, "nc"))
+    await _edit_keep(callback, text, kb)
+    await callback.answer("Включено" if _newcomer_notify_enabled() else "Выключено")
 
 
 async def main():

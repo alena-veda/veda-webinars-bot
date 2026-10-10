@@ -129,6 +129,16 @@ def init_db():
     except Exception:
         pass
     try:
+        # последнее действие человека в боте (человеческим языком) и когда оно
+        # было - для уведомлений о новичках и профиля (2026-10-10)
+        c.execute("ALTER TABLE users ADD COLUMN last_action TEXT")
+    except Exception:
+        pass
+    try:
+        c.execute("ALTER TABLE users ADD COLUMN last_action_at TEXT")
+    except Exception:
+        pass
+    try:
         # сколько людей, приглашённых ЭТИМ человеком, реально вошли в VEDA SANCTUM
         # (оплатили первый раз) — основа для Ордена Люминаров, см. main.py
         c.execute("ALTER TABLE users ADD COLUMN luminar_count INTEGER DEFAULT 0")
@@ -1128,6 +1138,7 @@ def init_db():
         "intro_msg_button": "Понятно. Продолжить ➡️",
         "intro_msg_photo": "",
         "welcome_pause_seconds": "30",
+        "newcomer_notify_enabled": "1",
     }
     for key, value in _intro_defaults.items():
         c.execute("SELECT value FROM settings WHERE key = ?", (key,))
@@ -1263,6 +1274,28 @@ def set_preferred_name(user_id, name):
     conn.execute("UPDATE users SET preferred_name = ? WHERE user_id = ?", (name, user_id))
     conn.commit()
     conn.close()
+
+
+def set_last_action(user_id, label):
+    """Запоминает последнее действие человека (для профиля и уведомлений о новичках)."""
+    conn = get_conn()
+    conn.execute(
+        "UPDATE users SET last_action = ?, last_action_at = ? WHERE user_id = ?",
+        (label, _now(), user_id),
+    )
+    conn.commit()
+    conn.close()
+
+
+def get_unnamed_users():
+    """Люди, которые нажали «Старт», но не назвали имя (новые сверху)."""
+    conn = get_conn()
+    rows = conn.execute(
+        "SELECT * FROM users WHERE preferred_name IS NULL OR TRIM(preferred_name) = '' "
+        "ORDER BY created_at DESC"
+    ).fetchall()
+    conn.close()
+    return rows
 
 
 def get_user(user_id):
