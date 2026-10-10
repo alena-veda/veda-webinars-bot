@@ -14,7 +14,8 @@ from aiogram import BaseMiddleware, Bot, Dispatcher, Router, F
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
 from aiogram.exceptions import TelegramBadRequest
-from aiogram.filters import Command, CommandStart
+from aiogram.dispatcher.event.bases import UNHANDLED
+from aiogram.filters import Command, CommandStart, ExceptionTypeFilter
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.base import BaseStorage, StorageKey
@@ -28,6 +29,7 @@ from aiogram.types import (
     Message,
     ReplyKeyboardMarkup,
     ReplyKeyboardRemove,
+    ErrorEvent,
 )
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
@@ -8529,6 +8531,91 @@ async def adm_newc_toggle(callback: CallbackQuery):
     await callback.answer("Включено" if _newcomer_notify_enabled() else "Выключено")
 
 
+@router.error(ExceptionTypeFilter(TelegramBadRequest))
+async def on_stale_callback_error(event: ErrorEvent):
+    """После перезапуска бот обрабатывает накопившиеся нажатия, а Telegram на слишком
+    старые нажатия кнопок отвечает «query is too old». Это не поломка: пишем в журнал
+    спокойной строкой, а не ошибкой, чтобы не портить счётчик на экране «Состояние сейчас».
+    Все остальные ошибки Telegram идут обычным путём."""
+    text = str(event.exception).lower()
+    if "query is too old" in text or "query id is invalid" in text:
+        logging.info("Устаревшее нажатие кнопки пропущено: %s", event.exception)
+        return True
+    return UNHANDLED
+
+
+# ---------- сообщение владельцу «Бот запущен» ----------
+
+STARTUP_NOTICE_GAP_SECONDS = 300
+
+
+def _current_version() -> str:
+    """Номер версии кода: короткий номер последнего сохранения в git (и его название,
+    если git доступен). Если git на сервере не отвечает, читаем номер прямо из папки .git."""
+    root = os.path.dirname(os.path.abspath(__file__))
+    try:
+        import subprocess
+        out = subprocess.run(
+            ["git", "log", "-1", "--format=%h %s"], cwd=root, capture_output=True, text=True,
+            encoding="utf-8", errors="replace", timeout=5,
+        )
+        line = (out.stdout or "").strip()
+        if out.returncode == 0 and line:
+            return line
+    except Exception:
+        pass
+    try:
+        git_dir = os.path.join(root, ".git")
+        with open(os.path.join(git_dir, "HEAD"), encoding="utf-8") as f:
+            head = f.read().strip()
+        if head.startswith("ref:"):
+            ref = head.split(" ", 1)[1].strip()
+            ref_path = os.path.join(git_dir, *ref.split("/"))
+            if os.path.exists(ref_path):
+                with open(ref_path, encoding="utf-8") as f:
+                    return f.read().strip()[:7]
+            with open(os.path.join(git_dir, "packed-refs"), encoding="utf-8") as f:
+                for row in f:
+                    parts = row.split()
+                    if len(parts) == 2 and parts[1] == ref:
+                        return parts[0][:7]
+        elif head:
+            return head[:7]
+    except Exception:
+        pass
+    return "не удалось определить"
+
+
+async def _send_startup_notice(bot: Bot):
+    """Каждый запуск бота: короткое сообщение владельцу (всем с правом «Состояние сейчас»)
+    с номером версии. Чтобы бесконечные перезапуски не засыпали Вас, чаще раза в 5 минут
+    сообщение не отправляется. Ошибка здесь никогда не мешает боту работать."""
+    try:
+        now = datetime.now(TZ)
+        last = db.get_setting("startup_notice_last_at")
+        if last:
+            try:
+                if (now - datetime.fromisoformat(last)).total_seconds() < STARTUP_NOTICE_GAP_SECONDS:
+                    return
+            except ValueError:
+                pass
+        db.set_setting("startup_notice_last_at", now.isoformat())
+        text = (
+            "🟢 <b>Бот запущен</b>\n"
+            f"Версия: {html.escape(_current_version())}\n"
+            f"Время: {now.strftime('%d.%m.%Y %H:%M')} (Киев)"
+        )
+        for admin_id in db.get_all_admin_ids():
+            if not db.has_permission(admin_id, "adm_health"):
+                continue
+            try:
+                await asyncio.wait_for(bot.send_message(admin_id, text), timeout=15)
+            except Exception:
+                logging.exception("Не удалось отправить сообщение о запуске администратору %s", admin_id)
+    except Exception:
+        logging.exception("Не удалось подготовить сообщение о запуске")
+
+
 async def main():
     logging.basicConfig(
         level=logging.INFO,
@@ -8582,7 +8669,11 @@ async def main():
     scheduler.start()
 
     logging.info("Bot started!")
-    await dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types(), drop_pending_updates=True)
+    await _send_startup_notice(bot)
+    # drop_pending_updates=False (с 2026-10-10): всё, что люди нажали или прислали (в том числе
+    # чек об оплате), пока бот перезапускался, обрабатывается после запуска, а не теряется.
+    # Telegram хранит такие сообщения до суток.
+    await dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types(), drop_pending_updates=False)
 
 
 if __name__ == "__main__":
