@@ -139,6 +139,21 @@ def init_db():
     except Exception:
         pass
     try:
+        # когда человеку отправили вводное сообщение «Понятно. Продолжить» и отправляли ли
+        # ему напоминание, если он не нажал (2026-10-10)
+        c.execute("ALTER TABLE users ADD COLUMN intro_sent_at TEXT")
+    except Exception:
+        pass
+    try:
+        c.execute("ALTER TABLE users ADD COLUMN intro_nudge_sent INTEGER DEFAULT 0")
+    except Exception:
+        pass
+    try:
+        # когда человек впервые открыл экран VEDA SANCTUM (не сбрасывается, нужен для отчёта «Путь новичков»)
+        c.execute("ALTER TABLE users ADD COLUMN sanctum_first_opened_at TEXT")
+    except Exception:
+        pass
+    try:
         # сколько людей, приглашённых ЭТИМ человеком, реально вошли в VEDA SANCTUM
         # (оплатили первый раз) — основа для Ордена Люминаров, см. main.py
         c.execute("ALTER TABLE users ADD COLUMN luminar_count INTEGER DEFAULT 0")
@@ -1139,6 +1154,14 @@ def init_db():
         "intro_msg_photo": "",
         "welcome_pause_seconds": "30",
         "newcomer_notify_enabled": "1",
+        "intro_nudge_enabled": "1",
+        "intro_nudge_hours": "24",
+        "intro_nudge_text": (
+            "{имя}, Вы остановились на первом шаге, и это совсем не страшно 🌿\n\n"
+            "Выше в чате лежит моё сообщение с важной просьбой читать всё внимательно. "
+            "Чтобы идти дальше, нужно только нажать кнопку «{кнопка}». Писать ничего не нужно.\n\n"
+            "Такая же кнопка есть и под этим сообщением, можно нажать её здесь."
+        ),
     }
     for key, value in _intro_defaults.items():
         c.execute("SELECT value FROM settings WHERE key = ?", (key,))
@@ -1285,6 +1308,78 @@ def set_last_action(user_id, label):
     )
     conn.commit()
     conn.close()
+
+
+def mark_intro_sent(user_id):
+    conn = get_conn()
+    conn.execute("UPDATE users SET intro_sent_at = ?, intro_nudge_sent = 0 WHERE user_id = ?", (_now(), user_id))
+    conn.commit()
+    conn.close()
+
+
+def mark_intro_nudge_sent(user_id):
+    conn = get_conn()
+    conn.execute("UPDATE users SET intro_nudge_sent = 1 WHERE user_id = ?", (user_id,))
+    conn.commit()
+    conn.close()
+
+
+def get_intro_nudge_due(cutoff_datetime_str):
+    """Люди, которым давно отправили вводное сообщение, а они не нажали кнопку и
+    после этого вообще ничего не делали в боте; напоминание им ещё не отправляли."""
+    conn = get_conn()
+    rows = conn.execute("""
+        SELECT u.* FROM users u
+        WHERE u.intro_sent_at IS NOT NULL AND u.intro_sent_at <= ?
+        AND (u.intro_nudge_sent IS NULL OR u.intro_nudge_sent = 0)
+        AND u.ritual_intro_shown_at IS NULL
+        AND (u.last_action_at IS NULL OR u.last_action_at <= u.intro_sent_at)
+        AND (u.blocked IS NULL OR u.blocked = 0)
+        AND (u.self_departed IS NULL OR u.self_departed = 0)
+        AND u.preferred_name IS NOT NULL AND TRIM(u.preferred_name) != ''
+        AND u.user_id NOT IN (SELECT admin_id FROM admins)
+    """, (cutoff_datetime_str,)).fetchall()
+    conn.close()
+    return rows
+
+
+def get_newcomer_funnel(since_str=None):
+    """Воронка новичков за период (people = нажавшие «Старт» не раньше since_str, без админов).
+    Возвращает словарь с числами по шагам и список последних действий тех, кто не оплатил."""
+    conn = get_conn()
+    where = "u.user_id NOT IN (SELECT admin_id FROM admins)"
+    params = []
+    if since_str:
+        where += " AND u.created_at >= ?"
+        params.append(since_str)
+    people = conn.execute(f"SELECT u.* FROM users u WHERE {where}", params).fetchall()
+    regs = conn.execute("SELECT user_id, product_type, status FROM registrations").fetchall()
+    members = {r["user_id"] for r in conn.execute("SELECT user_id FROM sanctum_membership").fetchall()}
+    conn.close()
+    reg_users = {}
+    for r in regs:
+        reg_users.setdefault(r["user_id"], []).append(r)
+    out = {
+        "came": 0, "named": 0, "intro_ok": 0, "sanctum_opened": 0, "pay_started": 0,
+        "receipt_sent": 0, "paid": 0, "stuck": {},
+    }
+    for u in people:
+        uid = u["user_id"]
+        rs = reg_users.get(uid, [])
+        named = bool((u["preferred_name"] or "").strip())
+        out["came"] += 1
+        out["named"] += named
+        out["intro_ok"] += bool(u["ritual_intro_shown_at"])
+        opened = bool(u["sanctum_first_opened_at"]) or any(r["product_type"] == "sanctum" for r in rs) or uid in members
+        out["sanctum_opened"] += opened
+        out["pay_started"] += bool(rs)
+        out["receipt_sent"] += any(r["status"] != "awaiting_receipt" for r in rs)
+        paid = any(r["status"] == "confirmed" for r in rs)
+        out["paid"] += paid
+        if not paid and uid not in members:
+            label = u["last_action"] or ("Нажал «Старт» (имя не назвал)" if not named else "нет данных (был в боте до установки)")
+            out["stuck"][label] = out["stuck"].get(label, 0) + 1
+    return out
 
 
 def get_unnamed_users():
@@ -1644,6 +1739,11 @@ def mark_sanctum_intro_viewed(user_id):
     get_sanctum_intro_viewers_due) - после отправки больше не отслеживаем,
     чтобы не запустить бесконечный цикл повторных напоминаний."""
     conn = get_conn()
+    # самый первый просмотр запоминаем навсегда (для отчёта «Путь новичков»)
+    conn.execute(
+        "UPDATE users SET sanctum_first_opened_at = ? WHERE user_id = ? AND sanctum_first_opened_at IS NULL",
+        (datetime.now().strftime("%Y-%m-%d %H:%M:%S"), user_id),
+    )
     conn.execute(
         "UPDATE users SET sanctum_intro_viewed_at = ? "
         "WHERE user_id = ? AND (sanctum_nudge_sent IS NULL OR sanctum_nudge_sent = 0)",

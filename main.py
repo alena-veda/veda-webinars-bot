@@ -2660,9 +2660,73 @@ async def adm_analytics(callback: CallbackQuery):
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="📈 Динамика (тренды)", callback_data="adm_analytics_trends")],
         [InlineKeyboardButton(text="📈 По каждому вебинару", callback_data="adm_analytics_webinars")],
+        [InlineKeyboardButton(text="🌱 Путь новичков", callback_data="adm_funnel_30")],
         [InlineKeyboardButton(text="⬅️ Назад", callback_data="adm_back")],
     ])
     await callback.message.edit_text(text, reply_markup=kb)
+    await callback.answer()
+
+
+FUNNEL_PERIODS = {"7": ("7 дней", 7), "30": ("30 дней", 30), "all": ("всё время", None)}
+
+
+def _build_funnel_view(period: str):
+    label, days = FUNNEL_PERIODS.get(period, FUNNEL_PERIODS["30"])
+    since = None
+    if days:
+        since = f"{(_today() - timedelta(days=days)).isoformat()} 00:00:00"
+    f = db.get_newcomer_funnel(since)
+    came = f["came"]
+
+    def line(n, title, count):
+        pct = f" ({round(100 * count / came)}%)" if came else ""
+        return f"{n}. {title}: <b>{count}</b>{pct}"
+
+    text = (
+        f"<b>🌱 Путь новичков за период: {label}</b>\n"
+        "Считаются люди, нажавшие «Старт» в этот период (администраторы не считаются). "
+        "Проценты - от числа пришедших.\n\n"
+        + "\n".join([
+            line(1, "Нажали «Старт»", came),
+            line(2, "Назвали имя", f["named"]),
+            line(3, "Нажали «Понятно» и получили «Первое Касание»", f["intro_ok"]),
+            line(4, "Открыли VEDA SANCTUM", f["sanctum_opened"]),
+            line(5, "Начали оплату", f["pay_started"]),
+            line(6, "Прислали чек", f["receipt_sent"]),
+            line(7, "Оплата подтверждена", f["paid"]),
+        ])
+    )
+    stuck = sorted(f["stuck"].items(), key=lambda kv: -kv[1])
+    if stuck:
+        text += "\n\n<b>Где остановились остальные</b> (не оплатили и не в Sanctum), по последнему действию:\n"
+        shown = stuck[:10]
+        text += "\n".join(f"• {html.escape(name)}: {n}" for name, n in shown)
+        if len(stuck) > 10:
+            text += f"\n• ещё вариантов: {len(stuck) - 10}, всего людей {sum(n for _, n in stuck[10:])}"
+    else:
+        text += "\n\nНикто не остановился: все пришедшие оплатили или уже в Sanctum."
+    text += (
+        "\n\nКак читать: «последнее действие» бот записывает только после установки этой версии, "
+        "у тех, кто пришёл раньше, будет «нет данных». Шаги 4-7 у более ранних людей считаются "
+        "по оплатам и прежним отметкам, поэтому для них цифры могут быть меньше настоящих."
+    )
+    row = [
+        InlineKeyboardButton(text=("• " if key == period else "") + title, callback_data=f"adm_funnel_{key}")
+        for key, (title, _) in FUNNEL_PERIODS.items()
+    ]
+    kb = InlineKeyboardMarkup(inline_keyboard=[row, [InlineKeyboardButton(text="⬅️ Назад", callback_data="adm_analytics")]])
+    return text, kb
+
+
+@router.callback_query(F.data.startswith("adm_funnel_"))
+async def adm_funnel(callback: CallbackQuery):
+    if not await _require_permission(callback, "adm_analytics"):
+        return
+    period = callback.data[len("adm_funnel_"):]
+    if period not in FUNNEL_PERIODS:
+        period = "30"
+    text, kb = _build_funnel_view(period)
+    await _edit_keep(callback, text, kb)
     await callback.answer()
 
 
@@ -3977,6 +4041,7 @@ HTML_TRUSTED_FIELDS = {
     ("sanctum", "invite_link"),
     ("about", "about_text"),
     ("intro_setting", "intro_msg_text"),
+    ("intro_setting", "intro_nudge_text"),
     ("faq", "faq_text"),
     ("faq_suggestion_invite", "faq_suggestion_invite_text"),
     ("faq_suggestion_confirm", "faq_suggestion_confirm_text"),
@@ -5538,15 +5603,25 @@ async def edit_field_value(message: Message, state: FSMContext):
         if await _ritual_edit_value(message, state, data, target, field, value):
             return
     elif target == "intro_setting":
-        if field == "intro_msg_text":
+        if field in ("intro_msg_text", "intro_nudge_text"):
             if not value.strip():
                 await message.answer("Текст не может быть пустым. Пришлите текст ещё раз или /cancel")
                 return
             db.set_setting(field, value.strip())
-            reply = "Текст вводного сообщения обновлён ✅"
+            reply = "Текст вводного сообщения обновлён ✅" if field == "intro_msg_text" else "Текст напоминания обновлён ✅"
             if "{имя}" not in value and "(имя)" in value:
                 reply += "\n\n⚠️ Вместо {имя} (фигурные скобки) написано (имя) - оно не заменится."
             await message.answer(reply, parse_mode=None)
+        elif field == "intro_nudge_hours":
+            try:
+                n = int(value.strip())
+                if n < 1 or n > 168:
+                    raise ValueError
+            except ValueError:
+                await message.answer("Нужно целое число часов от 1 до 168 (например, 24). Пришлите ещё раз или /cancel")
+                return
+            db.set_setting(field, str(n))
+            await message.answer(f"Готово ✅ Напоминание уйдёт через {n} ч. после вводного сообщения (днём, с 9 до 21 по Киеву).")
         elif field == "intro_msg_button":
             label = value.strip()
             if not label or len(label) > 60:
@@ -8211,6 +8286,54 @@ async def _send_intro_message(bot, user_id: int):
         await _send_with_optional_photo(bot, user_id, text, photo, kb, protect)
     else:
         await _send_long(bot, user_id, text, reply_markup=kb, protect_content=protect)
+    # запоминаем момент: если через сутки кнопку так и не нажали, уйдёт одно напоминание
+    # (см. check_intro_nudges)
+    db.mark_intro_sent(user_id)
+
+
+def _intro_nudge_enabled() -> bool:
+    return (db.get_setting("intro_nudge_enabled") or "1") == "1"
+
+
+def _intro_nudge_hours() -> int:
+    try:
+        n = int(db.get_setting("intro_nudge_hours") or "24")
+    except ValueError:
+        n = 24
+    return max(1, min(n, 168))
+
+
+INTRO_NUDGE_FROM_HOUR = 9
+INTRO_NUDGE_TO_HOUR = 21
+
+
+async def check_intro_nudges(bot: Bot):
+    """Одно мягкое напоминание тому, кто получил вводное сообщение, не нажал кнопку и после
+    этого ничего не делал в боте. Идёт днём (с 9 до 21 по Киеву), один раз на человека."""
+    try:
+        if not _intro_nudge_enabled() or not _intro_enabled():
+            return
+        hour = datetime.now(TZ).hour
+        if hour < INTRO_NUDGE_FROM_HOUR or hour >= INTRO_NUDGE_TO_HOUR:
+            return
+        # время в базе хранится тем же способом, что и в db._now() (местное время сервера)
+        cutoff = (datetime.now() - timedelta(hours=_intro_nudge_hours())).strftime("%Y-%m-%d %H:%M:%S")
+        label = db.get_setting("intro_msg_button") or "Продолжить ➡️"
+        template = db.get_setting("intro_nudge_text") or ""
+        if not template.strip():
+            return
+        kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text=label, callback_data="intro_continue")]])
+        for user_row in db.get_intro_nudge_due(cutoff):
+            uid = user_row["user_id"]
+            text = _personalize(template, user_row).replace("{кнопка}", _plain_text(label))
+            # отмечаем ДО отправки: напоминание одноразовое, даже если отправка не удалась
+            db.mark_intro_nudge_sent(uid)
+            try:
+                await _send_long(bot, uid, text, reply_markup=kb, protect_content=_protect_for(uid))
+            except Exception:
+                logging.exception("Не удалось отправить напоминание про вводное сообщение пользователю %s", uid)
+    except Exception:
+        logging.exception("Сбой в check_intro_nudges")
 
 
 async def _send_welcome_to(bot, user_id: int):
@@ -8287,6 +8410,7 @@ async def intro_continue(callback: CallbackQuery):
 
 def _intro_screen():
     enabled = _intro_enabled()
+    nudge_on = _intro_nudge_enabled()
     photo = "есть" if db.get_setting("intro_msg_photo") else "нет"
     preview = _plain_text(db.get_setting("intro_msg_text") or "")
     if len(preview) > 400:
@@ -8300,7 +8424,11 @@ def _intro_screen():
         f"Название кнопки: «{html.escape(db.get_setting('intro_msg_button') or '')}»\n"
         f"Пауза между приветствием и «Первым Касанием»: {_welcome_pause_seconds()} сек.\n"
         f"Картинка: {photo}\n\n"
-        f"Начало текста:\n{html.escape(preview)}"
+        f"Начало текста:\n{html.escape(preview)}\n\n"
+        "<b>Напоминание, если кнопку не нажали</b>\n"
+        "Один раз, мягким сообщением с такой же кнопкой, и только тому, кто после вводного сообщения "
+        "больше ничего не делал в боте. Идёт днём, с 9 до 21 по Киеву.\n"
+        f"Сейчас: {'включено ✅' if nudge_on else 'выключено 🚫'}, через {_intro_nudge_hours()} ч."
     )
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="🚫 Выключить" if enabled else "✅ Включить", callback_data="adm_intro_toggle")],
@@ -8308,6 +8436,11 @@ def _intro_screen():
         [InlineKeyboardButton(text="✏️ Название кнопки", callback_data="adm_intro_e_intro_msg_button")],
         [InlineKeyboardButton(text="⏱ Пауза перед «Первым Касанием»", callback_data="adm_intro_e_welcome_pause_seconds")],
         [InlineKeyboardButton(text="🖼 Картинка (необязательно)", callback_data="adm_intro_photo")],
+        [InlineKeyboardButton(
+            text="🚫 Выключить напоминание" if nudge_on else "✅ Включить напоминание", callback_data="adm_intro_nudge_toggle"
+        )],
+        [InlineKeyboardButton(text="✏️ Текст напоминания", callback_data="adm_intro_e_intro_nudge_text")],
+        [InlineKeyboardButton(text="⏱ Через сколько часов напомнить", callback_data="adm_intro_e_intro_nudge_hours")],
         [InlineKeyboardButton(text="⬅️ Назад", callback_data="adm_back")],
     ])
     return text, kb
@@ -8332,7 +8465,21 @@ async def adm_intro_toggle(callback: CallbackQuery):
     await callback.answer("Включено" if _intro_enabled() else "Выключено")
 
 
+@router.callback_query(F.data == "adm_intro_nudge_toggle")
+async def adm_intro_nudge_toggle(callback: CallbackQuery):
+    if not await _require_permission(callback, "adm_intro_message"):
+        return
+    db.set_setting("intro_nudge_enabled", "0" if _intro_nudge_enabled() else "1")
+    text, kb = _intro_screen()
+    await _edit_keep(callback, text, kb)
+    await callback.answer("Напоминание включено" if _intro_nudge_enabled() else "Напоминание выключено")
+
+
 INTRO_EDIT_PROMPTS = {
+    "intro_nudge_text": "Пришлите новый текст напоминания. Можно вставить {имя} (имя человека) и {кнопка} (название кнопки, "
+                        "как оно сейчас задано). Под сообщением автоматически будет такая же кнопка.",
+    "intro_nudge_hours": "Через сколько часов после вводного сообщения напоминать тому, кто не нажал кнопку? "
+                         "Пришлите число от 1 до 168. Отправляется только днём, с 9 до 21 по Киеву.",
     "intro_msg_text": "Пришлите новый текст сообщения. Можно вставить {имя} - подставится имя человека (именно фигурные скобки). "
                       "Жирный шрифт и курсив сохранятся, если выделите их прямо в Telegram.",
     "intro_msg_button": "Пришлите новое название кнопки (до 60 символов), например: Понятно. Продолжить ➡️",
@@ -8649,6 +8796,7 @@ async def main():
     scheduler.add_job(check_sanctum_reminders, "cron", hour=config.SANCTUM_REMINDER_HOUR, args=[bot])
     scheduler.add_job(check_reengagement, "cron", hour=config.SANCTUM_REMINDER_HOUR, minute=30, args=[bot])
     scheduler.add_job(check_webinar_reminders, "interval", minutes=15, args=[bot])
+    scheduler.add_job(check_intro_nudges, "interval", minutes=30, args=[bot])
     scheduler.add_job(check_intention_reminders, "cron", day="8,22", hour=11, args=[bot])
     scheduler.add_job(cleanup_feed_posts, "cron", hour=config.SANCTUM_REMINDER_HOUR, minute=45)
     # календарь ритуалов: 1-го числа в 11:11 по Киеву - календарь на месяц; каждое
