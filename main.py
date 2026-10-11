@@ -11,7 +11,8 @@ from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
 from aiogram import BaseMiddleware, Bot, Dispatcher, Router, F
-from aiogram.client.default import DefaultBotProperties
+from aiogram.client.default import Default, DefaultBotProperties
+from aiogram.client.session.middlewares.base import BaseRequestMiddleware
 from aiogram.enums import ParseMode
 from aiogram.exceptions import TelegramBadRequest
 from aiogram.dispatcher.event.bases import UNHANDLED
@@ -293,6 +294,24 @@ def _strip_html_tags(text: str) -> str:
     return _HTML_TAG_RE.sub("", text or "")
 
 
+class ProtectContentMiddleware(BaseRequestMiddleware):
+    """Общее правило защиты от копирования (с 2026-10-11): любое сообщение, которое бот отправляет
+    обычному человеку (не администратору) без явного указания, уходит с защитой от пересылки и
+    сохранения. Явное protect_content=False (например, «Мой профиль» с реферальной ссылкой) сохраняется.
+    Так защита не зависит от того, не забыли ли про неё в каком-то конкретном месте кода."""
+
+    async def __call__(self, make_request, bot, method):
+        try:
+            current = getattr(method, "protect_content", "нет поля")
+            if current != "нет поля" and (current is None or isinstance(current, Default)):
+                chat_id = getattr(method, "chat_id", None)
+                if isinstance(chat_id, int) and chat_id > 0 and not db.is_admin(chat_id):
+                    method.protect_content = True
+        except Exception:
+            logging.exception("Не удалось применить защиту от копирования")
+        return await make_request(bot, method)
+
+
 def _protect_for(user_id: int) -> bool:
     """Защиту от копирования включаем только обычным людям — админам (вам)
     тексты всегда остаются копируемыми, чтобы можно было спокойно работать
@@ -537,7 +556,7 @@ def _personal_link_kb(label: str):
 
 
 async def _send_with_optional_photo(
-    bot: Bot, user_id: int, text: str, photo: str, reply_markup=None, protect_content=False
+    bot: Bot, user_id: int, text: str, photo: str, reply_markup=None, protect_content=None
 ):
     """Текст-поздравление или рассылка; если задано фото - фото с подписью одним
     сообщением, а если текст длиннее подписи (1024 символа) - фото и полный
@@ -2153,7 +2172,8 @@ async def show_profile(message: Message):
 
     greeting = _personalize(db.get_setting("profile_greeting_text"), user_row)
     text = f"{greeting}\n\n" + "\n\n".join(blocks)
-    await message.answer(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=kb_rows))
+    # «Мой профиль» намеренно БЕЗ защиты: в нём реферальная ссылка, которую человек должен уметь скопировать
+    await message.answer(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=kb_rows), protect_content=False)
 
 
 # ---------- приём скриншота чека ----------
@@ -7025,7 +7045,7 @@ def _balance_html_chunks(chunks: list) -> list:
     return result
 
 
-async def _send_long(bot, chat_id: int, text: str, reply_markup=None, protect_content=False):
+async def _send_long(bot, chat_id: int, text: str, reply_markup=None, protect_content=None):
     """Длинный текст уходит несколькими сообщениями подряд (кнопки - под последним).
     Если Telegram не принял разметку, кусок уходит обычным текстом без тегов,
     а не пропадает."""
@@ -7042,12 +7062,12 @@ async def _send_long(bot, chat_id: int, text: str, reply_markup=None, protect_co
             )
 
 
-async def _answer_long(msg, text: str, reply_markup=None, protect_content=False):
+async def _answer_long(msg, text: str, reply_markup=None, protect_content=None):
     await _send_long(msg.bot, msg.chat.id, text, reply_markup=reply_markup, protect_content=protect_content)
 
 
 async def _send_media_with_text(bot, chat_id: int, kind: str, file_id: str, text: str,
-                                reply_markup=None, protect_content=False):
+                                reply_markup=None, protect_content=None):
     """Фото/видео с текстом. Подпись у Telegram - до 1024 видимых символов: короткий
     текст уходит подписью одним сообщением, длинный - сначала само фото/видео,
     а следом полный текст (несколькими сообщениями, если нужно)."""
@@ -7064,7 +7084,7 @@ async def _send_media_with_text(bot, chat_id: int, kind: str, file_id: str, text
         await _send_long(bot, chat_id, text, reply_markup=reply_markup, protect_content=protect_content)
 
 
-async def _send_album_with_text(bot, chat_id: int, file_ids: list, text: str, protect_content=False):
+async def _send_album_with_text(bot, chat_id: int, file_ids: list, text: str, protect_content=None):
     """Альбом из фото: подпись только у первого фото и только если она влезает
     в 1024 символа, иначе - альбом, а текст следом."""
     text = text or ""
@@ -8952,6 +8972,7 @@ async def main():
             logging.exception("Не удалось создать догоняющую резервную копию при старте")
 
     bot = Bot(token=config.BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
+    bot.session.middleware(ProtectContentMiddleware())
     dp = Dispatcher(storage=fsm_storage)
     dp.include_router(router)
 
