@@ -5616,6 +5616,13 @@ async def edit_field_value(message: Message, state: FSMContext):
             if "{имя}" not in value and "(имя)" in value:
                 reply += "\n\n⚠️ Вместо {имя} (фигурные скобки) написано (имя) - оно не заменится."
             await message.answer(reply, parse_mode=None)
+        elif field == "intro_already_text":
+            hint = value.strip()
+            if not hint or len(hint) > 200:
+                await message.answer("Подсказка - от 1 до 200 символов (это ограничение Telegram для всплывающих подсказок). Пришлите ещё раз или /cancel")
+                return
+            db.set_setting(field, hint)
+            await message.answer("Подсказка обновлена ✅")
         elif field in ("intro_nudge_hours", "name_nudge_hours"):
             try:
                 n = int(value.strip())
@@ -8267,6 +8274,15 @@ REQUEST_REQUISITES_LABEL = "💌 Запросить реквизиты у Алё
 _INTRO_RUNNING: set = set()
 
 
+INTRO_ALREADY_DEFAULT = "Вы уже на следующем шаге, листайте чат вниз 🌿"
+
+
+def _intro_already_text() -> str:
+    """Короткая всплывающая подсказка при повторном нажатии старой кнопки «Понятно»
+    (Telegram разрешает такой подсказке не больше 200 символов)."""
+    return ((db.get_setting("intro_already_text") or "").strip() or INTRO_ALREADY_DEFAULT)[:200]
+
+
 def _intro_enabled() -> bool:
     return (db.get_setting("intro_msg_enabled") or "1") == "1"
 
@@ -8434,12 +8450,14 @@ async def _send_payment_screenshot_hint(msg):
 @router.callback_query(F.data == "intro_continue")
 async def intro_continue(callback: CallbackQuery):
     user_id = callback.from_user.id
-    await callback.answer()
     user_row = db.get_user(user_id)
     # приветствие и «Первое Касание» приходят один раз: повторное нажатие
-    # (двойной тап, старое сообщение) ничего не дублирует
+    # (двойной тап, старое сообщение) ничего не дублирует, а человеку на секунду
+    # всплывает подсказка, что он уже на следующем шаге
     if user_id in _INTRO_RUNNING or (user_row and user_row["ritual_intro_shown_at"]):
+        await callback.answer(_intro_already_text())
         return
+    await callback.answer()
     _INTRO_RUNNING.add(user_id)
     try:
         try:
@@ -8467,7 +8485,8 @@ def _intro_screen():
         f"Сейчас: {'включено ✅' if enabled else 'выключено 🚫'}\n"
         f"Название кнопки: «{html.escape(db.get_setting('intro_msg_button') or '')}»\n"
         f"Пауза между приветствием и «Первым Касанием»: {_welcome_pause_seconds()} сек.\n"
-        f"Картинка: {photo}\n\n"
+        f"Картинка: {photo}\n"
+        f"Подсказка при повторном нажатии кнопки: «{html.escape(_intro_already_text())}»\n\n"
         f"Начало текста:\n{html.escape(preview)}\n\n"
         "<b>Напоминание, если кнопку не нажали</b>\n"
         "Один раз, мягким сообщением с такой же кнопкой, и только тому, кто после вводного сообщения "
@@ -8484,6 +8503,7 @@ def _intro_screen():
         [InlineKeyboardButton(text="✏️ Название кнопки", callback_data="adm_intro_e_intro_msg_button")],
         [InlineKeyboardButton(text="⏱ Пауза перед «Первым Касанием»", callback_data="adm_intro_e_welcome_pause_seconds")],
         [InlineKeyboardButton(text="🖼 Картинка (необязательно)", callback_data="adm_intro_photo")],
+        [InlineKeyboardButton(text="✏️ Подсказка при повторном нажатии", callback_data="adm_intro_e_intro_already_text")],
         [InlineKeyboardButton(
             text="🚫 Выключить напоминание" if nudge_on else "✅ Включить напоминание", callback_data="adm_intro_nudge_toggle"
         )],
@@ -8540,6 +8560,8 @@ async def adm_name_nudge_toggle(callback: CallbackQuery):
 
 
 INTRO_EDIT_PROMPTS = {
+    "intro_already_text": "Пришлите новый текст короткой подсказки, которая на секунду всплывает вверху экрана, если человек нажал "
+                          "кнопку «Понятно» повторно (приветствие он уже получил). До 200 символов, без форматирования.",
     "name_nudge_text": "Пришлите новый текст напоминания человеку, который не назвал имя. Кнопки под сообщением не будет: "
                        "человек отвечает текстом, поэтому в тексте лучше прямо попросить написать имя в строке сообщения. "
                        "Если нужно имя человека из профиля Telegram, можно вставить {имя}.",
