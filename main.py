@@ -976,6 +976,43 @@ def _name_question_text() -> str:
     return db.get_setting("name_question_text")
 
 
+NAME_STOP_REPLY_DEFAULT = (
+    "Благодарю Вас 🌿 Мне важно знать, как к Вам обращаться. "
+    "Напишите, пожалуйста, только Ваше имя в строке сообщения внизу экрана ⬇️"
+)
+
+
+def _norm_reply(text) -> str:
+    """Для сравнения со списком: маленькие буквы, «ё» как «е», без знаков и эмодзи, одинарные пробелы."""
+    t = (text or "").lower().replace("ё", "е")
+    t = re.sub(r"[^\w\s]|_", " ", t)
+    return " ".join(t.split())
+
+
+def _parse_word_list(raw: str) -> list:
+    """Слова и фразы из текста, разделённые переводом строки, запятой или точкой с запятой (без повторов)."""
+    out = []
+    for item in re.split(r"[\n,;]+", raw or ""):
+        item = item.strip()
+        if item and item not in out:
+            out.append(item)
+    return out
+
+
+def _is_non_name(text) -> bool:
+    """True, если весь ответ - слово из списка «не имя» (привет, да, старт...) или в нём нет ни одной
+    буквы и цифры (например, только эмодзи). Короткие имена и ники проходят."""
+    norm = _norm_reply(text)
+    if not norm:
+        return True
+    stop = {_norm_reply(w) for w in _parse_word_list(db.get_setting("name_stoplist") or "")}
+    return norm in stop
+
+
+def _name_stop_reply_text() -> str:
+    return (db.get_setting("name_stop_reply") or "").strip() or NAME_STOP_REPLY_DEFAULT
+
+
 async def _send_referral_welcome(message: Message, referrer):
     """Особый первый момент для тех, кто пришёл по реферальной ссылке — до
     вопроса об имени, отдельно от обычного сценария (см. обсуждение премиальных
@@ -1079,6 +1116,11 @@ async def on_my_chat_member_update(event: ChatMemberUpdated):
 async def name_received(message: Message, state: FSMContext):
     text = await _require_text(message)
     if text is None:
+        return
+    # «Привет», «Да», «Старт» и т.п. вместо имени не принимаем: мягко переспрашиваем,
+    # человек остаётся на этом же вопросе (список слов правится в админке)
+    if _is_non_name(text):
+        await _answer_long(message, _name_stop_reply_text())
         return
     db.set_preferred_name(message.from_user.id, text.strip())
     data = await state.get_data()
@@ -4046,6 +4088,7 @@ HTML_TRUSTED_FIELDS = {
     ("intro_setting", "intro_msg_text"),
     ("intro_setting", "intro_nudge_text"),
     ("intro_setting", "name_nudge_text"),
+    ("intro_setting", "name_stop_reply"),
     ("faq", "faq_text"),
     ("faq_suggestion_invite", "faq_suggestion_invite_text"),
     ("faq_suggestion_confirm", "faq_suggestion_confirm_text"),
@@ -5616,6 +5659,23 @@ async def edit_field_value(message: Message, state: FSMContext):
             if "{имя}" not in value and "(имя)" in value:
                 reply += "\n\n⚠️ Вместо {имя} (фигурные скобки) написано (имя) - оно не заменится."
             await message.answer(reply, parse_mode=None)
+        elif field == "name_stoplist":
+            raw = value.strip()
+            words = [] if raw in ("-", "—") else _parse_word_list(raw)
+            if len(words) > 300 or any(len(w) > 60 for w in words):
+                await message.answer("Слишком много или слишком длинные слова (не больше 300 слов, каждое до 60 символов). Пришлите ещё раз или /cancel")
+                return
+            db.set_setting(field, "\n".join(words))
+            if words:
+                await message.answer(f"Готово ✅ Слов в списке: {len(words)}. Если человек пришлёт на вопрос об имени ровно одно из них, бот мягко переспросит.")
+            else:
+                await message.answer("Список очищен: защита от «Привет» вместо имени выключена (кроме ответа вообще без букв, например, одних эмодзи).")
+        elif field == "name_stop_reply":
+            if not value.strip():
+                await message.answer("Текст не может быть пустым. Пришлите текст ещё раз или /cancel")
+                return
+            db.set_setting(field, value.strip())
+            await message.answer("Текст переспроса обновлён ✅")
         elif field == "intro_already_text":
             hint = value.strip()
             if not hint or len(hint) > 200:
@@ -8495,7 +8555,11 @@ def _intro_screen():
         "<b>Напоминание, если человек не назвал имя</b>\n"
         "Один раз, без кнопки: человек нажал «Старт», увидел вопрос «Как я могу к Вам обращаться?» и не ответил. "
         "Достаточно написать имя. Тоже днём, с 9 до 21 по Киеву.\n"
-        f"Сейчас: {'включено ✅' if name_on else 'выключено 🚫'}, через {_name_nudge_hours()} ч."
+        f"Сейчас: {'включено ✅' if name_on else 'выключено 🚫'}, через {_name_nudge_hours()} ч.\n\n"
+        "<b>Защита от «Привет» вместо имени</b>\n"
+        "Если на вопрос об имени пришло ровно слово из списка (привет, да, старт...), имя не запоминается, "
+        "бот мягко переспрашивает. Короткие имена и ники это не затрагивает.\n"
+        f"Слов в списке: {len(_parse_word_list(db.get_setting('name_stoplist') or ''))}"
     )
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="🚫 Выключить" if enabled else "✅ Включить", callback_data="adm_intro_toggle")],
@@ -8515,6 +8579,8 @@ def _intro_screen():
         )],
         [InlineKeyboardButton(text="✏️ Текст напоминания про имя", callback_data="adm_intro_e_name_nudge_text")],
         [InlineKeyboardButton(text="⏱ Через сколько часов (имя)", callback_data="adm_intro_e_name_nudge_hours")],
+        [InlineKeyboardButton(text="🛡 Слова, не принимаемые как имя", callback_data="adm_intro_e_name_stoplist")],
+        [InlineKeyboardButton(text="✏️ Переспрос, если прислали «Привет»", callback_data="adm_intro_e_name_stop_reply")],
         [InlineKeyboardButton(text="⬅️ Назад", callback_data="adm_back")],
     ])
     return text, kb
@@ -8560,6 +8626,12 @@ async def adm_name_nudge_toggle(callback: CallbackQuery):
 
 
 INTRO_EDIT_PROMPTS = {
+    "name_stoplist": "Пришлите новый список слов, которые НЕ принимаются как имя (по одному в строке или через запятую). "
+                     "Сравнивается весь ответ человека целиком, без учёта заглавных букв, знаков и эмодзи: например, "
+                     "«Привет!» совпадёт со словом «привет», а имя «Ева» или ник не пострадают. Можно добавлять и фразы. "
+                     "Чтобы выключить защиту, пришлите «-».",
+    "name_stop_reply": "Пришлите новый текст, которым бот ответит, если вместо имени пришло слово из списка (например, «Привет»). "
+                       "Человек при этом остаётся на вопросе об имени. Жирный шрифт и курсив сохранятся.",
     "intro_already_text": "Пришлите новый текст короткой подсказки, которая на секунду всплывает вверху экрана, если человек нажал "
                           "кнопку «Понятно» повторно (приветствие он уже получил). До 200 символов, без форматирования.",
     "name_nudge_text": "Пришлите новый текст напоминания человеку, который не назвал имя. Кнопки под сообщением не будет: "
