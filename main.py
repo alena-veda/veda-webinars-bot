@@ -2225,6 +2225,10 @@ async def _process_receipt_photo(message: Message, reg_id) -> bool:
         InlineKeyboardButton(text="❌ Отклонить", callback_data=f"reg_decline_{reg_id}"),
     ]])
     for admin_id in db.get_all_admin_ids():
+        # чеки приходят только владельцу и тем администраторам, кому Вы явно выдали право
+        # «Заявки на подтверждение» (по умолчанию помощникам оно не выдаётся)
+        if not db.has_permission(admin_id, "adm_pending"):
+            continue
         try:
             await message.bot.send_photo(admin_id, file_id, caption=caption, reply_markup=kb)
         except Exception:
@@ -2259,8 +2263,7 @@ async def _mark_admin_message_done(callback: CallbackQuery, note: str):
 
 @router.callback_query(F.data.startswith("reg_confirm_"))
 async def reg_confirm(callback: CallbackQuery):
-    if not db.is_admin(callback.from_user.id):
-        await callback.answer("Только для администраторов", show_alert=True)
+    if not await _require_permission(callback, "adm_pending"):
         return
     reg_id = int(callback.data.split("_")[-1])
     reg = db.get_registration(reg_id)
@@ -2340,8 +2343,7 @@ async def reg_confirm(callback: CallbackQuery):
 
 @router.callback_query(F.data.startswith("reg_decline_"))
 async def reg_decline(callback: CallbackQuery):
-    if not db.is_admin(callback.from_user.id):
-        await callback.answer("Только для администраторов", show_alert=True)
+    if not await _require_permission(callback, "adm_pending"):
         return
     reg_id = int(callback.data.split("_")[-1])
     reg = db.get_registration(reg_id)
@@ -4009,8 +4011,18 @@ async def adm_grant_access_finish(message: Message, state: FSMContext):
     if invite_link:
         user_text += f"\n\nВаша ссылка:\n{invite_link}"
 
+    # если внесён человек с уже закончившимся доступом, даём ему куда нажать: «Возобновить подписку»
+    # и (пока прежняя цена ещё сохраняется) «⏰ Оплачу позже»; при действующем доступе кнопок нет
+    grant_kb = None
+    if valid_until < _today():
+        grant_rows = [[InlineKeyboardButton(text="Возобновить подписку", callback_data="sanctum_apply")]]
+        grant_membership = db.get_sanctum_membership(target_user_id)
+        if grant_membership and _price_lock_deadline(grant_membership) and not _price_lock_expired(grant_membership):
+            grant_rows.append([InlineKeyboardButton(text="⏰ Оплачу позже", callback_data="sanctum_promise")])
+        grant_kb = InlineKeyboardMarkup(inline_keyboard=grant_rows)
+
     try:
-        await message.bot.send_message(target_user_id, user_text)
+        await message.bot.send_message(target_user_id, user_text, reply_markup=grant_kb)
         await message.answer(
             f"Готово ✅ Доступ выдан до {valid_until.strftime('%d.%m.%Y')} по цене {locked_price}, человек уведомлён."
         )
