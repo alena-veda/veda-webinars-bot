@@ -294,6 +294,45 @@ def _strip_html_tags(text: str) -> str:
     return _HTML_TAG_RE.sub("", text or "")
 
 
+def _support_admin_ids() -> list:
+    """Кому приходят обращения людей («Написать куратору», вопросы под вебинарами и публикациями): владельцу и
+    администраторам, которым Вы выдали право «Обращения людей». Остальным администраторам обращения не приходят."""
+    return [a for a in db.get_all_admin_ids() if db.has_permission(a, "adm_support")]
+
+
+def _support_signature() -> str:
+    return (db.get_setting("support_signature_text") or "").strip()
+
+
+def _support_btn(callback_data: str = "contact_admin") -> InlineKeyboardButton:
+    return InlineKeyboardButton(text=db.get_setting("support_btn_text") or "💬 Написать куратору", callback_data=callback_data)
+
+
+async def _send_staff_reply(message: Message, target_user_id: int):
+    """Ответ человеку. Ответ владельца уходит как есть. Ответ помощника (не владельца) подписывается
+    («— Ваш Куратор» по умолчанию, текст правится в админке), чтобы человек понимал, кто ему пишет."""
+    bot = message.bot
+    sig = "" if db.is_owner(message.from_user.id) else _support_signature()
+    if not sig:
+        await bot.copy_message(chat_id=target_user_id, from_chat_id=message.chat.id, message_id=message.message_id)
+        return
+    sig_html = html.escape(sig)
+    body = message.html_text or ""
+    if message.text:
+        await _send_long(bot, target_user_id, f"{body}\n\n{sig_html}")
+        return
+    # фото, видео, файл, голосовое: подпись добавляется к подписи; кружок и стикер без подписи - подписью отдельной строкой
+    has_caption = any([message.photo, message.video, message.document, message.voice, message.audio, message.animation])
+    if has_caption and _visible_len(body) + len(sig) + 2 <= CAPTION_LIMIT:
+        await bot.copy_message(
+            chat_id=target_user_id, from_chat_id=message.chat.id, message_id=message.message_id,
+            caption=(f"{body}\n\n{sig_html}" if body else sig_html), parse_mode="HTML",
+        )
+        return
+    await bot.copy_message(chat_id=target_user_id, from_chat_id=message.chat.id, message_id=message.message_id)
+    await bot.send_message(target_user_id, sig_html)
+
+
 class ProtectContentMiddleware(BaseRequestMiddleware):
     """Общее правило защиты от копирования (с 2026-10-11): любое сообщение, которое бот отправляет
     обычному человеку (не администратору) без явного указания, уходит с защитой от пересылки и
@@ -394,6 +433,30 @@ def _return_kb(with_promise: bool = False) -> InlineKeyboardMarkup:
     if with_promise:
         rows.append([InlineKeyboardButton(text="⏰ Оплачу позже - назначить дату", callback_data="sanctum_promise")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def _expired_screen_text(user_id: int, membership, price: str):
+    """Текст «Доступ закончился {дата}... Хотите возобновить?» с правильной строкой про цену: «прежняя цена
+    сохраняется до ...», пока она ещё сохраняется, иначе - текущая цена. Один и тот же текст показывается на
+    экране Sanctum и в сообщении при ручном внесении просроченного участника. Возвращает (текст, цена_сохраняется)."""
+    valid_until = _parse_date(membership["valid_until"]) if membership["valid_until"] else None
+    date_part = f" {valid_until.strftime('%d.%m.%Y')}" if valid_until else ""
+    deadline = _price_lock_deadline(membership)
+    price_locked = bool(deadline and not _price_lock_expired(membership))
+    if price_locked:
+        price_line = (
+            db.get_setting("sanctum_price_locked_line")
+            .replace("{цена}", price)
+            .replace("{дата_до}", _fmt_date(deadline))
+        )
+    else:
+        price_line = db.get_setting("sanctum_price_current_line").replace("{цена}", _price_for_user(user_id))
+    text = (
+        db.get_setting("sanctum_expired_text")
+        .replace("{дата_часть}", date_part)
+        .replace("{строка_цены}", price_line)
+    )
+    return text, price_locked
 
 
 def _promise_active(membership) -> bool:
@@ -838,6 +901,7 @@ ADMIN_PERMISSION_SECTIONS = [
     ("👥 Люди", [
         ("adm_users_list", "👥 Подписчики бота (блокировка - прямо там)"),
         ("adm_newcomers", "🌱 Новички: не назвали имя (и уведомления о новичках)"),
+        ("adm_support", "💬 Обращения людей: получать и отвечать как куратор"),
         ("adm_admins", "👥 Администраторы"),
     ]),
 ]
@@ -1440,22 +1504,7 @@ async def show_sanctum(message: Message, user_id: int = None):
             )
             button_text = "Продлить"
         else:
-            date_part = f" {valid_until.strftime('%d.%m.%Y')}" if valid_until else ""
-            deadline = _price_lock_deadline(membership)
-            price_locked = bool(deadline and not _price_lock_expired(membership))
-            if price_locked:
-                price_line = (
-                    db.get_setting("sanctum_price_locked_line")
-                    .replace("{цена}", price)
-                    .replace("{дата_до}", _fmt_date(deadline))
-                )
-            else:
-                price_line = db.get_setting("sanctum_price_current_line").replace("{цена}", _price_for_user(user_id))
-            text = (
-                db.get_setting("sanctum_expired_text")
-                .replace("{дата_часть}", date_part)
-                .replace("{строка_цены}", price_line)
-            )
+            text, price_locked = _expired_screen_text(user_id, membership, price)
             button_text = "Возобновить"
         rows = [[InlineKeyboardButton(text=button_text, callback_data="sanctum_apply")]]
         # "Оплачу позже" имеет смысл показывать только пока цена ещё правда
@@ -1531,7 +1580,8 @@ async def sanctum_laws(callback: CallbackQuery):
     if ritual_line:
         text += "\n\n" + ritual_line
     kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="Хочу оплатить подписку", callback_data="sanctum_apply")]
+        [InlineKeyboardButton(text="Хочу оплатить подписку", callback_data="sanctum_apply")],
+        [_ritual_calendar_btn(from_laws=True)],
     ])
     await _answer_long(callback.message, text, reply_markup=kb, protect_content=_protect_for(callback.from_user.id))
     await callback.answer()
@@ -1568,6 +1618,12 @@ async def sanctum_apply(callback: CallbackQuery, state: FSMContext):
     personal_kb = _personal_link_kb(REQUEST_REQUISITES_LABEL)
     if personal_kb:
         kb_rows.extend(personal_kb.inline_keyboard)
+    # тем, кто уже был в Sanctum (есть закреплённая цена), даём «Оплачу позже» прямо здесь, если дату ещё
+    # можно назвать (та же граница, что в sanctum_promise_date); у новичков такой кнопки нет
+    if membership and membership["status"] != "removed" and not membership["lifetime_free"]:
+        promise_latest = _promise_latest_date(membership)
+        if promise_latest and promise_latest >= _today():
+            kb_rows.append([InlineKeyboardButton(text="⏰ Оплачу позже", callback_data="sanctum_promise")])
     kb_rows.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="sanctum_back")])
     text = (
         db.get_setting("sanctum_payment_instructions_text")
@@ -1696,6 +1752,7 @@ def _info_menu_kb() -> InlineKeyboardMarkup:
         [InlineKeyboardButton(text="❓ Частые вопросы", callback_data="open_faq")],
         [InlineKeyboardButton(text="📜 Правила пространства", callback_data="open_rules")],
         [InlineKeyboardButton(text="🧭 Как пользоваться", callback_data="open_bot_guide")],
+        [_support_btn()],
         [_ritual_calendar_btn()],
     ])
 
@@ -1703,7 +1760,7 @@ def _info_menu_kb() -> InlineKeyboardMarkup:
 @router.callback_query(F.data == "open_bot_guide")
 async def open_bot_guide_cb(callback: CallbackQuery):
     kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="💌 Личное обращение", callback_data="contact_admin")],
+        [_support_btn()],
         [InlineKeyboardButton(text="⬅️ Назад", callback_data="info_menu_back")],
     ])
     await _send_long(
@@ -2373,7 +2430,7 @@ def _receipt_help_kb(reg_id: int) -> InlineKeyboardMarkup:
     заявку, а довозвращая именно эту в очередь на проверку."""
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="📸 Отправить чек", callback_data=f"resend_receipt_{reg_id}")],
-        [InlineKeyboardButton(text="💌 Личное обращение", callback_data="contact_admin")],
+        [_support_btn()],
     ])
 
 
@@ -2416,7 +2473,7 @@ async def contact_admin_received(message: Message, state: FSMContext):
         InlineKeyboardButton(text="👤 Профиль", callback_data=f"adm_user_view_{user.id}"),
     ]])
     delivered = False
-    for admin_id in db.get_all_admin_ids():
+    for admin_id in _support_admin_ids():
         try:
             await message.bot.send_message(admin_id, header, reply_markup=kb)
             await message.bot.copy_message(chat_id=admin_id, from_chat_id=message.chat.id, message_id=message.message_id)
@@ -2431,8 +2488,7 @@ async def contact_admin_received(message: Message, state: FSMContext):
 
 @router.callback_query(F.data.startswith("admin_reply_"))
 async def admin_reply_start(callback: CallbackQuery, state: FSMContext):
-    if not db.is_admin(callback.from_user.id):
-        await callback.answer("Только для администраторов", show_alert=True)
+    if not await _require_permission(callback, "adm_support"):
         return
     target_user_id = int(callback.data[len("admin_reply_"):])
     target_row = db.get_user(target_user_id)
@@ -2445,13 +2501,13 @@ async def admin_reply_start(callback: CallbackQuery, state: FSMContext):
 
 @router.message(AdminReplyStates.waiting_reply)
 async def admin_reply_send(message: Message, state: FSMContext):
-    if not db.is_admin(message.from_user.id):
+    if not db.has_permission(message.from_user.id, "adm_support"):
         return
     data = await state.get_data()
     target_user_id = data.get("target_user_id")
     await state.clear()
     try:
-        await message.bot.copy_message(chat_id=target_user_id, from_chat_id=message.chat.id, message_id=message.message_id)
+        await _send_staff_reply(message, target_user_id)
         await message.answer("Ответ отправлен ✅")
     except Exception:
         logging.exception("Не удалось отправить ответ пользователю %s", target_user_id)
@@ -2518,7 +2574,7 @@ async def question_received(message: Message, state: FSMContext):
         InlineKeyboardButton(text="👤 Профиль", callback_data=f"adm_user_view_{message.from_user.id}"),
     ]])
     delivered = False
-    for admin_id in db.get_all_admin_ids():
+    for admin_id in _support_admin_ids():
         try:
             await message.bot.send_message(admin_id, header, reply_markup=kb)
             delivered = True
@@ -2532,8 +2588,7 @@ async def question_received(message: Message, state: FSMContext):
 
 @router.callback_query(F.data.startswith("q_answer_"))
 async def q_answer_start(callback: CallbackQuery, state: FSMContext):
-    if not db.is_admin(callback.from_user.id):
-        await callback.answer("Только для администраторов", show_alert=True)
+    if not await _require_permission(callback, "adm_support"):
         return
     q_id = int(callback.data[len("q_answer_"):])
     q = db.get_question(q_id)
@@ -2572,6 +2627,8 @@ async def _q_answer_finalize(callback: CallbackQuery, state: FSMContext, is_publ
     db.set_question_answer(q_id, answer_text, is_public)
     try:
         answer_msg = db.get_setting("question_answer_prefix_text").replace("{ответ}", answer_text)
+        if not db.is_owner(callback.from_user.id) and _support_signature():
+            answer_msg += "\n\n" + html.escape(_support_signature())
         await callback.bot.send_message(q["user_id"], answer_msg)
     except Exception:
         logging.exception("Не удалось отправить ответ на вопрос пользователю %s", q["user_id"])
@@ -3009,7 +3066,7 @@ async def send_weekly_health_digest(bot: Bot):
 # ---------- админ-панель: автовозврат "потерянных" людей ----------
 
 REENGAGE_FIELD_LABELS = {
-    "stall_text": "текст «завис на оплате» - независимый случай, ждёт чек дольше срока (⏱ ниже). Кнопки: «📸 Отправить чек» и «💌 Личное обращение»",
+    "stall_text": "текст «завис на оплате» - независимый случай, ждёт чек дольше срока (⏱ ниже). Кнопки: «📸 Отправить чек» и «💬 Написать куратору»",
     "reengage_text": "текст «пришёл и пропал» - независимый случай, ни разу ничего не покупал и молчит. Кнопка «🧘🏽‍♀️ Перейти в VEDA HEALING FLOW» - и само это напоминание отправляется, только если ссылка на бот медитаций уже задана (иначе не уходит вообще никому)",
     "winback_text": "текст «возврат после ухода из Sanctum» - независимый случай, был в Sanctum и не продлил. Кнопки: «Желаю войти вновь» и «⏰ Оплачу позже»",
     "sanctum_nudge_text": "текст «посмотрел, не начал» - независимый случай, открыл Sanctum, но не нажал оплату (приходит ВМЕСТО «пришёл и пропал»). Кнопка «⚜️ Вернуться к VEDA SANCTUM»",
@@ -4011,13 +4068,16 @@ async def adm_grant_access_finish(message: Message, state: FSMContext):
     if invite_link:
         user_text += f"\n\nВаша ссылка:\n{invite_link}"
 
-    # если внесён человек с уже закончившимся доступом, даём ему куда нажать: «Возобновить подписку»
-    # и (пока прежняя цена ещё сохраняется) «⏰ Оплачу позже»; при действующем доступе кнопок нет
+    # если внесён человек с уже закончившимся доступом: вместо «Вам открыт доступ до (прошедшей даты)» он видит
+    # тот же текст, что на экране «Доступ закончился» («Ваш доступ закончился {дата}... Хотите возобновить?»,
+    # с правильной строкой про цену), без ссылки на канал, и кнопки «Возобновить подписку» и (пока прежняя
+    # цена ещё сохраняется) «⏰ Оплачу позже»; при действующем доступе остаётся прежнее сообщение без кнопок
     grant_kb = None
     if valid_until < _today():
-        grant_rows = [[InlineKeyboardButton(text="Возобновить подписку", callback_data="sanctum_apply")]]
         grant_membership = db.get_sanctum_membership(target_user_id)
-        if grant_membership and _price_lock_deadline(grant_membership) and not _price_lock_expired(grant_membership):
+        user_text, grant_locked = _expired_screen_text(target_user_id, grant_membership, locked_price)
+        grant_rows = [[InlineKeyboardButton(text="Возобновить подписку", callback_data="sanctum_apply")]]
+        if grant_locked:
             grant_rows.append([InlineKeyboardButton(text="⏰ Оплачу позже", callback_data="sanctum_promise")])
         grant_kb = InlineKeyboardMarkup(inline_keyboard=grant_rows)
 
@@ -4310,7 +4370,7 @@ PAYMENT_FLOW_TEXT_LABELS = {
     "receipt_wrong_type_text": "1б) если прислали не фото, а что-то другое, пока бот ждёт чек - просит прислать ещё раз. Без кнопок",
     "payment_confirmed_text": "2) начало сообщения о подтверждённой оплате - приходит, когда ВЫ нажимаете «✅ Подтвердить» в «🧾 Заявки на подтверждение». Кнопка «🌙 Календарь ритуалов» - только при самой первой оплате Sanctum и только если задана строка «ritual_paid_line» (раздел «🌙 Календарь ритуалов» → «Тексты календаря»); во всех остальных случаях - без кнопок",
     "payment_confirmed_sanctum_line": "2а) добавка к сообщению выше, только для Sanctum (дата и цена подписки) - своей отдельной кнопки не добавляет",
-    "payment_declined_text": "2б) сообщение, если Вы вместо этого нажали «❌ Отклонить» - альтернатива подтверждению выше. Кнопки: «📸 Отправить чек» и «💌 Личное обращение»",
+    "payment_declined_text": "2б) сообщение, если Вы вместо этого нажали «❌ Отклонить» - альтернатива подтверждению выше. Кнопки: «📸 Отправить чек» и «💬 Написать куратору»",
     "resend_receipt_not_found_text": "после отказа человек может нажать «📸 Отправить чек» ещё раз - это если заявка вдруг не найдена (сбой). Всплывающая подсказка (alert) - кнопок нет",
     "resend_receipt_already_confirmed_text": "если оплата уже успела подтвердиться, пока он жал кнопку - редкий случай. Всплывающая подсказка (alert) - кнопок нет",
     "resend_receipt_already_sent_text": "если чек уже отправлен и ждёт проверки - предупреждение вместо повтора. Всплывающая подсказка (alert) - кнопок нет",
@@ -4506,8 +4566,10 @@ GENERAL_SCREEN_TEXT_LABELS = {
     "feed_empty_text": "если в архиве публикаций пока пусто - альтернатива вступлению выше. Без кнопок",
     "feed_month_empty_text": "если в выбранном месяце публикаций больше нет. Всплывающая подсказка (alert) - кнопок нет",
     "feed_post_not_found_text": "если публикация не найдена (удалена). Всплывающая подсказка (alert) - кнопок нет",
-    "contact_admin_prompt_text": "приглашение написать «💌 Личное обращение» - после него человек пишет сообщение, дальше уходит одно из двух ниже. Без кнопок",
+    "contact_admin_prompt_text": "приглашение написать «💬 Написать куратору» - после него человек пишет сообщение, дальше уходит одно из двух ниже. Без кнопок",
     "contact_admin_thanks_text": "подтверждение, что сообщение передано - приходит СРАЗУ ПОСЛЕ того, как человек написал (обычный исход). Без кнопок",
+    "support_btn_text": "название кнопки, по которой человек пишет куратору прямо в боте (стоит в «Инфо», «Как пользоваться» и под напоминаниями об оплате). Это название кнопки, а не сообщение",
+    "support_signature_text": "подпись, которая добавляется к ответам помощника (администратора с правом «Обращения людей»). Ваши ответы идут без подписи",
     "contact_admin_failed_text": "если передать не удалось (сбой) - редкая альтернатива подтверждению выше. Без кнопок",
     "question_unavailable_text": "если вопросы под вебинаром/публикацией выключены - вместо приглашения написать вопрос. Всплывающая подсказка (alert) - кнопок нет",
     "question_prompt_text": "приглашение написать вопрос под вебинаром/публикацией - после него человек пишет вопрос, дальше уходит одно из двух ниже. Без кнопок",
@@ -4532,7 +4594,7 @@ async def adm_general_screen_texts(callback: CallbackQuery):
         "<b>✏️ Прочие тексты (общие, архив, вопросы)</b>\n\n"
         "Технические и служебные сообщения бота, которые не попали в другие разделы - "
         "приветственные подсказки, архив публикаций, вопросы под постами, обращение "
-        "«💌 Личное обращение». Намерение ступени «Искра» - в своём разделе "
+        "«💬 Написать куратору». Намерение ступени «Искра» - в своём разделе "
         "«🕯 Тексты о намерении».\n\n"
         "Нажмите на нужный текст ниже, чтобы отредактировать."
     )
@@ -5273,33 +5335,101 @@ async def _render_user_detail(callback: CallbackQuery, user_id: int):
         text += f"\n🕓 Последнее действие: {html.escape(u['last_action'])} ({_fmt_action_time(u['last_action_at'])})"
     else:
         text += "\n🕓 Последнее действие: нет данных (записывается с версии от 10.10.2026)"
+    membership = db.get_sanctum_membership(user_id)
+    if membership and membership["status"] != "removed":
+        acc_days = membership["accumulated_days"] or 0
+        valid_text = _fmt_date(_parse_date(membership["valid_until"])) if membership["valid_until"] else "-"
+        text += (
+            f"\n⚜️ Sanctum: доступ до {valid_text}, накоплено {acc_days} дн. (~{acc_days / 30:.1f} мес.), "
+            f"ступень «{_ascension_level_name(compute_ascension_level(user_id))}»"
+        )
+    elif membership:
+        text += "\n⚜️ Sanctum: убран из подписчиков"
+    viewer = callback.from_user.id
+    can_manage = db.has_permission(viewer, "adm_users_list")
     block_label = "✅ Разблокировать" if u["blocked"] else "🚫 Заблокировать"
     meditation_label = "↩️ Снять отметку VEDA HEALING FLOW" if u["bought_meditation_bot"] else "🧘 Отметить покупку VEDA HEALING FLOW"
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="✍️ Написать", callback_data=f"admin_reply_{user_id}")],
-        [InlineKeyboardButton(text=meditation_label, callback_data=f"adm_user_meditation_toggle_{user_id}")],
-        [InlineKeyboardButton(text=block_label, callback_data=f"adm_user_toggle_{user_id}")],
-        [InlineKeyboardButton(text="🔄 Обнулить только имя (заново познакомится)", callback_data=f"adm_user_reset_{user_id}")],
-        [InlineKeyboardButton(
+    rows = []
+    # кнопки видны по правам: «Написать» - тем, кто отвечает людям; остальное - тем, у кого есть список
+    # подписчиков; «Изменить дни» - тем, кто может выдавать доступ (владелец имеет всё)
+    if db.has_permission(viewer, "adm_support"):
+        rows.append([InlineKeyboardButton(text="✍️ Написать", callback_data=f"admin_reply_{user_id}")])
+    if can_manage:
+        rows.append([InlineKeyboardButton(text=meditation_label, callback_data=f"adm_user_meditation_toggle_{user_id}")])
+        rows.append([InlineKeyboardButton(text=block_label, callback_data=f"adm_user_toggle_{user_id}")])
+        rows.append([InlineKeyboardButton(text="🔄 Обнулить только имя (заново познакомится)", callback_data=f"adm_user_reset_{user_id}")])
+    if membership and membership["status"] != "removed" and db.has_permission(viewer, "adm_grant_access"):
+        rows.append([InlineKeyboardButton(text="📅 Изменить накопленные дни в Sanctum", callback_data=f"adm_user_days_{user_id}")])
+    if can_manage:
+        rows.append([InlineKeyboardButton(
             text="⬅️ К списку", callback_data=f"adm_pg_ul_{_recall_page(callback.from_user.id, 'ul')}"
-        )],
-    ])
-    await callback.message.edit_text(text, reply_markup=kb)
+        )])
+    await callback.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=rows) if rows else None)
 
 
 @router.callback_query(F.data.startswith("adm_user_view_"))
 async def adm_user_view(callback: CallbackQuery):
-    if not db.is_admin(callback.from_user.id):
-        await callback.answer("Только для администраторов", show_alert=True)
+    if not (db.has_permission(callback.from_user.id, "adm_users_list") or db.has_permission(callback.from_user.id, "adm_support")):
+        await callback.answer("У Вас нет доступа к этому разделу", show_alert=True)
         return
     await _render_user_detail(callback, int(callback.data.split("_")[-1]))
     await callback.answer()
 
 
+class EditDaysStates(StatesGroup):
+    waiting_days = State()
+
+
+@router.callback_query(F.data.startswith("adm_user_days_"))
+async def adm_user_days_start(callback: CallbackQuery, state: FSMContext):
+    if not await _require_permission(callback, "adm_grant_access"):
+        return
+    user_id = int(callback.data[len("adm_user_days_"):])
+    membership = db.get_sanctum_membership(user_id)
+    if not membership or membership["status"] == "removed":
+        await callback.answer("У этого человека нет действующей записи в Sanctum", show_alert=True)
+        return
+    days = membership["accumulated_days"] or 0
+    await state.set_state(EditDaysStates.waiting_days)
+    await state.update_data(target_user_id=user_id)
+    await callback.message.answer(
+        f"Сейчас у человека накоплено {days} дн. (~{days / 30:.1f} мес.), ступень "
+        f"«{_ascension_level_name(compute_ascension_level(user_id))}».\n\n"
+        "Пришлите новое число дней целым числом (например: 61). Ступень пересчитается сама. "
+        "Если число поднимет человека на новую ступень, он получит поздравление. /cancel - отмена."
+    )
+    await callback.answer()
+
+
+@router.message(EditDaysStates.waiting_days)
+async def adm_user_days_value(message: Message, state: FSMContext):
+    if not db.has_permission(message.from_user.id, "adm_grant_access"):
+        return
+    text = await _require_text(message)
+    if text is None:
+        return
+    try:
+        days = int(text.strip())
+        if days < 0 or days > 3650:
+            raise ValueError
+    except ValueError:
+        await message.answer("Нужно целое число дней от 0 до 3650 (например, 61). Пришлите ещё раз или /cancel")
+        return
+    data = await state.get_data()
+    user_id = data["target_user_id"]
+    await state.clear()
+    old_level = compute_ascension_level(user_id)
+    db.set_accumulated_days(user_id, days)
+    new_level = compute_ascension_level(user_id)
+    await message.answer(
+        f"Готово ✅ Накоплено {days} дн. (~{days / 30:.1f} мес.), ступень «{_ascension_level_name(new_level)}»."
+    )
+    await _handle_ascension_transition(message.bot, user_id, old_level, new_level)
+
+
 @router.callback_query(F.data.startswith("adm_user_toggle_"))
 async def adm_user_toggle(callback: CallbackQuery):
-    if not db.is_admin(callback.from_user.id):
-        await callback.answer("Только для администраторов", show_alert=True)
+    if not await _require_permission(callback, "adm_users_list"):
         return
     user_id = int(callback.data.split("_")[-1])
     now_blocked = not db.is_user_blocked(user_id)
@@ -5315,8 +5445,7 @@ async def adm_user_meditation_toggle(callback: CallbackQuery):
     вручную, когда Вы узнали об оплате (из того бота или от самого человека).
     Влияет на 3-ю ступень Пути (см. compute_ascension_level), поэтому при
     появлении отметки сразу проверяем, не открылась ли она."""
-    if not db.is_admin(callback.from_user.id):
-        await callback.answer("Только для администраторов", show_alert=True)
+    if not await _require_permission(callback, "adm_users_list"):
         return
     user_id = int(callback.data[len("adm_user_meditation_toggle_"):])
     u = db.get_user(user_id)
@@ -5338,8 +5467,7 @@ async def adm_user_meditation_toggle(callback: CallbackQuery):
 
 @router.callback_query(F.data.startswith("adm_user_reset_"))
 async def adm_user_reset(callback: CallbackQuery):
-    if not db.is_admin(callback.from_user.id):
-        await callback.answer("Только для администраторов", show_alert=True)
+    if not await _require_permission(callback, "adm_users_list"):
         return
     user_id = int(callback.data.split("_")[-1])
     db.reset_user_onboarding(user_id)
@@ -6773,10 +6901,7 @@ async def check_reengagement(bot: Bot):
     # ежемесячная рассылка и всё остальное), просто отмечаем и не беспокоим.
     if (db.get_setting("ritual_nudge_enabled") or "1") == "1":
         nudge_days = int(db.get_setting("ritual_nudge_days") or "3")
-        ritual_teaser_kb = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="⚜️ Что такое VEDA SANCTUM", callback_data="open_sanctum")],
-            [InlineKeyboardButton(text="Оформить подписку", callback_data="sanctum_apply")],
-        ])
+        ritual_teaser_kb = _ritual_teaser_kb()
         for user_row in rituals.get_users_due_for_ritual_nudge(nudge_days):
             if _ritual_is_member(user_row["user_id"]):
                 rituals.mark_ritual_nudge_sent(user_row["user_id"])
@@ -6971,8 +7096,20 @@ def _ritual_is_member(user_id: int) -> bool:
     return bool(valid_until and valid_until >= _today())
 
 
-def _ritual_calendar_btn(text: str = "🌙 Календарь ритуалов") -> InlineKeyboardButton:
-    return InlineKeyboardButton(text=text, callback_data="rit_open")
+def _ritual_calendar_btn(text: str = "🌙 Календарь ритуалов", from_laws: bool = False) -> InlineKeyboardButton:
+    # "rit_open_s" - календарь, открытый с экрана законов Sanctum (человек только что прочитал о Sanctum)
+    return InlineKeyboardButton(text=text, callback_data="rit_open_s" if from_laws else "rit_open")
+
+
+def _ritual_teaser_kb(from_laws: bool = False) -> InlineKeyboardMarkup:
+    """Кнопки под текстом «календарь только для участников»: «Хочу оплатить подписку» (ведёт сразу на оплату)
+    и, чтобы перечитать, «Что такое VEDA SANCTUM». С экрана законов человек только что всё прочитал,
+    поэтому там остаётся одна кнопка оплаты."""
+    rows = []
+    if not from_laws:
+        rows.append([InlineKeyboardButton(text="⚜️ Что такое VEDA SANCTUM", callback_data="open_sanctum")])
+    rows.append([InlineKeyboardButton(text="Хочу оплатить подписку", callback_data="sanctum_apply")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 def _ritual_kb(ym: str, user_row) -> InlineKeyboardMarkup:
@@ -7147,7 +7284,7 @@ def _ritual_two_months():
     return first.strftime("%Y-%m"), nxt.strftime("%Y-%m")
 
 
-@router.callback_query(F.data == "rit_open")
+@router.callback_query(F.data.in_({"rit_open", "rit_open_s"}))
 async def ritual_open(callback: CallbackQuery):
     user_id = callback.from_user.id
     # человек сам открыл календарь - откуда угодно; одноразовое напоминание
@@ -7156,11 +7293,8 @@ async def ritual_open(callback: CallbackQuery):
     if not _ritual_is_member(user_id):
         text = db.get_setting("ritual_teaser_text")
         # "sanctum_apply" - тот же самый обработчик, что и на экране законов
-        # (кнопка "Инициировать шаг") - ведёт сразу к оплате, минуя манифест
-        kb = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="⚜️ Что такое VEDA SANCTUM", callback_data="open_sanctum")],
-            [InlineKeyboardButton(text="Оформить подписку", callback_data="sanctum_apply")],
-        ])
+        # (кнопка "Хочу оплатить подписку") - ведёт сразу к оплате, минуя манифест
+        kb = _ritual_teaser_kb(from_laws=callback.data == "rit_open_s")
         await callback.message.answer(text, reply_markup=kb, protect_content=_protect_for(user_id))
         await callback.answer()
         return
@@ -8511,14 +8645,13 @@ async def _typing_pause(bot, chat_id: int, seconds: int):
 
 
 async def _send_first_touch(bot, user_id: int):
-    """«Первое Касание» - одноразовое сообщение настоящим новичкам. Кнопки: сначала
-    «Что такое VEDA SANCTUM» (следующий шаг к подписке), затем «Календарь ритуалов»."""
+    """«Первое Касание» - одноразовое сообщение настоящим новичкам. Одна кнопка «Что такое VEDA SANCTUM»
+    (следующий шаг к подписке); календарь ритуалов человек увидит позже, на экране законов Sanctum."""
     user_row = db.get_user(user_id)
     text = db.get_setting(ASCENSION_TEXT_KEYS[1])
     photo = db.get_setting("ascension_level1_photo")
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="⚜️ Что такое VEDA SANCTUM", callback_data="open_sanctum")],
-        [_ritual_calendar_btn()],
     ])
     await _send_with_optional_photo(bot, user_id, _personalize(text, user_row), photo, kb)
     # запоминаем момент показа: если человек ни разу не откроет календарь ни
@@ -8859,6 +8992,35 @@ async def adm_newcomers(callback: CallbackQuery):
         return
     text, kb, page = _build_newcomers_view(0)
     _remember_page(callback.from_user.id, "nc", page)
+    await _edit_keep(callback, text, kb)
+    await callback.answer()
+
+
+@router.callback_query(F.data == "adm_support")
+async def adm_support(callback: CallbackQuery):
+    if not await _require_permission(callback, "adm_support"):
+        return
+    names = []
+    for admin_id in _support_admin_ids():
+        row = db.get_user(admin_id)
+        label = _user_display_name(row) if row else str(admin_id)
+        names.append(f"• {html.escape(label)}" + (" (владелец)" if db.is_owner(admin_id) else ""))
+    text = (
+        "<b>💬 Обращения людей</b>\n\n"
+        f"Кнопка для людей: «{html.escape(db.get_setting('support_btn_text') or '')}» (в «Инфо», в «Как пользоваться» "
+        "и под напоминаниями об оплате). Человек пишет прямо в боте, одним сообщением в строке внизу экрана, "
+        "а ответ получает здесь же, в чате с ботом.\n\n"
+        "Сообщения людей приходят владельцу и тем администраторам, у кого включено право «Обращения людей» "
+        "(👥 Администраторы → права). Ответ помощника подписывается: "
+        f"«{html.escape(_support_signature())}». Ваши ответы идут без подписи.\n\n"
+        "Чеки об оплате к этому не относятся: они приходят только владельцу и тем, у кого есть право "
+        "«Заявки на подтверждение».\n\n"
+        "Сейчас обращения получают:\n" + "\n".join(names)
+    )
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="✏️ Название кнопки, подпись и тексты обращения", callback_data="adm_general_screen_texts")],
+        [InlineKeyboardButton(text="⬅️ Назад", callback_data="adm_back")],
+    ])
     await _edit_keep(callback, text, kb)
     await callback.answer()
 

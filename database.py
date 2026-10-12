@@ -1172,6 +1172,8 @@ def init_db():
             "Писать ничего не нужно."
         ),
         "intro_already_text": "Вы уже на следующем шаге, листайте чат вниз 🌿",
+        "support_signature_text": "— Ваш Куратор",
+        "support_btn_text": "💬 Написать куратору",
         "name_stoplist": (
             "привет\nприветик\nприветствую\nздравствуйте\nздравствуй\nздрасте\nздрасьте\n"
             "добрый день\nдобрый вечер\nдоброе утро\nдоброй ночи\nдень добрый\nдоброго времени суток\n"
@@ -1209,6 +1211,17 @@ def init_db():
             "WHERE laws_text LIKE '%Инициировать шаг оплаты%'"
         )
         c.execute("INSERT INTO settings (key, value) VALUES ('migr_pay_button_rename', '1')")
+
+    # 2026-10-12: кнопку «Календарь ритуалов» убрали из «Первого Касания», поэтому одноразовое
+    # трёхдневное напоминание «Вы не открывали календарь» (оно держалось на этой кнопке) один раз
+    # выключаем; включить обратно можно в «🌙 Календарь ритуалов»
+    c.execute("SELECT value FROM settings WHERE key = 'migr_ritual_nudge_off'")
+    if not c.fetchone():
+        c.execute(
+            "INSERT INTO settings (key, value) VALUES ('ritual_nudge_enabled', '0') "
+            "ON CONFLICT(key) DO UPDATE SET value = '0'"
+        )
+        c.execute("INSERT INTO settings (key, value) VALUES ('migr_ritual_nudge_off', '1')")
 
     # аудит 2026-09-29: поздравления Люминаров раньше писали дар прямо в тексте,
     # {дар} нигде реально не подставлялся - теперь дар вынесен в отдельную
