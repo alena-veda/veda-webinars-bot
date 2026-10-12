@@ -294,6 +294,51 @@ def _strip_html_tags(text: str) -> str:
     return _HTML_TAG_RE.sub("", text or "")
 
 
+# Названия основных кнопок, которые видят люди: (ключ, название по умолчанию, где используется).
+# Правятся в админке: «Общие тексты бота» -> «🔘 Названия кнопок». Кнопки главного меню внизу экрана
+# («Профиль», «Вебинары» и др.) сюда не входят: бот узнаёт их по точному тексту.
+BUTTON_DEFS = [
+    ("btn_what_is_sanctum", "⚜️ Что такое VEDA SANCTUM", "под «Первым Касанием», в тексте «календарь только для участников», у прошедшего вебинара без записи"),
+    ("btn_enter_depth", "Войти в глубину", "под манифестом VEDA SANCTUM, ведёт к законам"),
+    ("btn_pay", "Хочу оплатить подписку", "под законами и в тексте «календарь только для участников», ведёт к оплате"),
+    ("btn_calendar", "🌙 Календарь ритуалов", "на экране законов, в профиле, в «Инфо», на экранах участников"),
+    ("btn_request_req", "💌 Запросить реквизиты у Алёны", "на экранах оплаты (VEDA SANCTUM и вебинары), ведёт в Ваш личный чат"),
+    ("btn_send_receipt", "📸 Отправить чек", "под напоминаниями об оплате и после отклонения оплаты"),
+    ("btn_renew", "Продлить", "в напоминаниях об окончании подписки и на экране активной подписки"),
+    ("btn_resume", "Возобновить", "на экране «Доступ закончился»"),
+    ("btn_resume_long", "Возобновить подписку", "в сообщении, когда Вы вручную вносите человека с закончившимся доступом"),
+    ("btn_return", "Желаю войти вновь", "в письмах возврата («последний шанс» и др.)"),
+    ("btn_pay_later", "⏰ Оплачу позже", "на экране оплаты и при ручном внесении просроченного"),
+    ("btn_pay_later_date", "⏰ Оплачу позже - назначить дату", "в напоминаниях об окончании, на экране «Доступ закончился», в письмах возврата"),
+    ("btn_return_sanctum", "⚜️ Вернуться к VEDA SANCTUM", "в напоминании про календарь и возврат"),
+    ("btn_continue_ref", "Продолжить", "в особом приветствии для пришедших по реферальной ссылке"),
+    ("btn_write_intention", "📝 Написать намерение", "в поздравлении со ступенью «Искра»"),
+    ("btn_edit_intention", "✏️ Изменить намерение", "в профиле и в напоминании о намерении"),
+    ("btn_write_alena", "💌 Написать Алёне лично", "в напоминании о намерении и поздравлениях Люминаров, ведёт в Ваш личный чат"),
+    ("btn_write_request", "💌 Написать запрос Алёне", "после записи намерения, ведёт в Ваш личный чат"),
+    ("btn_register_webinar", "Зарегистрироваться и оплатить", "на карточке вебинара"),
+    ("btn_ask_question", "❓ Задать вопрос", "под вебинаром и публикацией архива"),
+    ("btn_faq", "❓ Частые вопросы", "в «Инфо»"),
+    ("btn_rules", "📜 Правила пространства", "в «Инфо»"),
+    ("btn_guide", "🧭 Как пользоваться", "в «Инфо»"),
+    ("btn_suggest_q", "💡 Предложить свой вопрос", "под «Частыми вопросами»"),
+    ("btn_about_month", "📖 О практиках месяца", "под календарём"),
+    ("btn_mantra", "🎧 Слушать мантру", "под практикой праздника, ведёт по Вашей ссылке"),
+    ("btn_watch_record", "🎬 Смотреть запись", "у прошедшего вебинара, если вписана ссылка на запись"),
+    ("btn_webinar_details", "📄 Подробнее о вебинаре", "в напоминаниях о вебинаре"),
+    ("intro_msg_button", "Понятно. Продолжить ➡️", "под вводным сообщением и его напоминанием"),
+    ("support_btn_text", "💬 Написать куратору", "в «Инфо», «Как пользоваться» и под напоминаниями об оплате"),
+]
+BUTTON_DEFAULTS = {k: d for k, d, _ in BUTTON_DEFS}
+BUTTON_WHERE = {k: w for k, _, w in BUTTON_DEFS}
+BUTTON_NAME_MAX = 60
+
+
+def _btn(key: str) -> str:
+    """Название кнопки из настроек (то, что Вы задали в админке), а если не задано - стандартное."""
+    return (db.get_setting(key) or "").strip() or BUTTON_DEFAULTS[key]
+
+
 def _support_admin_ids() -> list:
     """Кому приходят обращения людей («Написать куратору», вопросы под вебинарами и публикациями): владельцу и
     администраторам, которым Вы выдали право «Обращения людей». Остальным администраторам обращения не приходят."""
@@ -305,7 +350,7 @@ def _support_signature() -> str:
 
 
 def _support_btn(callback_data: str = "contact_admin") -> InlineKeyboardButton:
-    return InlineKeyboardButton(text=db.get_setting("support_btn_text") or "💬 Написать куратору", callback_data=callback_data)
+    return InlineKeyboardButton(text=_btn("support_btn_text"), callback_data=callback_data)
 
 
 async def _send_staff_reply(message: Message, target_user_id: int):
@@ -429,9 +474,9 @@ def _lapse_text(template: str, user_row, expired_date, deadline, price: str) -> 
 
 
 def _return_kb(with_promise: bool = False) -> InlineKeyboardMarkup:
-    rows = [[InlineKeyboardButton(text="Желаю войти вновь", callback_data="sanctum_apply")]]
+    rows = [[InlineKeyboardButton(text=_btn("btn_return"), callback_data="sanctum_apply")]]
     if with_promise:
-        rows.append([InlineKeyboardButton(text="⏰ Оплачу позже - назначить дату", callback_data="sanctum_promise")])
+        rows.append([InlineKeyboardButton(text=_btn("btn_pay_later_date"), callback_data="sanctum_promise")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
@@ -678,7 +723,7 @@ def _intention_cta_kb(level: int):
     тот же текст, значит и кнопка должна быть на обоих одинаково."""
     if level != 2:
         return None
-    return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="📝 Написать намерение", callback_data="start_intention")]])
+    return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text=_btn("btn_write_intention"), callback_data="start_intention")]])
 
 
 async def _handle_ascension_transition(bot: Bot, user_id: int, old_level: int, new_level: int):
@@ -789,7 +834,7 @@ async def _credit_luminar_referral(bot: Bot, referred_user_id: int):
             referrer_id,
             user_message,
             db.get_setting(f"luminar_{new_rank}_photo"),
-            reply_markup=_personal_link_kb("💌 Написать Алёне лично"),
+            reply_markup=_personal_link_kb(_btn("btn_write_alena")),
         )
     except Exception:
         logging.exception("Не удалось уведомить о новом ранге Люминара пользователя %s", referrer_id)
@@ -875,6 +920,7 @@ ADMIN_PERMISSION_SECTIONS = [
         ("adm_welcome_text", "✏️ Текст приветствия (/start)"),
         ("adm_photo_welcome", "🖼 Фото приветствия (/start)"),
         ("adm_intro_message", "🌟 Вводное сообщение и напоминания новичку"),
+        ("adm_button_names", "🔘 Названия кнопок"),
         ("adm_about", "💠 Текст «Философия Alena Veda»"),
         ("adm_photo_about", "🖼 Фото «Философия Alena Veda»"),
         ("adm_faq", "❓ Текст «Частые вопросы»"),
@@ -1116,7 +1162,7 @@ async def _send_referral_welcome(message: Message, referrer):
         .replace("{пригласивший}", mention)
         .replace("{название}", html.escape(SANCTUM_FULL_NAME))
     )
-    kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="Продолжить", callback_data="referral_continue")]])
+    kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text=_btn("btn_continue_ref"), callback_data="referral_continue")]])
     await message.answer(text, reply_markup=kb)
 
 
@@ -1258,7 +1304,7 @@ async def intention_received(message: Message, state: FSMContext):
     user_row = db.get_user(message.from_user.id)
     await message.answer(
         _personalize(db.get_setting("ascension_intention_confirmation_text"), user_row),
-        reply_markup=_personal_link_kb("💌 Написать запрос Алёне"),
+        reply_markup=_personal_link_kb(_btn("btn_write_request")),
     )
 
 
@@ -1339,10 +1385,10 @@ async def wb_past_view(callback: CallbackQuery):
             or callback.from_user.id in db.get_confirmed_webinar_registrant_ids(webinar_id)
         )
         if has_video_access:
-            kb_rows.append([InlineKeyboardButton(text="🎬 Смотреть запись", url=w["video_link"])])
+            kb_rows.append([InlineKeyboardButton(text=_btn("btn_watch_record"), url=w["video_link"])])
         else:
             text += db.get_setting("webinar_video_locked_line")
-            kb_rows.append([InlineKeyboardButton(text="⚜️ Что такое VEDA SANCTUM", callback_data="open_sanctum")])
+            kb_rows.append([InlineKeyboardButton(text=_btn("btn_what_is_sanctum"), callback_data="open_sanctum")])
     qa_count = db.count_public_qa("webinar", webinar_id)
     if qa_count:
         kb_rows.append([InlineKeyboardButton(
@@ -1380,9 +1426,9 @@ async def _send_webinar_card(message: Message, webinar_id: int, viewer_id: int) 
         f"🗓 {w['date_text']}\n"
         f"💳 Стоимость: {w['price']}"
     )
-    kb_rows = [[InlineKeyboardButton(text="Зарегистрироваться и оплатить", callback_data=f"wb_reg_{webinar_id}")]]
+    kb_rows = [[InlineKeyboardButton(text=_btn("btn_register_webinar"), callback_data=f"wb_reg_{webinar_id}")]]
     if w["allow_questions"]:
-        kb_rows.append([InlineKeyboardButton(text="❓ Задать вопрос", callback_data=f"wq_ask_webinar_{webinar_id}")])
+        kb_rows.append([InlineKeyboardButton(text=_btn("btn_ask_question"), callback_data=f"wq_ask_webinar_{webinar_id}")])
         qa_count = db.count_public_qa("webinar", webinar_id)
         if qa_count:
             kb_rows.append([InlineKeyboardButton(
@@ -1461,7 +1507,7 @@ async def wb_reg(callback: CallbackQuery, state: FSMContext):
         .replace("{реквизиты}", _payment_block("payment_purpose_webinar"))
     )
     kb_rows = []
-    personal_kb = _personal_link_kb(REQUEST_REQUISITES_LABEL)
+    personal_kb = _personal_link_kb(_btn("btn_request_req"))
     if personal_kb:
         kb_rows.extend(personal_kb.inline_keyboard)
     kb_rows.append([InlineKeyboardButton(text="⬅️ Назад", callback_data=f"wb_view_{webinar_id}")])
@@ -1502,16 +1548,16 @@ async def show_sanctum(message: Message, user_id: int = None):
                 .replace("{дата}", valid_until.strftime("%d.%m.%Y"))
                 .replace("{цена}", price)
             )
-            button_text = "Продлить"
+            button_text = _btn("btn_renew")
         else:
             text, price_locked = _expired_screen_text(user_id, membership, price)
-            button_text = "Возобновить"
+            button_text = _btn("btn_resume")
         rows = [[InlineKeyboardButton(text=button_text, callback_data="sanctum_apply")]]
         # "Оплачу позже" имеет смысл показывать только пока цена ещё правда
         # сохраняется - после дедлайна любая названная дата всё равно будет
         # отклонена (см. sanctum_promise_date), кнопка вела бы в тупик
         if valid_until and valid_until < today and price_locked:
-            rows.append([InlineKeyboardButton(text="⏰ Оплачу позже - назначить дату", callback_data="sanctum_promise")])
+            rows.append([InlineKeyboardButton(text=_btn("btn_pay_later_date"), callback_data="sanctum_promise")])
         if valid_until and valid_until >= today:
             rows.append([_ritual_calendar_btn()])
         kb = InlineKeyboardMarkup(inline_keyboard=rows)
@@ -1525,7 +1571,7 @@ async def show_sanctum(message: Message, user_id: int = None):
     db.mark_sanctum_intro_viewed(user_id)
 
     kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="Войти в глубину", callback_data="sanctum_laws")]
+        [InlineKeyboardButton(text=_btn("btn_enter_depth"), callback_data="sanctum_laws")]
     ])
     if s["intro_photo"]:
         await message.answer_photo(s["intro_photo"])
@@ -1580,7 +1626,7 @@ async def sanctum_laws(callback: CallbackQuery):
     if ritual_line:
         text += "\n\n" + ritual_line
     kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="Хочу оплатить подписку", callback_data="sanctum_apply")],
+        [InlineKeyboardButton(text=_btn("btn_pay"), callback_data="sanctum_apply")],
         [_ritual_calendar_btn(from_laws=True)],
     ])
     await _answer_long(callback.message, text, reply_markup=kb, protect_content=_protect_for(callback.from_user.id))
@@ -1615,7 +1661,7 @@ async def sanctum_apply(callback: CallbackQuery, state: FSMContext):
     await state.set_state(ReceiptStates.waiting_receipt)
     await state.update_data(reg_id=reg_id)
     kb_rows = []
-    personal_kb = _personal_link_kb(REQUEST_REQUISITES_LABEL)
+    personal_kb = _personal_link_kb(_btn("btn_request_req"))
     if personal_kb:
         kb_rows.extend(personal_kb.inline_keyboard)
     # тем, кто уже был в Sanctum (есть закреплённая цена), даём «Оплачу позже» прямо здесь, если дату ещё
@@ -1623,7 +1669,7 @@ async def sanctum_apply(callback: CallbackQuery, state: FSMContext):
     if membership and membership["status"] != "removed" and not membership["lifetime_free"]:
         promise_latest = _promise_latest_date(membership)
         if promise_latest and promise_latest >= _today():
-            kb_rows.append([InlineKeyboardButton(text="⏰ Оплачу позже", callback_data="sanctum_promise")])
+            kb_rows.append([InlineKeyboardButton(text=_btn("btn_pay_later"), callback_data="sanctum_promise")])
     kb_rows.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="sanctum_back")])
     text = (
         db.get_setting("sanctum_payment_instructions_text")
@@ -1749,9 +1795,9 @@ async def show_about(message: Message):
 
 def _info_menu_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="❓ Частые вопросы", callback_data="open_faq")],
-        [InlineKeyboardButton(text="📜 Правила пространства", callback_data="open_rules")],
-        [InlineKeyboardButton(text="🧭 Как пользоваться", callback_data="open_bot_guide")],
+        [InlineKeyboardButton(text=_btn("btn_faq"), callback_data="open_faq")],
+        [InlineKeyboardButton(text=_btn("btn_rules"), callback_data="open_rules")],
+        [InlineKeyboardButton(text=_btn("btn_guide"), callback_data="open_bot_guide")],
         [_support_btn()],
         [_ritual_calendar_btn()],
     ])
@@ -1785,8 +1831,8 @@ async def info_menu_back_cb(callback: CallbackQuery):
 async def open_faq_cb(callback: CallbackQuery):
     text = db.get_setting("faq_text")
     kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="💡 Предложить свой вопрос", callback_data="suggest_faq_question")],
-        [InlineKeyboardButton(text="📜 Правила пространства", callback_data="open_rules")],
+        [InlineKeyboardButton(text=_btn("btn_suggest_q"), callback_data="suggest_faq_question")],
+        [InlineKeyboardButton(text=_btn("btn_rules"), callback_data="open_rules")],
         [InlineKeyboardButton(text="⬅️ Назад", callback_data="info_menu_back")],
     ])
     # текст растёт со временем (Вы сами добавляете вопросы) - если когда-нибудь
@@ -1820,7 +1866,7 @@ async def suggest_faq_question_received(message: Message, state: FSMContext):
 async def open_rules_cb(callback: CallbackQuery):
     text = db.get_setting("rules_text")
     kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="❓ Частые вопросы", callback_data="open_faq")],
+        [InlineKeyboardButton(text=_btn("btn_faq"), callback_data="open_faq")],
         [InlineKeyboardButton(text="⬅️ Назад", callback_data="info_menu_back")],
     ])
     await _send_long(
@@ -1922,7 +1968,7 @@ async def _show_feed_post_at(message: Message, year_month: str, idx: int, posts,
         nav_row.append(InlineKeyboardButton(text="➡️ Позже", callback_data=f"feed_nav_{year_month}_{idx - 1}"))
     nav_rows = [nav_row] if nav_row else []
     if post["allow_questions"]:
-        nav_rows.append([InlineKeyboardButton(text="❓ Задать вопрос", callback_data=f"wq_ask_feed_{post['id']}")])
+        nav_rows.append([InlineKeyboardButton(text=_btn("btn_ask_question"), callback_data=f"wq_ask_feed_{post['id']}")])
         qa_count = db.count_public_qa("feed_post", post["id"])
         if qa_count:
             nav_rows.append([InlineKeyboardButton(
@@ -2220,7 +2266,7 @@ async def show_profile(message: Message):
     if meditation_btn:
         kb_rows.append([meditation_btn])
     if membership and membership["intention_text"]:
-        kb_rows.append([InlineKeyboardButton(text="✏️ Изменить намерение", callback_data="edit_intention")])
+        kb_rows.append([InlineKeyboardButton(text=_btn("btn_edit_intention"), callback_data="edit_intention")])
     # кнопка календаря - для всех, не только для участников Sanctum: профиль -
     # то место, куда люди возвращаются сами, регулярно (проверить свой
     # прогресс), в отличие от "Инфо"; не-участник увидит тот же тизер, что и
@@ -2429,7 +2475,7 @@ def _receipt_help_kb(reg_id: int) -> InlineKeyboardMarkup:
     с "написать" даём прямой путь прислать чек ещё раз, не создавая новую
     заявку, а довозвращая именно эту в очередь на проверку."""
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="📸 Отправить чек", callback_data=f"resend_receipt_{reg_id}")],
+        [InlineKeyboardButton(text=_btn("btn_send_receipt"), callback_data=f"resend_receipt_{reg_id}")],
         [_support_btn()],
     ])
 
@@ -4076,9 +4122,9 @@ async def adm_grant_access_finish(message: Message, state: FSMContext):
     if valid_until < _today():
         grant_membership = db.get_sanctum_membership(target_user_id)
         user_text, grant_locked = _expired_screen_text(target_user_id, grant_membership, locked_price)
-        grant_rows = [[InlineKeyboardButton(text="Возобновить подписку", callback_data="sanctum_apply")]]
+        grant_rows = [[InlineKeyboardButton(text=_btn("btn_resume_long"), callback_data="sanctum_apply")]]
         if grant_locked:
-            grant_rows.append([InlineKeyboardButton(text="⏰ Оплачу позже", callback_data="sanctum_promise")])
+            grant_rows.append([InlineKeyboardButton(text=_btn("btn_pay_later"), callback_data="sanctum_promise")])
         grant_kb = InlineKeyboardMarkup(inline_keyboard=grant_rows)
 
     try:
@@ -5149,7 +5195,7 @@ async def _apply_luminar_manual(bot: Bot, target_user_id: int, new_count: int) -
             try:
                 await _send_with_optional_photo(
                     bot, target_user_id, user_message, db.get_setting(f"luminar_{new_rank}_photo"),
-                    reply_markup=_personal_link_kb("💌 Написать Алёне лично"),
+                    reply_markup=_personal_link_kb(_btn("btn_write_alena")),
                 )
                 result_lines.append("Человек уведомлён.")
             except Exception:
@@ -5809,6 +5855,22 @@ async def edit_field_value(message: Message, state: FSMContext):
     elif target in ("ritual_text", "ritual_event", "ritual_add"):
         if await _ritual_edit_value(message, state, data, target, field, value):
             return
+    elif target == "button_name":
+        new_name = value.strip()
+        if field not in BUTTON_DEFAULTS:
+            await message.answer("Эта кнопка не найдена.")
+        elif new_name == "-":
+            db.set_setting(field, BUTTON_DEFAULTS[field])
+            await message.answer(f"Готово ✅ Вернула стандартное название: «{html.escape(BUTTON_DEFAULTS[field])}».")
+        elif not new_name or len(new_name) > BUTTON_NAME_MAX:
+            await message.answer(f"Название кнопки - от 1 до {BUTTON_NAME_MAX} символов. Пришлите ещё раз или /cancel")
+            return
+        else:
+            db.set_setting(field, new_name)
+            await message.answer(
+                f"Готово ✅ Теперь кнопка называется «{html.escape(new_name)}». Если прежнее название упоминается "
+                "в Ваших текстах (например, «нажмите ...»), поправьте и их."
+            )
     elif target == "intro_setting":
         if field in ("intro_msg_text", "intro_nudge_text", "name_nudge_text"):
             if not value.strip():
@@ -6710,8 +6772,8 @@ async def check_sanctum_reminders(bot: Bot):
     logging.info("[планировщик] check_sanctum_reminders: старт")
     today = _today()
     renew_kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="Продлить", callback_data="sanctum_apply")],
-        [InlineKeyboardButton(text="⏰ Оплачу позже - назначить дату", callback_data="sanctum_promise")],
+        [InlineKeyboardButton(text=_btn("btn_renew"), callback_data="sanctum_apply")],
+        [InlineKeyboardButton(text=_btn("btn_pay_later_date"), callback_data="sanctum_promise")],
     ])
 
     reminder_date = (today + timedelta(days=config.SANCTUM_REMINDER_DAYS_BEFORE)).isoformat()
@@ -6740,7 +6802,7 @@ async def check_sanctum_reminders(bot: Bot):
 
     # напоминание за день до даты, которую человек сам назвал ("оплачу позже")
     promise_kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="Продлить", callback_data="sanctum_apply")]
+        [InlineKeyboardButton(text=_btn("btn_renew"), callback_data="sanctum_apply")]
     ])
     promise_reminder_date = (today + timedelta(days=1)).isoformat()
     promise_template = db.get_setting("sanctum_promise_reminder_text")
@@ -6881,7 +6943,7 @@ async def check_reengagement(bot: Bot):
         cutoff = (now - timedelta(hours=nudge_hours)).strftime("%Y-%m-%d %H:%M:%S")
         template = db.get_setting("sanctum_nudge_text") or ""
         nudge_kb = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="⚜️ Вернуться к VEDA SANCTUM", callback_data="open_sanctum")]
+            [InlineKeyboardButton(text=_btn("btn_return_sanctum"), callback_data="open_sanctum")]
         ])
         for user_row in db.get_sanctum_intro_viewers_due(cutoff):
             text = _personalize(template, user_row)
@@ -6949,7 +7011,7 @@ async def check_webinar_reminders(bot: Bot):
             kb = None
             if attach_card:
                 kb = InlineKeyboardMarkup(inline_keyboard=[[
-                    InlineKeyboardButton(text="📄 Подробнее о вебинаре", callback_data=f"wb_view_{w['id']}")
+                    InlineKeyboardButton(text=_btn("btn_webinar_details"), callback_data=f"wb_view_{w['id']}")
                 ]])
             link_block = f"🔗 {w['invite_link']}\n\n" if (not attach_card and w["invite_link"]) else ""
             base_text = (
@@ -7013,11 +7075,11 @@ async def check_intention_reminders(bot: Bot):
     for m in db.get_active_intentions():
         template = db.get_setting("ascension_intention_recall_text") or ""
         text = template.replace("{намерение}", m["intention_text"])
-        rows = [[InlineKeyboardButton(text="✏️ Изменить намерение", callback_data="edit_intention")]]
+        rows = [[InlineKeyboardButton(text=_btn("btn_edit_intention"), callback_data="edit_intention")]]
         if not m["intention_reviewed"]:
             personal_link = db.get_setting("admin_personal_chat_link")
             if personal_link:
-                rows.append([InlineKeyboardButton(text="💌 Написать Алёне лично", url=personal_link)])
+                rows.append([InlineKeyboardButton(text=_btn("btn_write_alena"), url=personal_link)])
         try:
             await bot.send_message(m["user_id"], text, reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
         except Exception:
@@ -7096,9 +7158,9 @@ def _ritual_is_member(user_id: int) -> bool:
     return bool(valid_until and valid_until >= _today())
 
 
-def _ritual_calendar_btn(text: str = "🌙 Календарь ритуалов", from_laws: bool = False) -> InlineKeyboardButton:
+def _ritual_calendar_btn(text: str = None, from_laws: bool = False) -> InlineKeyboardButton:
     # "rit_open_s" - календарь, открытый с экрана законов Sanctum (человек только что прочитал о Sanctum)
-    return InlineKeyboardButton(text=text, callback_data="rit_open_s" if from_laws else "rit_open")
+    return InlineKeyboardButton(text=text or _btn("btn_calendar"), callback_data="rit_open_s" if from_laws else "rit_open")
 
 
 def _ritual_teaser_kb(from_laws: bool = False) -> InlineKeyboardMarkup:
@@ -7107,8 +7169,8 @@ def _ritual_teaser_kb(from_laws: bool = False) -> InlineKeyboardMarkup:
     поэтому там остаётся одна кнопка оплаты."""
     rows = []
     if not from_laws:
-        rows.append([InlineKeyboardButton(text="⚜️ Что такое VEDA SANCTUM", callback_data="open_sanctum")])
-    rows.append([InlineKeyboardButton(text="Хочу оплатить подписку", callback_data="sanctum_apply")])
+        rows.append([InlineKeyboardButton(text=_btn("btn_what_is_sanctum"), callback_data="open_sanctum")])
+    rows.append([InlineKeyboardButton(text=_btn("btn_pay"), callback_data="sanctum_apply")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
@@ -7117,7 +7179,7 @@ def _ritual_kb(ym: str, user_row) -> InlineKeyboardMarkup:
     opted_out = bool(user_row and user_row["ritual_optout"])
     rows = []
     if ym != "x":
-        rows.append([InlineKeyboardButton(text="📖 О практиках месяца", callback_data=f"rit_about_{ym}")])
+        rows.append([InlineKeyboardButton(text=_btn("btn_about_month"), callback_data=f"rit_about_{ym}")])
     rows.append([InlineKeyboardButton(
         text="🔕 Не напоминать в день" if reminders_on else "🔔 Напоминать в день",
         callback_data=f"rit_remind_{ym}",
@@ -7270,7 +7332,7 @@ def _ritual_mantra_kb(evs, with_calendar=False):
         if url in seen:
             continue
         seen.add(url)
-        label = MANTRA_LABEL if len(pairs) == 1 else f"🎧 Мантра: {_plain_text(e['title'])}"[:60]
+        label = _btn("btn_mantra") if len(pairs) == 1 else f"🎧 Мантра: {_plain_text(e['title'])}"[:60]
         rows.append([InlineKeyboardButton(text=label, url=url)])
     if with_calendar:
         rows.append([_ritual_calendar_btn()])
@@ -7324,7 +7386,7 @@ async def ritual_about(callback: CallbackQuery):
     # каждый праздник отдельным сообщением; под ним кнопка мантры, если она задана
     for b in blocks:
         url = _clean_url(b["mantra"])
-        kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text=MANTRA_LABEL, url=url)]]) if url else None
+        kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text=_btn("btn_mantra"), url=url)]]) if url else None
         await _send_long(callback.bot, callback.message.chat.id, b["text"], kb)
     await callback.answer()
 
@@ -8524,7 +8586,7 @@ def _welcome_pause_seconds() -> int:
 async def _send_intro_message(bot, user_id: int):
     user_row = db.get_user(user_id)
     text = _personalize(db.get_setting("intro_msg_text") or "", user_row)
-    label = db.get_setting("intro_msg_button") or "Продолжить ➡️"
+    label = _btn("intro_msg_button")
     kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text=label, callback_data="intro_continue")]])
     photo = db.get_setting("intro_msg_photo")
     protect = _protect_for(user_id)
@@ -8603,7 +8665,7 @@ async def check_intro_nudges(bot: Bot):
             return
         # время в базе хранится тем же способом, что и в db._now() (местное время сервера)
         cutoff = (datetime.now() - timedelta(hours=_intro_nudge_hours())).strftime("%Y-%m-%d %H:%M:%S")
-        label = db.get_setting("intro_msg_button") or "Продолжить ➡️"
+        label = _btn("intro_msg_button")
         template = db.get_setting("intro_nudge_text") or ""
         if not template.strip():
             return
@@ -8651,7 +8713,7 @@ async def _send_first_touch(bot, user_id: int):
     text = db.get_setting(ASCENSION_TEXT_KEYS[1])
     photo = db.get_setting("ascension_level1_photo")
     kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="⚜️ Что такое VEDA SANCTUM", callback_data="open_sanctum")],
+        [InlineKeyboardButton(text=_btn("btn_what_is_sanctum"), callback_data="open_sanctum")],
     ])
     await _send_with_optional_photo(bot, user_id, _personalize(text, user_row), photo, kb)
     # запоминаем момент показа: если человек ни разу не откроет календарь ни
@@ -8778,6 +8840,46 @@ async def adm_intro_nudge_toggle(callback: CallbackQuery):
     text, kb = _intro_screen()
     await _edit_keep(callback, text, kb)
     await callback.answer("Напоминание включено" if _intro_nudge_enabled() else "Напоминание выключено")
+
+
+@router.callback_query(F.data == "adm_button_names")
+async def adm_button_names(callback: CallbackQuery):
+    if not await _require_permission(callback, "adm_button_names"):
+        return
+    text = (
+        "<b>🔘 Названия кнопок</b>\n\n"
+        "Здесь можно переименовать основные кнопки, которые видят люди. Нажмите на кнопку ниже: бот покажет, где она "
+        "стоит, и попросит новое название. Присланное «-» возвращает стандартное. Кнопки главного меню внизу экрана "
+        "(«Профиль», «Вебинары» и др.) здесь не меняются.\n\n"
+        "⚠️ Если прежнее название упоминается в Ваших текстах (например, «нажмите «Хочу оплатить подписку»»), "
+        "после переименования поправьте и тексты."
+    )
+    rows = [
+        [InlineKeyboardButton(text=_btn(key)[:60], callback_data=f"adm_bn_{key}")]
+        for key, _, _ in BUTTON_DEFS
+    ]
+    rows.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="adm_back")])
+    await _edit_keep(callback, text, InlineKeyboardMarkup(inline_keyboard=rows))
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("adm_bn_"))
+async def adm_button_name_start(callback: CallbackQuery, state: FSMContext):
+    if not await _require_permission(callback, "adm_button_names"):
+        return
+    key = callback.data[len("adm_bn_"):]
+    if key not in BUTTON_DEFAULTS:
+        await callback.answer("Эта кнопка не найдена", show_alert=True)
+        return
+    await state.set_state(EditFieldStates.waiting_value)
+    await state.update_data(target="button_name", field=key)
+    await callback.message.answer(
+        f"Кнопка сейчас называется: «{html.escape(_btn(key))}»\n"
+        f"Где она стоит: {BUTTON_WHERE[key]}.\n"
+        f"Стандартное название: «{html.escape(BUTTON_DEFAULTS[key])}»\n\n"
+        f"Пришлите новое название (до {BUTTON_NAME_MAX} символов, эмодзи можно). «-» вернёт стандартное.\n\n(или /cancel)"
+    )
+    await callback.answer()
 
 
 @router.callback_query(F.data == "adm_name_nudge_toggle")
