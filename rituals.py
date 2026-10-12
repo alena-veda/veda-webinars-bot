@@ -105,6 +105,14 @@ TEXT_DEFAULTS = {
         "Хорошо, календарь 1-го числа больше не пришлю. Открыть его всегда можно в «Инфо» и в профиле."
     ),
     "ritual_optout_off_text": "Календарь снова будет приходить 1-го числа каждого месяца ✅",
+    "ritual_promo_text": (
+        "{имя}, начался {месяц} 🌙\n\n"
+        "В моём закрытом канале VEDA SANCTUM участники получают Календарь ведических дат каждый месяц, "
+        "с практиками для каждого дня. Это и поддержка, и ориентир, когда в потоке времени можно сделать "
+        "практики, которые откликаются и гармонизируют.\n"
+        "Загляните, что такое VEDA SANCTUM ⬇️"
+    ),
+    "ritual_promo_off_text": "Хорошо, больше не буду присылать Вам это сообщение 🌿",
     "ritual_mantra_amavasya": "",
     "ritual_mantra_purnima": "",
     "ritual_mantra_ekadashi": "",
@@ -145,6 +153,8 @@ TEXT_LABELS = {
     "ritual_reminder_off_text": "подсказка при выключении напоминания на день события",
     "ritual_optout_on_text": "подсказка при отключении ежемесячной рассылки календаря",
     "ritual_optout_off_text": "подсказка при включении ежемесячной рассылки календаря обратно",
+    "ritual_promo_text": "сообщение для тех, кто НЕ в Sanctum - приходит 1-го числа каждого месяца в 11:41 по Киеву, через 30 минут после календаря участникам. Сколько раз каждому - в экране «🌙 Календарь ритуалов». Можно вставить {имя}, {месяц} (например, ноябрь) и {число_дат} (сколько дат в календаре этого месяца). Кнопки: «Что такое VEDA SANCTUM» и «Больше не присылать»",
+    "ritual_promo_off_text": "подсказка, которая всплывает, когда человек нажал «Больше не присылать» под сообщением выше. Кнопок нет",
     "ritual_mantra_amavasya": "ссылка на мантру для Амавасьи (на все даты сразу). Ссылка с https://, например с YouTube; «-» убирает",
     "ritual_mantra_purnima": "ссылка на мантру для Пурнимы (на все даты сразу). Ссылка с https://, например с YouTube; «-» убирает",
     "ritual_mantra_ekadashi": "ссылка на мантру для Экадаши (на все даты сразу). Ссылка с https://, например с YouTube; «-» убирает",
@@ -319,7 +329,10 @@ def init_rituals():
                 # (на "Первом Касании" и т.д.), но ни разу её не открыл (см.
                 # mark_ritual_intro_shown/mark_ritual_opened, check_reengagement в main.py)
                 "ritual_intro_shown_at TEXT", "ritual_opened_at TEXT",
-                "ritual_nudge_sent INTEGER DEFAULT 0"):
+                "ritual_nudge_sent INTEGER DEFAULT 0",
+                # ежемесячное приглашение для тех, кто не в Sanctum: сколько раз уже присылали и за какой месяц
+                "ritual_promo_count INTEGER DEFAULT 0", "ritual_promo_last_ym TEXT",
+                "ritual_promo_off INTEGER DEFAULT 0"):
         try:
             c.execute(f"ALTER TABLE users ADD COLUMN {col}")
         except Exception:
@@ -439,7 +452,7 @@ def delete_event(event_id):
 # ---------- люди ----------
 
 def set_user_flag(user_id, field, value):
-    if field not in ("ritual_optout", "ritual_reminders", "ritual_last_month", "ritual_last_day"):
+    if field not in ("ritual_optout", "ritual_reminders", "ritual_last_month", "ritual_last_day", "ritual_promo_off"):
         raise ValueError(field)
     conn = db.get_conn()
     conn.execute(f"UPDATE users SET {field} = ? WHERE user_id = ?", (value, user_id))
@@ -492,6 +505,42 @@ def get_users_due_for_ritual_nudge(days):
     ).fetchall()
     conn.close()
     return rows
+
+
+def get_promo_candidates(limit, ym):
+    """Кому прислать ежемесячное приглашение в Sanctum: назвали имя, прошли вводные шаги, не заблокировали бота,
+    не нажали «Больше не присылать», не администраторы, никогда не были в Sanctum (бывшие участники получают
+    возвратные письма), нет висящей оплаты, и приглашений им пришло меньше limit и ещё не за месяц ym."""
+    conn = db.get_conn()
+    rows = conn.execute(
+        """SELECT u.* FROM users u
+           WHERE u.preferred_name IS NOT NULL AND TRIM(u.preferred_name) != ''
+           AND u.ritual_intro_shown_at IS NOT NULL
+           AND (u.blocked IS NULL OR u.blocked = 0)
+           AND (u.self_departed IS NULL OR u.self_departed = 0)
+           AND COALESCE(u.ritual_promo_off, 0) = 0
+           AND COALESCE(u.ritual_promo_count, 0) < ?
+           AND (u.ritual_promo_last_ym IS NULL OR u.ritual_promo_last_ym != ?)
+           AND u.user_id NOT IN (SELECT admin_id FROM admins)
+           AND u.user_id NOT IN (SELECT user_id FROM sanctum_membership)
+           AND u.user_id NOT IN (
+               SELECT user_id FROM registrations
+               WHERE product_type = 'sanctum' AND status IN ('awaiting_receipt', 'awaiting_confirmation')
+           )""",
+        (limit, ym),
+    ).fetchall()
+    conn.close()
+    return rows
+
+
+def mark_promo_sent(user_id, ym):
+    conn = db.get_conn()
+    conn.execute(
+        "UPDATE users SET ritual_promo_count = COALESCE(ritual_promo_count, 0) + 1, ritual_promo_last_ym = ? WHERE user_id = ?",
+        (ym, user_id),
+    )
+    conn.commit()
+    conn.close()
 
 
 def active_members():

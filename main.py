@@ -327,7 +327,8 @@ BUTTON_DEFS = [
     ("btn_watch_record", "🎬 Смотреть запись", "у прошедшего вебинара, если вписана ссылка на запись"),
     ("btn_webinar_details", "📄 Подробнее о вебинаре", "в напоминаниях о вебинаре"),
     ("intro_msg_button", "Понятно. Продолжить ➡️", "под вводным сообщением и его напоминанием"),
-    ("support_btn_text", "💬 Написать куратору", "в «Инфо», «Как пользоваться» и под напоминаниями об оплате"),
+    ("support_btn_text", "💬 Написать Куратору", "в «Инфо», «Как пользоваться» и под напоминаниями об оплате"),
+    ("btn_promo_off", "🔕 Больше не присылать", "под ежемесячным приглашением в Sanctum для тех, кто ещё не подписан"),
 ]
 BUTTON_DEFAULTS = {k: d for k, d, _ in BUTTON_DEFS}
 BUTTON_WHERE = {k: w for k, _, w in BUTTON_DEFS}
@@ -345,6 +346,11 @@ def _support_admin_ids() -> list:
     return [a for a in db.get_all_admin_ids() if db.has_permission(a, "adm_support")]
 
 
+def _support_topics() -> list:
+    """Темы обращения (кнопки после «Написать Куратору»); пустой список - сразу просим написать."""
+    return _parse_word_list(db.get_setting("support_topics") or "")[:8]
+
+
 def _support_signature() -> str:
     return (db.get_setting("support_signature_text") or "").strip()
 
@@ -358,24 +364,54 @@ async def _send_staff_reply(message: Message, target_user_id: int):
     («— Ваш Куратор» по умолчанию, текст правится в админке), чтобы человек понимал, кто ему пишет."""
     bot = message.bot
     sig = "" if db.is_owner(message.from_user.id) else _support_signature()
-    if not sig:
+    raw = message.text or message.caption or ""
+    has_name_mark = isinstance(raw, str) and "{имя}" in raw
+    if not sig and not has_name_mark:
         await bot.copy_message(chat_id=target_user_id, from_chat_id=message.chat.id, message_id=message.message_id)
         return
+    # {имя} в ответе заменяется на имя человека (так же, как в текстах бота)
+    target_row = db.get_user(target_user_id)
+    person = ((target_row["preferred_name"] or target_row["first_name"] or "") if target_row else "").strip() or "друг"
     sig_html = html.escape(sig)
-    body = message.html_text or ""
+    body = (message.html_text or "").replace("{имя}", html.escape(person))
+    tail = f"\n\n{sig_html}" if sig_html else ""
     if message.text:
-        await _send_long(bot, target_user_id, f"{body}\n\n{sig_html}")
+        await _send_long(bot, target_user_id, f"{body}{tail}")
         return
     # фото, видео, файл, голосовое: подпись добавляется к подписи; кружок и стикер без подписи - подписью отдельной строкой
     has_caption = any([message.photo, message.video, message.document, message.voice, message.audio, message.animation])
     if has_caption and _visible_len(body) + len(sig) + 2 <= CAPTION_LIMIT:
-        await bot.copy_message(
-            chat_id=target_user_id, from_chat_id=message.chat.id, message_id=message.message_id,
-            caption=(f"{body}\n\n{sig_html}" if body else sig_html), parse_mode="HTML",
-        )
-        return
+        full = f"{body}{tail}" if body else sig_html
+        if full:
+            await bot.copy_message(
+                chat_id=target_user_id, from_chat_id=message.chat.id, message_id=message.message_id,
+                caption=full, parse_mode="HTML",
+            )
+            return
     await bot.copy_message(chat_id=target_user_id, from_chat_id=message.chat.id, message_id=message.message_id)
-    await bot.send_message(target_user_id, sig_html)
+    if sig_html:
+        await bot.send_message(target_user_id, sig_html)
+
+
+async def _notify_other_support(bot: Bot, replier_id: int, target_user_id: int):
+    """Когда один из отвечающих ответил, остальным приходит короткая пометка - чтобы не ответить дважды."""
+    try:
+        replier = db.get_user(replier_id)
+        replier_name = _user_display_name(replier) if replier else str(replier_id)
+        if db.is_owner(replier_id):
+            replier_name += " (владелец)"
+        target = db.get_user(target_user_id)
+        target_name = _user_display_name(target) if target else str(target_user_id)
+        text = f"✅ {html.escape(replier_name)} ответил(а) человеку: {html.escape(target_name)}"
+        for admin_id in _support_admin_ids():
+            if admin_id == replier_id:
+                continue
+            try:
+                await bot.send_message(admin_id, text)
+            except Exception:
+                logging.exception("Не удалось отправить пометку об ответе администратору %s", admin_id)
+    except Exception:
+        logging.exception("Не удалось подготовить пометку об ответе")
 
 
 class ProtectContentMiddleware(BaseRequestMiddleware):
@@ -2502,18 +2538,52 @@ async def resend_receipt_start(callback: CallbackQuery, state: FSMContext):
 
 @router.callback_query(F.data == "contact_admin")
 async def contact_admin_start(callback: CallbackQuery, state: FSMContext):
+    """«Написать Куратору»: сначала человек выбирает тему кнопками (темы правятся в админке), потом пишет."""
+    topics = _support_topics()
+    if topics:
+        rows = [[InlineKeyboardButton(text=t, callback_data=f"sup_t_{i}")] for i, t in enumerate(topics)]
+        await callback.message.answer(
+            db.get_setting("support_topic_prompt_text") or "О чём Ваше обращение?",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=rows),
+        )
+        await callback.answer()
+        return
+    await _ask_support_message(callback, state, "")
+
+
+async def _ask_support_message(callback: CallbackQuery, state: FSMContext, topic: str):
     await state.set_state(ContactAdminStates.waiting_message)
+    await state.update_data(topic=topic)
     await callback.message.answer(db.get_setting("contact_admin_prompt_text"))
     await callback.answer()
 
 
+@router.callback_query(F.data.startswith("sup_t_"))
+async def support_topic_chosen(callback: CallbackQuery, state: FSMContext):
+    topics = _support_topics()
+    try:
+        topic = topics[int(callback.data[len("sup_t_"):])]
+    except (ValueError, IndexError):
+        # темы успели поменять - просто показываем список заново
+        await contact_admin_start(callback, state)
+        return
+    try:
+        await callback.message.edit_reply_markup(reply_markup=None)
+    except Exception:
+        pass
+    await _ask_support_message(callback, state, topic)
+
+
 @router.message(ContactAdminStates.waiting_message)
 async def contact_admin_received(message: Message, state: FSMContext):
+    topic = ((await state.get_data()).get("topic") or "").strip()
     await state.clear()
     user = message.from_user
     user_row = db.get_user(user.id)
     name = _user_display_name(user_row) if user_row else (f"@{user.username}" if user.username else str(user.id))
     header = f"✉️ Сообщение от {html.escape(name)}\nID: {user.id}"
+    if topic:
+        header += f"\nТема: <b>{html.escape(topic)}</b>"
     kb = InlineKeyboardMarkup(inline_keyboard=[[
         InlineKeyboardButton(text="↩️ Ответить", callback_data=f"admin_reply_{user.id}"),
         InlineKeyboardButton(text="👤 Профиль", callback_data=f"adm_user_view_{user.id}"),
@@ -2555,6 +2625,7 @@ async def admin_reply_send(message: Message, state: FSMContext):
     try:
         await _send_staff_reply(message, target_user_id)
         await message.answer("Ответ отправлен ✅")
+        await _notify_other_support(message.bot, message.from_user.id, target_user_id)
     except Exception:
         logging.exception("Не удалось отправить ответ пользователю %s", target_user_id)
         await message.answer(
@@ -4614,6 +4685,7 @@ GENERAL_SCREEN_TEXT_LABELS = {
     "feed_post_not_found_text": "если публикация не найдена (удалена). Всплывающая подсказка (alert) - кнопок нет",
     "contact_admin_prompt_text": "приглашение написать «💬 Написать куратору» - после него человек пишет сообщение, дальше уходит одно из двух ниже. Без кнопок",
     "contact_admin_thanks_text": "подтверждение, что сообщение передано - приходит СРАЗУ ПОСЛЕ того, как человек написал (обычный исход). Без кнопок",
+    "support_topic_prompt_text": "вопрос «О чём Ваше обращение?» - приходит СРАЗУ после нажатия «Написать Куратору», под ним кнопки-темы (сами темы - в экране «💬 Обращения людей»)",
     "support_btn_text": "название кнопки, по которой человек пишет куратору прямо в боте (стоит в «Инфо», «Как пользоваться» и под напоминаниями об оплате). Это название кнопки, а не сообщение",
     "support_signature_text": "подпись, которая добавляется к ответам помощника (администратора с правом «Обращения людей»). Ваши ответы идут без подписи",
     "contact_admin_failed_text": "если передать не удалось (сбой) - редкая альтернатива подтверждению выше. Без кнопок",
@@ -5932,6 +6004,27 @@ async def edit_field_value(message: Message, state: FSMContext):
                 return
             db.set_setting(field, str(n))
             await message.answer(f"Готово ✅ Пауза между приветствием и «Первым Касанием»: {n} сек.")
+    elif target == "support_topics":
+        raw_topics = value.strip()
+        topics = [] if raw_topics in ("-", "—") else _parse_word_list(raw_topics)
+        if len(topics) > 8 or any(len(t) > 30 for t in topics):
+            await message.answer("Не больше 8 тем, каждая до 30 символов. Пришлите список ещё раз или /cancel")
+            return
+        db.set_setting("support_topics", "\n".join(topics))
+        if topics:
+            await message.answer(f"Готово ✅ Темы: {', '.join(topics)}.")
+        else:
+            await message.answer("Готово ✅ Выбор темы отключён: человек сразу пишет сообщение.")
+    elif target == "ritual_promo_limit":
+        try:
+            n = int(value.strip())
+            if n < 1 or n > 24:
+                raise ValueError
+        except ValueError:
+            await message.answer("Нужно целое число от 1 до 24 (например, 3). Попробуйте ещё раз:")
+            return
+        db.set_setting("ritual_promo_limit", str(n))
+        await message.answer(f"Готово ✅ Приглашение придёт каждому не больше {n} раз.")
     elif target == "ritual_nudge_days":
         try:
             n = int(value.strip())
@@ -7431,6 +7524,59 @@ async def ritual_toggle_optout(callback: CallbackQuery):
     )
 
 
+def _promo_text_for(user_row, ym: str) -> str:
+    """Текст ежемесячного приглашения для не-подписчиков с подставленными {имя}, {месяц}, {число_дат}."""
+    month = rituals.RU_MONTHS_LOWER[int(ym.split("-")[1]) - 1]
+    n = len(rituals.events_of_month(ym))
+    text = db.get_setting("ritual_promo_text") or ""
+    return _personalize(text, user_row).replace("{месяц}", month).replace("{число_дат}", str(n))
+
+
+def _promo_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=_btn("btn_what_is_sanctum"), callback_data="open_sanctum")],
+        [InlineKeyboardButton(text=_btn("btn_promo_off"), callback_data="rit_promo_off")],
+    ])
+
+
+async def send_ritual_promo(bot: Bot):
+    """1-го числа в 11:41 (через 30 минут после календаря участникам) - приглашение узнать о Sanctum тем, кто
+    ещё не подписан. Не больше ritual_promo_limit раз каждому (сейчас 3), один раз в месяц, и только если
+    в календаре на этот месяц есть даты."""
+    logging.info("[планировщик] send_ritual_promo: старт")
+    if (db.get_setting("ritual_promo_enabled") or "1") != "1":
+        logging.info("[планировщик] send_ritual_promo: выключено")
+        return
+    ym = _today().strftime("%Y-%m")
+    if not rituals.events_of_month(ym) or not (db.get_setting("ritual_promo_text") or "").strip():
+        logging.info("[планировщик] send_ritual_promo: нет дат на месяц или пустой текст")
+        return
+    limit = _int_setting("ritual_promo_limit", 3)
+    sent = 0
+    for u in rituals.get_promo_candidates(limit, ym):
+        try:
+            await _send_long(bot, u["user_id"], _promo_text_for(u, ym), reply_markup=_promo_kb())
+            sent += 1
+        except Exception:
+            logging.exception("Не удалось отправить приглашение в Sanctum пользователю %s", u["user_id"])
+        # считаем попытку в любом случае, чтобы не долбить недоступного человека каждый месяц
+        rituals.mark_promo_sent(u["user_id"], ym)
+        await asyncio.sleep(0.05)
+    logging.info("[планировщик] send_ritual_promo: завершено, отправлено %s", sent)
+
+
+@router.callback_query(F.data == "rit_promo_off")
+async def ritual_promo_off(callback: CallbackQuery):
+    rituals.set_user_flag(callback.from_user.id, "ritual_promo_off", 1)
+    try:
+        await callback.message.edit_reply_markup(reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text=_btn("btn_what_is_sanctum"), callback_data="open_sanctum")],
+        ]))
+    except Exception:
+        pass
+    await callback.answer(db.get_setting("ritual_promo_off_text") or "Хорошо 🌿", show_alert=True)
+
+
 def _user_first_name_for_text(u) -> str:
     return ((u["preferred_name"] or u["first_name"] or "") if u else "").strip()
 
@@ -7511,6 +7657,8 @@ def _ritual_admin_screen():
     announced = db.get_setting("ritual_announced_at") or "ещё не отправляли"
     nudge_on = (db.get_setting("ritual_nudge_enabled") or "1") == "1"
     nudge_days = db.get_setting("ritual_nudge_days") or "3"
+    promo_on = (db.get_setting("ritual_promo_enabled") or "1") == "1"
+    promo_limit = _int_setting("ritual_promo_limit", 3)
     text = (
         "🌙 <b>Календарь ритуалов</b>\n\n"
         f"Дат в таблице: {total} (период: {span})\n"
@@ -7522,7 +7670,10 @@ def _ritual_admin_screen():
         "Ежемесячное сообщение уходит 1-го числа в 11:11 по Киеву, напоминания в день события - в 09:00. "
         "Даты бот не считает сам: он берёт их из этой таблицы, поэтому любую можно поправить здесь.\n\n"
         f"Напоминание тем, кто увидел кнопку календаря, но ни разу её не открыл: "
-        f"{'включено' if nudge_on else 'выключено'}, через {nudge_days} дн. после показа, один раз на человека."
+        f"{'включено' if nudge_on else 'выключено'}, через {nudge_days} дн. после показа, один раз на человека.\n\n"
+        "Приглашение в Sanctum для тех, кто ещё не подписан: приходит 1-го числа в 11:41 по Киеву (через 30 минут после "
+        f"календаря участникам), {'включено' if promo_on else 'выключено'}, не больше {promo_limit} раз каждому. "
+        "Не получают: бывшие и нынешние участники, ушедшие, отказавшиеся, те, у кого висит оплата. Текст - в «✏️ Тексты календаря»."
     )
     if months and months[-1]["ym"] < (_today() + timedelta(days=120)).strftime("%Y-%m"):
         text += "\n\n⚠️ Даты заканчиваются меньше чем через 4 месяца, пора вносить новые."
@@ -7537,9 +7688,50 @@ def _ritual_admin_screen():
             callback_data="adm_rit_toggle_nudge",
         )],
         [InlineKeyboardButton(text="✏️ Через сколько дней напомнить", callback_data="adm_rit_nudge_days")],
+        [InlineKeyboardButton(
+            text="🔕 Выключить приглашение не-подписчикам" if promo_on else "🔔 Включить приглашение не-подписчикам",
+            callback_data="adm_rit_promo_toggle",
+        )],
+        [InlineKeyboardButton(text=f"🔢 Сколько раз каждому (сейчас {promo_limit})", callback_data="adm_rit_promo_limit")],
+        [InlineKeyboardButton(text="👁 Прислать мне пример приглашения", callback_data="adm_rit_promo_test")],
         [InlineKeyboardButton(text="⬅️ Назад", callback_data="adm_back")],
     ])
     return text, kb
+
+
+@router.callback_query(F.data == "adm_rit_promo_toggle")
+async def adm_rit_promo_toggle(callback: CallbackQuery):
+    if not await _require_permission(callback, "adm_rituals"):
+        return
+    db.set_setting("ritual_promo_enabled", "0" if (db.get_setting("ritual_promo_enabled") or "1") == "1" else "1")
+    text, kb = _ritual_admin_screen()
+    await _edit_keep(callback, text, kb)
+    await callback.answer()
+
+
+@router.callback_query(F.data == "adm_rit_promo_limit")
+async def adm_rit_promo_limit_start(callback: CallbackQuery, state: FSMContext):
+    if not await _require_permission(callback, "adm_rituals"):
+        return
+    await state.set_state(EditFieldStates.waiting_value)
+    await state.update_data(target="ritual_promo_limit", field=None)
+    await callback.message.answer(
+        f"Сейчас каждому человеку приглашение придёт не больше {_int_setting('ritual_promo_limit', 3)} раз "
+        "(раз в месяц, пока человек не подписался и не нажал «Больше не присылать»).\n\n"
+        "Пришлите новое число (от 1 до 24):\n\n(или /cancel)",
+        parse_mode=None,
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data == "adm_rit_promo_test")
+async def adm_rit_promo_test(callback: CallbackQuery):
+    if not await _require_permission(callback, "adm_rituals"):
+        return
+    ym = _today().strftime("%Y-%m")
+    user_row = db.get_user(callback.from_user.id)
+    await _send_long(callback.bot, callback.message.chat.id, _promo_text_for(user_row, ym), reply_markup=_promo_kb())
+    await callback.answer("Пример отправлен")
 
 
 @router.callback_query(F.data == "adm_rit_toggle_nudge")
@@ -9117,13 +9309,33 @@ async def adm_support(callback: CallbackQuery):
         f"«{html.escape(_support_signature())}». Ваши ответы идут без подписи.\n\n"
         "Чеки об оплате к этому не относятся: они приходят только владельцу и тем, у кого есть право "
         "«Заявки на подтверждение».\n\n"
-        "Сейчас обращения получают:\n" + "\n".join(names)
+        "Сейчас обращения получают:\n" + "\n".join(names) + "\n\n"
+        "Темы после нажатия кнопки: "
+        + (", ".join(html.escape(t) for t in _support_topics()) if _support_topics() else "выключены (человек сразу пишет)")
+        + ".\nКогда один из отвечающих ответил, остальным приходит пометка «✅ ответил(а)», чтобы не отвечать дважды. "
+        "В тексте ответа можно написать {имя} - подставится имя человека."
     )
     kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="✏️ Темы обращения (список кнопок)", callback_data="adm_sup_topics")],
         [InlineKeyboardButton(text="✏️ Название кнопки, подпись и тексты обращения", callback_data="adm_general_screen_texts")],
         [InlineKeyboardButton(text="⬅️ Назад", callback_data="adm_back")],
     ])
     await _edit_keep(callback, text, kb)
+    await callback.answer()
+
+
+@router.callback_query(F.data == "adm_sup_topics")
+async def adm_support_topics_start(callback: CallbackQuery, state: FSMContext):
+    if not await _require_permission(callback, "adm_support"):
+        return
+    await state.set_state(EditFieldStates.waiting_value)
+    await state.update_data(target="support_topics", field=None)
+    current = "\n".join(_support_topics()) or "(темы выключены)"
+    await callback.message.answer(
+        f"Сейчас темы:\n{current}\n\nПришлите новый список тем: по одной в строке (до 8 тем, каждая до 30 символов). "
+        "Они станут кнопками после «Написать Куратору». «-» отключает выбор темы: человек сразу пишет сообщение.\n\n(или /cancel)",
+        parse_mode=None,
+    )
     await callback.answer()
 
 
@@ -9264,6 +9476,9 @@ async def main():
     scheduler.add_job(send_ritual_monthly, "cron", day=1, hour=11, minute=11, args=[bot],
                       misfire_grace_time=6 * 3600)
     scheduler.add_job(send_ritual_daily, "cron", hour=9, minute=0, args=[bot], misfire_grace_time=3 * 3600)
+    # приглашение в Sanctum тем, кто ещё не подписан: 1-го числа в 11:41, через 30 минут после календаря участникам
+    scheduler.add_job(send_ritual_promo, "cron", day=1, hour=11, minute=41, args=[bot],
+                      misfire_grace_time=6 * 3600)
     # еженедельная сводка "Состояние сейчас" - каждое воскресенье в 19:00 по Киеву
     # (её решение 2026-09-27); время легко поменять здесь же
     scheduler.add_job(
