@@ -765,6 +765,26 @@ def _intention_cta_kb(level: int):
     return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text=_btn("btn_write_intention"), callback_data="start_intention")]])
 
 
+async def _send_return_message(bot, user_id: int, level: int) -> bool:
+    """Короткое «С возвращением» на ступени 2 или 3 (без видео/голоса и без приглашения написать намерение).
+    Возвращает True, если сообщение отправлено."""
+    text = (db.get_setting(f"ascension_return_level{level}_text") or "").strip()
+    if not text or level not in (2, 3):
+        return False
+    user_row = db.get_user(user_id)
+    text = _personalize(text, user_row).replace("{ступень}", _ascension_level_name(level))
+    kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(
+        text=db.get_setting("profile_btn_path_overview_text") or "ℹ️ Как устроен Путь?",
+        callback_data="open_path_overview",
+    )]])
+    try:
+        await _send_long(bot, user_id, text, reply_markup=kb)
+        return True
+    except Exception:
+        logging.exception("Не удалось отправить «С возвращением» пользователю %s", user_id)
+        return False
+
+
 async def _handle_ascension_transition(bot: Bot, user_id: int, old_level: int, new_level: int, base_before: int = None):
     """Если человек реально перешёл на новую ступень (не откат, не тот же
     уровень) — присылает видеокружок/голосовое (если заданы для этой ступени),
@@ -780,18 +800,7 @@ async def _handle_ascension_transition(bot: Bot, user_id: int, old_level: int, n
     # временно показывалась ниже из-за ухода из Sanctum): вместо поздравления с новой ступенью - короткое
     # «С возвращением», без видео/голоса и без приглашения написать намерение
     if base_before is not None and base_before >= new_level and new_level in (2, 3):
-        text = (db.get_setting(f"ascension_return_level{new_level}_text") or "").strip()
-        if text:
-            user_row = db.get_user(user_id)
-            text = _personalize(text, user_row).replace("{ступень}", _ascension_level_name(new_level))
-            kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(
-                text=db.get_setting("profile_btn_path_overview_text") or "ℹ️ Как устроен Путь?",
-                callback_data="open_path_overview",
-            )]])
-            try:
-                await _send_long(bot, user_id, text, reply_markup=kb)
-            except Exception:
-                logging.exception("Не удалось отправить «С возвращением» пользователю %s", user_id)
+        await _send_return_message(bot, user_id, new_level)
         return
     text_key = ASCENSION_TEXT_KEYS.get(new_level)
     if text_key:
@@ -1803,6 +1812,32 @@ def _promise_latest_date(membership):
     return valid_until + timedelta(days=_int_setting("price_lock_days", 30))
 
 
+async def _notify_promise_set(bot, user_id: int, promise_date, membership):
+    """Сообщение владельцу и админам с правом «Заявки на подтверждение»: человек назначил дату оплаты («Оплачу позже»).
+    Сбой уведомления никогда не мешает человеку."""
+    try:
+        user_row = db.get_user(user_id)
+        name_part = html.escape(_user_display_name(user_row)) if user_row else "(имя неизвестно)"
+        id_link = f'<a href="tg://user?id={user_id}">ID {user_id}</a>'
+        until = _parse_date(membership["valid_until"]) if membership and membership["valid_until"] else None
+        until_part = ("\nДоступ был до: " + _fmt_date(until)) if until else ""
+        text = (
+            "⏰ Назначена дата оплаты («Оплачу позже»)\n\n"
+            f"Пользователь: {name_part} ({id_link}){until_part}\n"
+            f"Обещает оплатить: {_fmt_date(promise_date)}\n"
+            f"Напоминание ему придёт {_fmt_date(promise_date - timedelta(days=1))}."
+        )
+        for admin_id in db.get_all_admin_ids():
+            if not db.has_permission(admin_id, "adm_pending"):
+                continue
+            try:
+                await bot.send_message(admin_id, text)
+            except Exception:
+                logging.exception("Не удалось отправить уведомление об «Оплачу позже» админу %s", admin_id)
+    except Exception:
+        logging.exception("Сбой уведомления об «Оплачу позже»")
+
+
 @router.message(PromiseStates.waiting_date)
 async def sanctum_promise_date(message: Message, state: FSMContext):
     text = await _require_text(message)
@@ -1825,6 +1860,7 @@ async def sanctum_promise_date(message: Message, state: FSMContext):
         return
     db.set_promise_date(message.from_user.id, promise_date.isoformat())
     await state.clear()
+    await _notify_promise_set(message.bot, message.from_user.id, promise_date, membership)
     text = (
         db.get_setting("sanctum_promise_confirm_text")
         .replace("{дата_напоминания}", (promise_date - timedelta(days=1)).strftime("%d.%m.%Y"))
@@ -9084,6 +9120,13 @@ async def _typing_pause(bot, chat_id: int, seconds: int):
 async def _send_first_touch(bot, user_id: int):
     """«Первое Касание» - одноразовое сообщение настоящим новичкам. Одна кнопка «Что такое VEDA SANCTUM»
     (следующий шаг к подписке); календарь ритуалов человек увидит позже, на экране законов Sanctum."""
+    # действующий участник Sanctum на Искре или выше (например, ему сделали «Знакомство заново») получает не «Первое
+    # Касание», а «С возвращением» на своей ступени; убранный из Sanctum видит «Первое Касание», а «С возвращением»
+    # придёт, когда ему вернут доступ
+    level = compute_ascension_level(user_id)
+    if level in (2, 3) and await _send_return_message(bot, user_id, level):
+        rituals.mark_ritual_intro_shown(user_id)
+        return
     user_row = db.get_user(user_id)
     text = db.get_setting(ASCENSION_TEXT_KEYS[1])
     photo = db.get_setting("ascension_level1_photo")
