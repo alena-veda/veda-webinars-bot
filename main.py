@@ -14,7 +14,7 @@ from aiogram import BaseMiddleware, Bot, Dispatcher, Router, F
 from aiogram.client.default import Default, DefaultBotProperties
 from aiogram.client.session.middlewares.base import BaseRequestMiddleware
 from aiogram.enums import ParseMode
-from aiogram.exceptions import TelegramBadRequest
+from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError
 from aiogram.dispatcher.event.bases import UNHANDLED
 from aiogram.filters import Command, CommandStart, ExceptionTypeFilter
 from aiogram.fsm.context import FSMContext
@@ -1257,6 +1257,15 @@ async def cmd_start(message: Message, state: FSMContext):
         await state.set_state(NameStates.waiting_name)
         await message.answer(_name_question_text())
         db.mark_name_asked(message.from_user.id)
+        return
+    # человек назвал имя, ему отправили вводное сообщение, но дальше он не прошёл (кнопка не сработала и т.п.):
+    # /start возвращает его на этот шаг, а не оставляет без «Первого Касания»
+    if (user_row["intro_sent_at"] and not user_row["ritual_intro_shown_at"]
+            and not db.is_admin(message.from_user.id)):
+        if _intro_enabled():
+            await _send_intro_message(message.bot, message.from_user.id)
+        else:
+            await _welcome_sequence(message.bot, message.from_user.id)
         return
     await _send_welcome(message)
 
@@ -4687,6 +4696,7 @@ GENERAL_SCREEN_TEXT_LABELS = {
     "feed_post_not_found_text": "если публикация не найдена (удалена). Всплывающая подсказка (alert) - кнопок нет",
     "contact_admin_prompt_text": "приглашение написать «💬 Написать куратору» - после него человек пишет сообщение, дальше уходит одно из двух ниже. Без кнопок",
     "contact_admin_thanks_text": "подтверждение, что сообщение передано - приходит СРАЗУ ПОСЛЕ того, как человек написал (обычный исход). Без кнопок",
+    "unknown_text_reply": "ответ, когда человек написал что-то, что бот не ждал (например, просто «здравствуйте» без вопроса). Под сообщением кнопка «Написать Куратору». Администраторам бот так не отвечает",
     "support_topic_prompt_text": "вопрос «О чём Ваше обращение?» - приходит СРАЗУ после нажатия «Написать Куратору», под ним кнопки-темы (сами темы - в экране «💬 Обращения людей»)",
     "support_btn_text": "название кнопки, по которой человек пишет куратору прямо в боте (стоит в «Инфо», «Как пользоваться» и под напоминаниями об оплате). Это название кнопки, а не сообщение",
     "support_signature_text": "подпись, которая добавляется к ответам помощника (администратора с правом «Обращения людей»). Ваши ответы идут без подписи",
@@ -8877,10 +8887,34 @@ async def check_intro_nudges(bot: Bot):
         logging.exception("Сбой в check_intro_nudges")
 
 
+_ALERT_LAST: dict = {}
+
+
+async def _alert_owner(bot, text: str, key: str = ""):
+    """Короткое предупреждение владельцу о сбое (не чаще раза в 5 минут по одному и тому же поводу).
+    Ошибка здесь никогда не мешает боту работать."""
+    try:
+        now = datetime.now().timestamp()
+        k = key or text[:80]
+        if now - _ALERT_LAST.get(k, 0) < 300:
+            return
+        _ALERT_LAST[k] = now
+        for admin_id in db.get_all_admin_ids():
+            if db.is_owner(admin_id):
+                await bot.send_message(admin_id, "⚠️ " + html.escape(text))
+    except Exception:
+        logging.exception("Не удалось отправить предупреждение владельцу")
+
+
 async def _send_welcome_to(bot, user_id: int):
     welcome_photo = db.get_setting("welcome_photo")
     if welcome_photo:
-        await bot.send_photo(user_id, welcome_photo)
+        try:
+            await bot.send_photo(user_id, welcome_photo)
+        except Exception as e:
+            # картинка приветствия не должна лишать человека самого приветствия
+            logging.exception("Не отправилась картинка приветствия пользователю %s", user_id)
+            await _alert_owner(bot, f"Не отправилась картинка приветствия ({type(e).__name__}); текст приветствия отправлен.", "welcome_photo")
     await _send_long(
         bot, user_id, db.get_setting("welcome_text"),
         reply_markup=main_menu_kb(user_id), protect_content=_protect_for(user_id),
@@ -8909,15 +8943,26 @@ async def _send_first_touch(bot, user_id: int):
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text=_btn("btn_what_is_sanctum"), callback_data="open_sanctum")],
     ])
-    await _send_with_optional_photo(bot, user_id, _personalize(text, user_row), photo, kb)
+    try:
+        await _send_with_optional_photo(bot, user_id, _personalize(text, user_row), photo, kb)
+    except Exception as e:
+        # не получилась картинка/подпись - всё равно отправляем само послание текстом
+        logging.exception("Не отправилось «Первое Касание» с картинкой пользователю %s", user_id)
+        await _alert_owner(bot, f"«Первое Касание» с картинкой не отправилось ({type(e).__name__}); отправляю текстом.", "first_touch")
+        await _send_long(bot, user_id, _personalize(text, user_row), reply_markup=kb)
     # запоминаем момент показа: если человек ни разу не откроет календарь ни
     # отсюда, ни из "Инфо", ни из профиля, через ritual_nudge_days придёт одно
     # (не повторяющееся) напоминание (см. check_reengagement)
     rituals.mark_ritual_intro_shown(user_id)
 
 
-async def _welcome_sequence(bot, user_id: int):
+async def _welcome_sequence(bot, user_id: int, on_welcome_sent=None):
     await _send_welcome_to(bot, user_id)
+    if on_welcome_sent:
+        try:
+            await on_welcome_sent()
+        except Exception:
+            logging.exception("Сбой после отправки приветствия")
     await _typing_pause(bot, user_id, _welcome_pause_seconds())
     await _send_first_touch(bot, user_id)
 
@@ -8940,12 +8985,24 @@ async def intro_continue(callback: CallbackQuery):
         return
     await callback.answer()
     _INTRO_RUNNING.add(user_id)
-    try:
+
+    async def remove_button():
+        # кнопку убираем только когда приветствие уже ушло: если что-то сломается раньше, человек сможет нажать ещё раз
         try:
             await callback.message.edit_reply_markup(reply_markup=None)
         except Exception:
             pass
-        await _welcome_sequence(callback.bot, user_id)
+
+    try:
+        await _welcome_sequence(callback.bot, user_id, on_welcome_sent=remove_button)
+    except Exception as e:
+        logging.exception("Сбой после нажатия «Понятно» у пользователя %s", user_id)
+        await _alert_owner(
+            callback.bot,
+            f"У пользователя {user_id} не сработала кнопка «Понятно» ({type(e).__name__}: {str(e)[:150]}). "
+            "Кнопка у него осталась, пусть нажмёт ещё раз или напишет /start.",
+            "intro_continue",
+        )
     finally:
         _INTRO_RUNNING.discard(user_id)
 
@@ -9364,6 +9421,39 @@ async def on_stale_callback_error(event: ErrorEvent):
     return UNHANDLED
 
 
+@router.error(ExceptionTypeFilter(Exception))
+async def on_unexpected_error(event: ErrorEvent, bot: Bot):
+    """Любая неожиданная ошибка в обработчике: пишем в журнал как ошибку, человеку на нажатой кнопке показываем
+    мягкую подсказку (чтобы не молчать), а владельцу приходит короткое предупреждение (не чаще раза в 5 минут
+    по одному поводу) - чтобы о сбое узнавать сразу, а не от людей."""
+    exc = event.exception
+    logging.error("Необработанная ошибка в обработчике: %r", exc, exc_info=exc)
+    if isinstance(exc, TelegramForbiddenError):
+        return True  # человек заблокировал бота - это не сбой бота
+    try:
+        upd = event.update
+        who = None
+        for part in (getattr(upd, "callback_query", None), getattr(upd, "message", None)):
+            if part is not None and getattr(part, "from_user", None) is not None:
+                who = part.from_user.id
+                break
+        cbq = getattr(upd, "callback_query", None)
+        if cbq is not None:
+            try:
+                await bot.answer_callback_query(cbq.id, text="Что-то пошло не так 🌿 Нажмите ещё раз или напишите Куратору")
+            except Exception:
+                pass
+        where = "кнопка" if cbq is not None else "сообщение"
+        await _alert_owner(
+            bot,
+            f"Сбой в боте ({where}, пользователь {who}): {type(exc).__name__}: {str(exc)[:200]}",
+            f"err:{type(exc).__name__}:{who}",
+        )
+    except Exception:
+        logging.exception("Не удалось обработать сообщение об ошибке")
+    return True
+
+
 # ---------- сообщение владельцу «Бот запущен» ----------
 
 STARTUP_NOTICE_GAP_SECONDS = 300
@@ -9434,6 +9524,19 @@ async def _send_startup_notice(bot: Bot):
                 logging.exception("Не удалось отправить сообщение о запуске администратору %s", admin_id)
     except Exception:
         logging.exception("Не удалось подготовить сообщение о запуске")
+
+
+@router.message(F.text)
+async def unknown_text_fallback(message: Message):
+    """Самый последний обработчик текста: если человек написал что-то, что не подошло ни под одну кнопку и ни под
+    одно ожидание бота, он получает доброжелательный ответ с кнопкой «Написать Куратору», а не тишину. Порядок
+    регистрации принципиален: обязан идти после всех остальных обработчиков. Администраторам не отвечает."""
+    if message.chat.type != "private" or db.is_admin(message.from_user.id):
+        return
+    text = (db.get_setting("unknown_text_reply") or "").strip()
+    if not text:
+        return
+    await message.answer(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=[[_support_btn()]]))
 
 
 async def main():

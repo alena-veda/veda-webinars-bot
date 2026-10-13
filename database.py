@@ -1174,6 +1174,10 @@ def init_db():
         "intro_already_text": "Вы уже на следующем шаге, листайте чат вниз 🌿",
         "support_signature_text": "— Ваш Куратор",
         "support_btn_text": "💬 Написать Куратору",
+        "unknown_text_reply": (
+            "Я Вас слышу 🌿 Чтобы двигаться дальше, выберите нужное действие кнопками в меню внизу экрана. "
+            "Если что-то не получается, нажмите кнопку ниже, и Куратор поможет ⬇️"
+        ),
         "support_topics": "Доступ в канал\nОплата\nВопрос по практике\nДругое",
         "support_topic_prompt_text": "О чём Ваше обращение? Выберите тему кнопкой ниже ⬇️",
         "ritual_promo_enabled": "1",
@@ -1546,8 +1550,11 @@ def reset_user_onboarding(user_id):
     сохранённому имени (preferred_name), поэтому сбрасываем ровно его -
     ступень, Sanctum, цена, заявки, Люминар, покупки и пригласивший не трогаются."""
     conn = get_conn()
+    # «Первое Касание показано» и отметки вводного сообщения тоже сбрасываем: иначе при повторном знакомстве
+    # кнопка «Понятно» видит «уже показано» и отвечает только подсказкой, не присылая приветствие
     conn.execute(
-        "UPDATE users SET preferred_name = NULL, name_asked_at = NULL, name_nudge_sent = 0 WHERE user_id = ?",
+        "UPDATE users SET preferred_name = NULL, name_asked_at = NULL, name_nudge_sent = 0, "
+        "ritual_intro_shown_at = NULL, intro_sent_at = NULL, intro_nudge_sent = 0 WHERE user_id = ?",
         (user_id,),
     )
     conn.commit()
