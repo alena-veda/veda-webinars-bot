@@ -1230,6 +1230,11 @@ async def cmd_start(message: Message, state: FSMContext):
     )
     _remember_action(message.from_user.id, "Нажал «Старт»")
     user_row = db.get_user(message.from_user.id)
+    # вернулся после того, как сам заблокировал бота: знакомство заново с самого начала
+    if user_row and user_row["reintro_pending"] and not db.is_admin(message.from_user.id):
+        db.reset_user_onboarding(message.from_user.id)
+        db.set_reintro_pending(message.from_user.id, False)
+        user_row = db.get_user(message.from_user.id)
     # знакомство считаем завершённым только когда сохранено имя — не просто
     # по факту существования записи в базе. Реальный случай (2026-09-06):
     # у человека временно не отправилось особое приветствие (Telegram на
@@ -1282,6 +1287,11 @@ async def on_my_chat_member_update(event: ChatMemberUpdated):
         db.set_user_self_departed(user_id, True)
         logging.info("Пользователь %s сам заблокировал бота или вышел", user_id)
     elif status == "member":
+        # человек сам заблокировал бота, а теперь вернулся: при его /start знакомство пройдёт заново с самого начала
+        # (имя, важная просьба, приветствие, «Первое Касание»); флаг нужен, чтобы это не зависело от порядка событий
+        previous = db.get_user(user_id)
+        if previous and previous["self_departed"] and not db.is_admin(user_id):
+            db.set_reintro_pending(user_id, True)
         db.set_user_self_departed(user_id, False)
 
 
@@ -5563,8 +5573,13 @@ async def adm_user_toggle(callback: CallbackQuery):
     user_id = int(callback.data.split("_")[-1])
     now_blocked = not db.is_user_blocked(user_id)
     db.set_user_blocked(user_id, now_blocked)
+    note = ""
+    if not now_blocked:
+        # разблокированный человек начинает путь заново: ему сразу приходит вопрос об имени
+        sent = await _restart_onboarding(callback.bot, user_id)
+        note = " Знакомство начато заново." if sent else " Вопрос об имени отправить не удалось, он придёт при /start."
     await _render_user_detail(callback, user_id)
-    await callback.answer("Заблокирован 🚫" if now_blocked else "Разблокирован ✅")
+    await callback.answer(("Заблокирован 🚫" if now_blocked else "Разблокирован ✅") + note, show_alert=bool(note))
 
 
 @router.callback_query(F.data.startswith("adm_user_meditation_toggle_"))
@@ -5599,14 +5614,17 @@ async def adm_user_reset(callback: CallbackQuery):
     if not await _require_permission(callback, "adm_users_list"):
         return
     user_id = int(callback.data.split("_")[-1])
-    db.reset_user_onboarding(user_id)
+    sent = await _restart_onboarding(callback.bot, user_id)
     text, kb, page = _build_users_view(_recall_page(callback.from_user.id, "ul"))
     note = (
-        "Имя сброшено: при следующем /start бот заново спросит имя и повторит знакомство. "
-        "Ступень, ранг Люминара, покупка медитаций, Sanctum и цена остались как были.\n\n"
-    )
+        "Знакомство начато заново: человеку сразу отправлен вопрос об имени, дальше он пройдёт весь путь "
+        "(важная просьба → «Понятно» → картинка и приветствие → через 30 секунд «Первое Касание»). "
+        if sent else
+        "Имя сброшено, но отправить человеку вопрос сейчас не получилось (возможно, он заблокировал бота): "
+        "вопрос появится, когда он нажмёт /start. "
+    ) + "Ступень, ранг Люминара, покупка медитаций, Sanctum и цена остались как были.\n\n"
     await _edit_keep(callback, note + text, kb)
-    await callback.answer("Имя сброшено 🔄")
+    await callback.answer("Знакомство начато заново 🔄" if sent else "Имя сброшено 🔄")
 
 
 # ---------- админ-панель: администраторы ----------
@@ -8894,6 +8912,25 @@ def _intro_completed(user_row) -> bool:
         return False
     sent = user_row["intro_sent_at"]
     return (not sent) or user_row["ritual_intro_shown_at"] >= sent
+
+
+async def _restart_onboarding(bot, user_id: int) -> bool:
+    """Знакомство заново с самого начала: стираем имя и отметки вводного сообщения, ставим человеку состояние
+    «жду имя» и сразу отправляем вопрос «Как я могу к Вам обращаться?». Ступень, Sanctum, цена, Люминар,
+    покупки не трогаются. Возвращает False, если вопрос отправить не удалось (например, человек заблокировал бота):
+    тогда он увидит его при следующем /start."""
+    db.reset_user_onboarding(user_id)
+    db.set_reintro_pending(user_id, False)
+    key = StorageKey(bot_id=bot.id, chat_id=user_id, user_id=user_id)
+    await fsm_storage.set_data(key, {})
+    await fsm_storage.set_state(key, NameStates.waiting_name)
+    try:
+        await bot.send_message(user_id, _name_question_text())
+    except Exception:
+        logging.exception("Не удалось отправить вопрос об имени пользователю %s", user_id)
+        return False
+    db.mark_name_asked(user_id)
+    return True
 
 
 _ALERT_LAST: dict = {}

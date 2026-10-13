@@ -158,6 +158,11 @@ def init_db():
     except Exception:
         pass
     try:
+        # человек сам заблокировал бота и вернулся: при его следующем /start знакомство проходит заново (2026-10-13)
+        c.execute("ALTER TABLE users ADD COLUMN reintro_pending INTEGER DEFAULT 0")
+    except Exception:
+        pass
+    try:
         # когда человек впервые открыл экран VEDA SANCTUM (не сбрасывается, нужен для отчёта «Путь новичков»)
         c.execute("ALTER TABLE users ADD COLUMN sanctum_first_opened_at TEXT")
     except Exception:
@@ -1498,6 +1503,13 @@ def is_user_blocked(user_id):
     row = conn.execute("SELECT blocked FROM users WHERE user_id = ?", (user_id,)).fetchone()
     conn.close()
     return bool(row["blocked"]) if row else False
+
+
+def set_reintro_pending(user_id, pending):
+    conn = get_conn()
+    conn.execute("UPDATE users SET reintro_pending = ? WHERE user_id = ?", (1 if pending else 0, user_id))
+    conn.commit()
+    conn.close()
 
 
 def set_user_blocked(user_id, blocked):
