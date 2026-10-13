@@ -5496,7 +5496,7 @@ async def _render_user_detail(callback: CallbackQuery, user_id: int):
     if can_manage:
         rows.append([InlineKeyboardButton(text=meditation_label, callback_data=f"adm_user_meditation_toggle_{user_id}")])
         rows.append([InlineKeyboardButton(text=block_label, callback_data=f"adm_user_toggle_{user_id}")])
-        rows.append([InlineKeyboardButton(text="🔄 Обнулить только имя (заново познакомится)", callback_data=f"adm_user_reset_{user_id}")])
+        rows.append([InlineKeyboardButton(text="🔄 Знакомство заново (имя стирается, остальное остаётся)", callback_data=f"adm_user_reset_{user_id}")])
     if membership and membership["status"] != "removed" and db.has_permission(viewer, "adm_grant_access"):
         rows.append([InlineKeyboardButton(text="📅 Изменить накопленные дни в Sanctum", callback_data=f"adm_user_days_{user_id}")])
     if can_manage:
