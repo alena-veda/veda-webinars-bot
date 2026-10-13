@@ -466,7 +466,9 @@ def mark_ritual_intro_shown(user_id):
     перезаписывается повторно, если вдруг уже был проставлен раньше."""
     conn = db.get_conn()
     conn.execute(
-        "UPDATE users SET ritual_intro_shown_at = ? WHERE user_id = ? AND ritual_intro_shown_at IS NULL",
+        # обновляем, если отметки ещё нет ИЛИ она старее последнего вводного сообщения (повторное знакомство)
+        "UPDATE users SET ritual_intro_shown_at = ? WHERE user_id = ? AND (ritual_intro_shown_at IS NULL "
+        "OR (intro_sent_at IS NOT NULL AND ritual_intro_shown_at < intro_sent_at))",
         (datetime.now().strftime("%Y-%m-%d %H:%M:%S"), user_id),
     )
     conn.commit()

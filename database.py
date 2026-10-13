@@ -1380,7 +1380,7 @@ def get_intro_nudge_due(cutoff_datetime_str):
         SELECT u.* FROM users u
         WHERE u.intro_sent_at IS NOT NULL AND u.intro_sent_at <= ?
         AND (u.intro_nudge_sent IS NULL OR u.intro_nudge_sent = 0)
-        AND u.ritual_intro_shown_at IS NULL
+        AND (u.ritual_intro_shown_at IS NULL OR u.ritual_intro_shown_at < u.intro_sent_at)
         AND (u.last_action_at IS NULL OR u.last_action_at <= u.intro_sent_at)
         AND (u.blocked IS NULL OR u.blocked = 0)
         AND (u.self_departed IS NULL OR u.self_departed = 0)

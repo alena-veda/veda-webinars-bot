@@ -1260,8 +1260,7 @@ async def cmd_start(message: Message, state: FSMContext):
         return
     # человек назвал имя, ему отправили вводное сообщение, но дальше он не прошёл (кнопка не сработала и т.п.):
     # /start возвращает его на этот шаг, а не оставляет без «Первого Касания»
-    if (user_row["intro_sent_at"] and not user_row["ritual_intro_shown_at"]
-            and not db.is_admin(message.from_user.id)):
+    if user_row["intro_sent_at"] and not _intro_completed(user_row) and not db.is_admin(message.from_user.id):
         if _intro_enabled():
             await _send_intro_message(message.bot, message.from_user.id)
         else:
@@ -8887,6 +8886,16 @@ async def check_intro_nudges(bot: Bot):
         logging.exception("Сбой в check_intro_nudges")
 
 
+def _intro_completed(user_row) -> bool:
+    """Человек уже получил «Первое Касание» ПОСЛЕ самого последнего вводного сообщения. Старая отметка
+    «показано» (например, с первого знакомства, до «Знакомство заново») не считается: иначе кнопка «Понятно»
+    у такого человека отвечала бы только подсказкой и приветствие не приходило бы."""
+    if not user_row or not user_row["ritual_intro_shown_at"]:
+        return False
+    sent = user_row["intro_sent_at"]
+    return (not sent) or user_row["ritual_intro_shown_at"] >= sent
+
+
 _ALERT_LAST: dict = {}
 
 
@@ -8980,7 +8989,7 @@ async def intro_continue(callback: CallbackQuery):
     # приветствие и «Первое Касание» приходят один раз: повторное нажатие
     # (двойной тап, старое сообщение) ничего не дублирует, а человеку на секунду
     # всплывает подсказка, что он уже на следующем шаге
-    if user_id in _INTRO_RUNNING or (user_row and user_row["ritual_intro_shown_at"]):
+    if user_id in _INTRO_RUNNING or _intro_completed(user_row):
         await callback.answer(_intro_already_text())
         return
     await callback.answer()
