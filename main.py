@@ -650,7 +650,7 @@ def _luminar_rank(count: int) -> int:
     return 0
 
 
-def compute_ascension_level(user_id: int) -> int:
+def compute_ascension_level(user_id: int, ignore_standing: bool = False) -> int:
     """Текущая ступень "Пути Восхождения" (1/2/3 пока что) — считается из
     накопленных дней в VEDA SANCTUM (accumulated_days, растёт с каждым
     продлением, не обнуляется при перерыве) плюс ускорители 3-й ступени
@@ -677,7 +677,10 @@ def compute_ascension_level(user_id: int) -> int:
     out_of_standing = membership["status"] == "removed" or (
         valid_until and (_today() - valid_until).days > ASCENSION_OVERDUE_GRACE_DAYS
     )
-    if out_of_standing and level > 1:
+    # ignore_standing=True: ступень «по накопленному времени», без временного понижения на одну за уход
+    # из Sanctum - нужна, чтобы отличить «человек вернулся на ступень, которая у него уже была»
+    # от «человек поднялся на новую ступень»
+    if out_of_standing and level > 1 and not ignore_standing:
         level -= 1
 
     return level
@@ -762,7 +765,7 @@ def _intention_cta_kb(level: int):
     return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text=_btn("btn_write_intention"), callback_data="start_intention")]])
 
 
-async def _handle_ascension_transition(bot: Bot, user_id: int, old_level: int, new_level: int):
+async def _handle_ascension_transition(bot: Bot, user_id: int, old_level: int, new_level: int, base_before: int = None):
     """Если человек реально перешёл на новую ступень (не откат, не тот же
     уровень) — присылает видеокружок/голосовое (если заданы для этой ступени),
     а следом текст-поздравление - именно в таком порядке, по её явному решению
@@ -772,6 +775,23 @@ async def _handle_ascension_transition(bot: Bot, user_id: int, old_level: int, n
     кнопки (см. start_intention_cb), не автоматически, иначе приглашение и
     включение ожидания текста дублируются."""
     if new_level <= old_level:
+        return
+    # человек ВЕРНУЛСЯ на ступень, которая у него уже была (по накопленному времени он её уже заработал, она лишь
+    # временно показывалась ниже из-за ухода из Sanctum): вместо поздравления с новой ступенью - короткое
+    # «С возвращением», без видео/голоса и без приглашения написать намерение
+    if base_before is not None and base_before >= new_level and new_level in (2, 3):
+        text = (db.get_setting(f"ascension_return_level{new_level}_text") or "").strip()
+        if text:
+            user_row = db.get_user(user_id)
+            text = _personalize(text, user_row).replace("{ступень}", _ascension_level_name(new_level))
+            kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(
+                text=db.get_setting("profile_btn_path_overview_text") or "ℹ️ Как устроен Путь?",
+                callback_data="open_path_overview",
+            )]])
+            try:
+                await _send_long(bot, user_id, text, reply_markup=kb)
+            except Exception:
+                logging.exception("Не удалось отправить «С возвращением» пользователю %s", user_id)
         return
     text_key = ASCENSION_TEXT_KEYS.get(new_level)
     if text_key:
@@ -853,16 +873,18 @@ async def _credit_luminar_referral(bot: Bot, referred_user_id: int):
     )
     if new_rank == 1:
         old_referrer_level = compute_ascension_level(referrer_id)
+        referrer_base_before = compute_ascension_level(referrer_id, ignore_standing=True)
         valid_until, _ = _grant_luminar1_gift(referrer_id)
         new_referrer_level = compute_ascension_level(referrer_id)
         gift_note = f"\n🎁 Автоматически подарены 2 месяца в VEDA SANCTUM (до {valid_until.strftime('%d.%m.%Y')})."
-        await _handle_ascension_transition(bot, referrer_id, old_referrer_level, new_referrer_level)
+        await _handle_ascension_transition(bot, referrer_id, old_referrer_level, new_referrer_level, referrer_base_before)
     elif new_rank == 3:
         old_referrer_level = compute_ascension_level(referrer_id)
+        referrer_base_before = compute_ascension_level(referrer_id, ignore_standing=True)
         _grant_luminar3_lifetime(referrer_id)
         new_referrer_level = compute_ascension_level(referrer_id)
         gift_note = "\n🏆 Автоматически предоставлен пожизненный бесплатный доступ в VEDA SANCTUM."
-        await _handle_ascension_transition(bot, referrer_id, old_referrer_level, new_referrer_level)
+        await _handle_ascension_transition(bot, referrer_id, old_referrer_level, new_referrer_level, referrer_base_before)
 
     try:
         await _send_with_optional_photo(
@@ -2450,6 +2472,7 @@ async def reg_confirm(callback: CallbackQuery):
 
     old_level = None
     new_level = None
+    base_before = None
     is_first_sanctum_payment = False
     if reg["product_type"] == "sanctum":
         # НЕ по наличию valid_until у membership - оно могло появиться и без
@@ -2462,6 +2485,7 @@ async def reg_confirm(callback: CallbackQuery):
         ]
         is_first_sanctum_payment = not prior_sanctum_payments
         old_level = compute_ascension_level(reg["user_id"])
+        base_before = compute_ascension_level(reg["user_id"], ignore_standing=True)
         # если у человека действует закреплённая цена, берём её, а не цену из заявки:
         # заявка запоминает цену на момент нажатия оплаты и могла быть создана ДО
         # того, как Вы внесли человека с его прежней ценой
@@ -2500,7 +2524,7 @@ async def reg_confirm(callback: CallbackQuery):
     if reg["product_type"] == "sanctum":
         if is_first_sanctum_payment:
             await _credit_luminar_referral(callback.bot, reg["user_id"])
-        await _handle_ascension_transition(callback.bot, reg["user_id"], old_level, new_level)
+        await _handle_ascension_transition(callback.bot, reg["user_id"], old_level, new_level, base_before)
 
     await _mark_admin_message_done(callback, "✅ ПОДТВЕРЖДЕНО")
     await callback.answer("Подтверждено")
@@ -4189,6 +4213,7 @@ async def adm_grant_access_finish(message: Message, state: FSMContext):
     explicit_price = data.get("explicit_price")
 
     old_level = compute_ascension_level(target_user_id)
+    base_before = compute_ascension_level(target_user_id, ignore_standing=True)
     if explicit_valid_until is None:
         valid_until, locked_price = _extend_sanctum_membership(target_user_id, price=explicit_price)
     else:
@@ -4235,7 +4260,7 @@ async def adm_grant_access_finish(message: Message, state: FSMContext):
             "получилось - скорее всего, этот человек ещё не нажимал /start в боте. Попросите его сделать это, "
             "ссылку на канал придётся прислать ему самостоятельно."
         )
-    await _handle_ascension_transition(message.bot, target_user_id, old_level, new_level)
+    await _handle_ascension_transition(message.bot, target_user_id, old_level, new_level, base_before)
 
 
 @router.callback_query(F.data == "adm_sanctum_list")
@@ -4356,6 +4381,8 @@ HTML_TRUSTED_FIELDS = {
     ("ascension_text", "ascension_level3_brief_text"),
     ("ascension_text", "ascension_level3_text"),
     ("ascension_text", "ascension_overview_text"),
+    ("ascension_text", "ascension_return_level2_text"),
+    ("ascension_text", "ascension_return_level3_text"),
     ("ascension_text", "luminar_intro_short_text"),
     ("profile_text", "profile_greeting_text"),
     ("profile_text", "profile_meditation_reminder_text"),
@@ -4773,6 +4800,8 @@ async def adm_general_screen_text_field_start(callback: CallbackQuery, state: FS
 # ---------- админ-панель: тексты Пути Восхождения и Люминаров ----------
 
 ASCENSION_TEXT_LABELS = {
+    "ascension_return_level2_text": "«С возвращением» на ступень «Искра» - приходит, когда человек вернулся в Sanctum и снова оказался на ступени, которую уже имел (без видео/голоса и без приглашения написать намерение). Можно вставить {имя} и {ступень}. Под сообщением кнопка «ℹ️ Как устроен Путь?»",
+    "ascension_return_level3_text": "«С возвращением» на ступень «Исследователь Глубины» - то же самое для этой ступени. Можно вставить {имя} и {ступень}. Под сообщением кнопка «ℹ️ Как устроен Путь?»",
     "ascension_level1_brief_text": "краткая сводка «Первое Касание» - видна в профиле, короткая версия полного послания ниже",
     "ascension_level1_text": "полное послание «Первое Касание» - приходит сразу после ПЕРВОГО знакомства (имя + общее приветствие), самое первое послание, до него ничего нет. Кнопки: «⚜️ Что такое VEDA SANCTUM» (только для пришедших по реферальной ссылке) и «🌙 Календарь ритуалов» (всегда); при повторном чтении из профиля - без кнопок",
     "ascension_level2_brief_text": "краткая сводка «Искра» - видна в профиле, короткая версия полного послания ниже",
@@ -4792,6 +4821,8 @@ ASCENSION_TEXT_LABELS = {
 }
 
 ASCENSION_TEXT_PLACEHOLDERS = {
+    "ascension_return_level2_text": ["{имя}", "{ступень}"],
+    "ascension_return_level3_text": ["{имя}", "{ступень}"],
     "ascension_level1_text": ["{имя}"],
     "ascension_level2_text": ["{имя}"],
     "ascension_level3_text": ["{имя}"],
@@ -5266,6 +5297,7 @@ async def _apply_luminar_manual(bot: Bot, target_user_id: int, new_count: int) -
 
     old_rank = _luminar_rank(u["luminar_count"] or 0)
     old_level = compute_ascension_level(target_user_id)
+    base_before = compute_ascension_level(target_user_id, ignore_standing=True)
     db.set_luminar_count(target_user_id, new_count)
     new_rank = _luminar_rank(new_count)
     new_level = compute_ascension_level(target_user_id)
@@ -5305,7 +5337,7 @@ async def _apply_luminar_manual(bot: Bot, target_user_id: int, new_count: int) -
     else:
         result_lines.append("Ранг не изменился, счётчик обновлён.")
 
-    await _handle_ascension_transition(bot, target_user_id, old_level, new_level)
+    await _handle_ascension_transition(bot, target_user_id, old_level, new_level, base_before)
     return result_lines
 
 
@@ -5564,12 +5596,13 @@ async def adm_user_days_value(message: Message, state: FSMContext):
     user_id = data["target_user_id"]
     await state.clear()
     old_level = compute_ascension_level(user_id)
+    base_before = compute_ascension_level(user_id, ignore_standing=True)
     db.set_accumulated_days(user_id, days)
     new_level = compute_ascension_level(user_id)
     await message.answer(
         f"Готово ✅ Накоплено {days} дн. (~{days / 30:.1f} мес.), ступень «{_ascension_level_name(new_level)}»."
     )
-    await _handle_ascension_transition(message.bot, user_id, old_level, new_level)
+    await _handle_ascension_transition(message.bot, user_id, old_level, new_level, base_before)
 
 
 @router.callback_query(F.data.startswith("adm_user_toggle_"))
@@ -5581,9 +5614,13 @@ async def adm_user_toggle(callback: CallbackQuery):
     db.set_user_blocked(user_id, now_blocked)
     note = ""
     if not now_blocked:
-        # разблокированный человек начинает путь заново: ему сразу приходит вопрос об имени
-        sent = await _restart_onboarding(callback.bot, user_id)
-        note = " Знакомство начато заново." if sent else " Вопрос об имени отправить не удалось, он придёт при /start."
+        # разблокированный человек начинает путь заново (см. _start_over)
+        outcome = await _start_over(callback.bot, user_id)
+        note = {
+            "sent": " Знакомство начато заново: ему отправлен вопрос об имени.",
+            "pending": " Знакомство начнётся заново при его первом действии в боте.",
+            "failed": " Вопрос об имени отправить не удалось, он придёт при /start.",
+        }[outcome]
     await _render_user_detail(callback, user_id)
     await callback.answer(("Заблокирован 🚫" if now_blocked else "Разблокирован ✅") + note, show_alert=bool(note))
 
@@ -5603,12 +5640,13 @@ async def adm_user_meditation_toggle(callback: CallbackQuery):
         await callback.answer("Этого человека больше нет среди подписчиков.", show_alert=True)
         return
     old_level = compute_ascension_level(user_id)
+    base_before = compute_ascension_level(user_id, ignore_standing=True)
     now_bought = not bool(u["bought_meditation_bot"])
     db.set_bought_meditation_bot(user_id, now_bought)
     new_level = compute_ascension_level(user_id)
     if new_level > old_level:
         try:
-            await _handle_ascension_transition(callback.bot, user_id, old_level, new_level)
+            await _handle_ascension_transition(callback.bot, user_id, old_level, new_level, base_before)
         except Exception:
             logging.exception("Не удалось отправить поздравление со ступенью пользователю %s", user_id)
     await _render_user_detail(callback, user_id)
@@ -5620,17 +5658,26 @@ async def adm_user_reset(callback: CallbackQuery):
     if not await _require_permission(callback, "adm_users_list"):
         return
     user_id = int(callback.data.split("_")[-1])
-    sent = await _restart_onboarding(callback.bot, user_id)
+    outcome = await _start_over(callback.bot, user_id)
     text, kb, page = _build_users_view(_recall_page(callback.from_user.id, "ul"))
-    note = (
-        "Знакомство начато заново: человеку сразу отправлен вопрос об имени, дальше он пройдёт весь путь "
-        "(важная просьба → «Понятно» → картинка и приветствие → через 30 секунд «Первое Касание»). "
-        if sent else
-        "Имя сброшено, но отправить человеку вопрос сейчас не получилось (возможно, он заблокировал бота): "
-        "вопрос появится, когда он нажмёт /start. "
-    ) + "Ступень, ранг Люминара, покупка медитаций, Sanctum и цена остались как были.\n\n"
+    note = {
+        "sent": (
+            "Знакомство начато заново: человеку сразу отправлен вопрос об имени, дальше он пройдёт весь путь "
+            "(важная просьба → «Понятно» → картинка и приветствие → через 30 секунд «Первое Касание»). "
+        ),
+        "pending": (
+            "Имя сброшено. Человек давно не заходил, поэтому вопрос ему сейчас не отправляется: при его первом "
+            "действии в боте (любая кнопка, любое сообщение или /start) бот сам задаст вопрос об имени и поведёт "
+            "по всему пути (важная просьба → «Понятно» → картинка и приветствие → «Первое Касание»). "
+        ),
+        "failed": (
+            "Имя сброшено, но отправить человеку вопрос сейчас не получилось (возможно, он заблокировал бота): "
+            "вопрос появится, когда он нажмёт /start. "
+        ),
+    }[outcome] + "Ступень, ранг Люминара, покупка медитаций, Sanctum и цена остались как были.\n\n"
     await _edit_keep(callback, note + text, kb)
-    await callback.answer("Знакомство начато заново 🔄" if sent else "Имя сброшено 🔄")
+    await callback.answer({"sent": "Знакомство начато заново 🔄", "pending": "Имя сброшено, путь начнётся при его первом действии 🔄",
+                           "failed": "Имя сброшено 🔄"}[outcome])
 
 
 # ---------- админ-панель: администраторы ----------
@@ -8939,6 +8986,54 @@ async def _restart_onboarding(bot, user_id: int) -> bool:
     return True
 
 
+async def _start_over(bot, user_id: int) -> str:
+    """«Знакомство заново» для человека. Если он пользовался ботом за последние сутки, вопрос об имени отправляем
+    сразу ("sent" или "failed", если отправить не удалось). Если давно не заходил, сообщение «из ниоткуда» не
+    шлём: имя и отметки сбрасываем и ставим пометку - при его ПЕРВОМ действии в боте (любая кнопка, любое
+    сообщение, /start) бот сам задаст вопрос об имени и поведёт по всему пути ("pending")."""
+    recent = False
+    row = db.get_user(user_id)
+    last = row["last_action_at"] if row else None
+    if last:
+        try:
+            recent = (datetime.now() - datetime.strptime(last, "%Y-%m-%d %H:%M:%S")).total_seconds() <= 24 * 3600
+        except ValueError:
+            recent = False
+    if recent:
+        return "sent" if await _restart_onboarding(bot, user_id) else "failed"
+    db.reset_user_onboarding(user_id)
+    db.set_reintro_pending(user_id, True)
+    return "pending"
+
+
+class ReintroGateMiddleware(BaseMiddleware):
+    """Если человека сбросили («Знакомство заново», разблокировка, возврат после блокировки бота), но вопрос об имени ему
+    ещё не отправляли, то при его ПЕРВОМ действии (сообщение или кнопка) бот вместо обычного ответа задаёт вопрос об имени
+    и ставит ожидание имени. Дальше путь идёт как у новичка. Администраторов и тех, кто уже отвечает на вопрос об имени, не касается."""
+
+    async def __call__(self, handler, event, data):
+        try:
+            user = getattr(event, "from_user", None)
+            if user and not user.is_bot and not db.is_admin(user.id):
+                row = db.get_user(user.id)
+                if row and row["reintro_pending"]:
+                    state = data.get("state")
+                    current = await state.get_state() if state is not None else None
+                    is_start = isinstance(event, Message) and (event.text or "").startswith("/start")
+                    if current != NameStates.waiting_name.state and not is_start:
+                        bot = data.get("bot") or event.bot
+                        await _restart_onboarding(bot, user.id)
+                        if isinstance(event, CallbackQuery):
+                            try:
+                                await event.answer()
+                            except Exception:
+                                pass
+                        return None
+        except Exception:
+            logging.exception("Сбой в прослойке повторного знакомства")
+        return await handler(event, data)
+
+
 _ALERT_LAST: dict = {}
 
 
@@ -9321,6 +9416,8 @@ class LastActionMiddleware(BaseMiddleware):
 
 router.message.outer_middleware(LastActionMiddleware())
 router.callback_query.outer_middleware(LastActionMiddleware())
+router.message.outer_middleware(ReintroGateMiddleware())
+router.callback_query.outer_middleware(ReintroGateMiddleware())
 
 
 def _newcomer_notify_enabled() -> bool:
