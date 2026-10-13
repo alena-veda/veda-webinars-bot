@@ -1170,6 +1170,12 @@ def _is_non_name(text) -> bool:
     norm = _norm_reply(text)
     if not norm:
         return True
+    # команда («/menu» и т.п.) или нажатая кнопка нижнего меню («Мой профиль», «Вебинары»...) - это не имя; такое бывает
+    # у вернувшегося человека: после «Знакомства заново» нижнее меню у него на экране остаётся
+    if (text or "").lstrip().startswith("/"):
+        return True
+    if norm in {_norm_reply(b) for b in (_MENU_BUTTON_TEXTS | {BTN_ADMIN})}:
+        return True
     stop = {_norm_reply(w) for w in _parse_word_list(db.get_setting("name_stoplist") or "")}
     return norm in stop
 
