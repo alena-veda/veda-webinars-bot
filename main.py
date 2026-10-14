@@ -7177,7 +7177,7 @@ async def _notify_lapsed_not_removed(bot: Bot):
         if since > lock:
             if m["lapsed_notice2_for"] != vu:
                 second.append(m)
-        elif since >= wb_days and m["lapsed_notice1_for"] != vu:
+        elif since > wb_days and m["lapsed_notice1_for"] != vu:
             first.append(m)
     if not first and not second:
         return
@@ -7198,7 +7198,8 @@ async def _notify_lapsed_not_removed(bot: Bot):
 
     parts = ["⚠️ <b>Не продлили подписку и не убраны из VEDA SANCTUM</b>"]
     if first:
-        parts.append(f"<b>Прошло {wb_days} дней после конца срока</b> (им уже ушло возвратное письмо):\n{lines(first)}")
+        sent_note = " (им ушло возвратное письмо)" if (db.get_setting("winback_enabled") or "1") == "1" else ""
+        parts.append(f"<b>Прошло больше {wb_days} дней после конца срока</b>{sent_note}:\n{lines(first)}")
     if second:
         parts.append(
             f"<b>Цена перестала сохраняться (прошло больше {lock} дней)</b>, напоминания о намерении им больше не "
