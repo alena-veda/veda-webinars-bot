@@ -602,7 +602,7 @@ def _extend_sanctum_membership(user_id: int, price=None):
         # оплата без действующей подписки в последние N дней месяца (late_month_days, по умолчанию 3) засчитывается
         # за СЛЕДУЮЩИЙ месяц, а не за остаток этого (её решение 2026-10-14); 0 - выключено
         raw = db.get_setting("late_month_days")
-        n = int(raw) if (raw or "").strip().isdigit() else 3
+        n = int(raw) if (raw or "").strip().isdigit() else 4
         if n > 0 and (_end_of_month(today) - today).days < n:
             base = _end_of_month(today) + timedelta(days=1)
 
@@ -3436,8 +3436,8 @@ def _reengage_screen_text() -> str:
         "<b>5. Правила ухода из Sanctum</b>\n"
         "Цена сохраняется до конца месяца, следующего за последним оплаченным (оплачено до 31.10 - цена до 30.11, "
         "с 01.12 новая). "
-        f"За {db.get_setting('lastchance_days_before') or '2'} дн. до этой даты приходит «последний шанс». "
-        f"Оплата в последние {db.get_setting('late_month_days') or '3'} дн. месяца засчитывается за следующий месяц. "
+        f"За {db.get_setting('lastchance_days_before') or '3'} дн. до этой даты приходит «последний шанс». "
+        f"Оплата в последние {db.get_setting('late_month_days') or '4'} дн. месяца засчитывается за следующий месяц. "
         f"Через {db.get_setting('stage_reset_days') or '90'} дн. отсутствия время в поле для ступеней "
         "обнуляется (ранг Люминара и покупка медитаций остаются). При удалении вручную человеку сразу "
         "уходит письмо с этими правилами.\n\n"
@@ -7232,7 +7232,7 @@ async def _send_stage_notices(bot: Bot):
     door_days = _days_list("door_open_notice_days", "180,365")
     today = _today()
     reset_days = _int_setting("stage_reset_days", 90)
-    before_days = _int_setting("lastchance_days_before", 2)
+    before_days = _int_setting("lastchance_days_before", 3)
     kb = _return_kb()
     for m in db.get_memberships_for_rules():
         try:
@@ -7389,7 +7389,7 @@ async def check_reengagement(bot: Bot):
                 promise = _parse_date(m["promise_date"])
                 if promise and promise >= _today():
                     continue
-            if _today() > deadline or _today() >= deadline - timedelta(days=_int_setting("lastchance_days_before", 2)):
+            if _today() > deadline or _today() >= deadline - timedelta(days=_int_setting("lastchance_days_before", 3)):
                 # срок сохранения цены уже прошёл - письмо "цена сохраняется"
                 # было бы неправдой; а если он вот-вот закончится - вместо этого
                 # письма уйдёт "последний шанс" (ниже), два почти одинаковых
@@ -7409,7 +7409,7 @@ async def check_reengagement(bot: Bot):
     # 2) через stage_reset_days отсутствия - время в поле для ступеней Пути
     # обнуляется (ранг Люминара и покупка VEDA HEALING FLOW остаются навсегда)
     reset_days = _int_setting("stage_reset_days", 90)
-    before_days = _int_setting("lastchance_days_before", 2)
+    before_days = _int_setting("lastchance_days_before", 3)
     today = _today()
     for m in db.get_memberships_for_rules():
         if m["blocked"] or not _is_lapsed(m):

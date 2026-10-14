@@ -592,7 +592,7 @@ def init_db():
         ),
         "price_lock_days": "30",
         "stage_reset_days": "90",
-        "lastchance_days_before": "2",
+        "lastchance_days_before": "3",
         "sanctum_removed_text": (
             "{имя}, Ваш доступ в VEDA SANCTUM | CODEofGOD закончился {дата}.\n\n"
             "Дверь остаётся открытой: до {дата_до} за Вами сохраняется Ваша прежняя цена - {цена}. "
@@ -1238,7 +1238,7 @@ def init_db():
             "Личный разбор - мой дар ступени «Искра» - уже использован, поэтому изменить намерение нельзя. "
             "Оно по-прежнему хранится в разделе «Мой профиль» 🙏"
         ),
-        "late_month_days": "3",
+        "late_month_days": "4",
         "stage_keep_notice_days": "45,75",
         "door_open_notice_days": "180,365",
         "unknown_text_reply": (
@@ -1298,10 +1298,10 @@ def init_db():
         )
         c.execute("INSERT INTO settings (key, value) VALUES ('migr_ritual_nudge_off', '1')")
 
-    # 2026-10-14: «последний шанс» за 2 дня до конца срока цены, т.е. с 28-го (было 5): совпадает с последними 3 днями месяца, когда оплата идёт за следующий месяц; если она не меняла сама, т.е. стоит 5
+    # 2026-10-14: «последний шанс» за 3 дня до конца срока цены, т.е. с 27-го (было 5): совпадает с последними 4 днями месяца, когда оплата идёт за следующий месяц; если она не меняла сама, т.е. стоит 5
     c.execute("SELECT value FROM settings WHERE key = 'migr_lastchance_3'")
     if not c.fetchone():
-        c.execute("UPDATE settings SET value = '2' WHERE key = 'lastchance_days_before' AND value = '5'")
+        c.execute("UPDATE settings SET value = '3' WHERE key = 'lastchance_days_before' AND value = '5'")
         c.execute("INSERT INTO settings (key, value) VALUES ('migr_lastchance_3', '1')")
 
     # аудит 2026-09-29: поздравления Люминаров раньше писали дар прямо в тексте,
