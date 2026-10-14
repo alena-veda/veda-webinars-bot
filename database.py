@@ -457,6 +457,14 @@ def init_db():
         c.execute("ALTER TABLE sanctum_membership ADD COLUMN accumulated_days INTEGER DEFAULT 0")
     except Exception:
         pass
+    for _col in ("stage_notices_sent", "lapsed_notice1_for", "lapsed_notice2_for"):
+        try:
+            # stage_notices_sent - какие «сохранена ступень» / «дверь открыта» уже ушли за ЭТОТ уход (через запятую);
+            # lapsed_notice1_for / lapsed_notice2_for - для какого valid_until уже сообщили владельцу, что человек
+            # не продлил и не убран (через 7 дней после конца и когда перестала сохраняться цена)
+            c.execute(f"ALTER TABLE sanctum_membership ADD COLUMN {_col} TEXT")
+        except Exception:
+            pass
     try:
         # возвратная схема для тех, кто был в Sanctum и не продлил (main.py,
         # check_reengagement) — чтобы не слать напоминание повторно одному и
@@ -1189,6 +1197,25 @@ def init_db():
             "Ваша ступень «{ступень}» с Вами, Ваш ранг Люминара и всё накопленное сохранены. "
             "Условия дальнейшего пути - по кнопке ниже ⬇️"
         ),
+        "sanctum_keep_stage_text": (
+            "{имя}, Ваша ступень «{ступень}» в VEDA SANCTUM | CODEofGOD сохранена за Вами до {дата_до} 🌿\n\n"
+            "Если вернуться в поле до этой даты, накопленное время и ступень продолжатся с того места, "
+            "где Вы остановились. После этой даты отсчёт начнётся заново.\n\n"
+            "Стоимость подписки сейчас: {цена}.\n\n"
+            "С уважением, Алёна ☀️"
+        ),
+        "sanctum_door_open_text": (
+            "{имя}, дверь в VEDA SANCTUM | CODEofGOD остаётся для Вас открытой 🌿\n\n"
+            "Когда почувствуете, что пришло время вернуться, Вы можете войти в любой день. "
+            "Стоимость подписки сейчас: {цена}.\n\n"
+            "С уважением, Алёна ☀️"
+        ),
+        "profile_saved_stage_text": (
+            "🌿 Ваша ступень «{ступень}» сохранена за Вами до {дата}. Если вернуться в VEDA SANCTUM до этой даты, "
+            "накопленное время и ступень продолжатся. После этой даты отсчёт начнётся заново."
+        ),
+        "stage_keep_notice_days": "45,75",
+        "door_open_notice_days": "180,365",
         "unknown_text_reply": (
             "Я Вас слышу 🌿 Чтобы двигаться дальше, выберите нужное действие кнопками в меню внизу экрана. "
             "Если что-то не получается, нажмите кнопку ниже, и Куратор поможет ⬇️"
@@ -1945,9 +1972,10 @@ def get_memberships_for_rules():
     conn = get_conn()
     rows = conn.execute("""
         SELECT sm.user_id, sm.valid_until, sm.price, sm.status, sm.promise_date, sm.accumulated_days,
-               sm.removed_at, sm.lastchance_sent, sm.stage_reset_done,
+               sm.removed_at, sm.lastchance_sent, sm.stage_reset_done, sm.stage_notices_sent, sm.lifetime_free,
+               sm.lapsed_notice1_for, sm.lapsed_notice2_for,
                u.preferred_name, u.first_name, u.username, u.luminar_count, u.bought_meditation_bot,
-               u.blocked
+               u.blocked, u.self_departed
         FROM sanctum_membership sm
         JOIN users u ON u.user_id = sm.user_id
     """).fetchall()
@@ -1958,6 +1986,28 @@ def get_memberships_for_rules():
 def mark_lastchance_sent(user_id):
     conn = get_conn()
     conn.execute("UPDATE sanctum_membership SET lastchance_sent = 1 WHERE user_id = ?", (user_id,))
+    conn.commit()
+    conn.close()
+
+
+def mark_stage_notices_sent(user_id, tokens):
+    """Запоминает, какие письма «ступень сохранена» / «дверь открыта» уже ушли за ЭТОТ уход (токены k45, d180 и т.п.)."""
+    conn = get_conn()
+    row = conn.execute("SELECT stage_notices_sent FROM sanctum_membership WHERE user_id = ?", (user_id,)).fetchone()
+    have = [t for t in ((row["stage_notices_sent"] if row else "") or "").split(",") if t]
+    for t in tokens:
+        if t not in have:
+            have.append(t)
+    conn.execute("UPDATE sanctum_membership SET stage_notices_sent = ? WHERE user_id = ?", (",".join(have), user_id))
+    conn.commit()
+    conn.close()
+
+
+def mark_lapsed_notified(user_id, which, valid_until):
+    """which: 1 или 2 - владельцу уже сообщили про этого не продлившего (для данного valid_until)."""
+    assert which in (1, 2)
+    conn = get_conn()
+    conn.execute(f"UPDATE sanctum_membership SET lapsed_notice{which}_for = ? WHERE user_id = ?", (valid_until, user_id))
     conn.commit()
     conn.close()
 
@@ -2755,7 +2805,7 @@ def upsert_sanctum_membership(user_id, valid_until, price):
         "ON CONFLICT(user_id) DO UPDATE SET valid_until = excluded.valid_until, price = excluded.price, "
         "status = 'active', promise_date = NULL, promise_reminder_sent_for = NULL, "
         "accumulated_days = excluded.accumulated_days, winback_sent = 0, "
-        "removed_at = NULL, lastchance_sent = 0, stage_reset_done = 0, lifetime_free = 0",
+        "removed_at = NULL, lastchance_sent = 0, stage_reset_done = 0, lifetime_free = 0, stage_notices_sent = NULL",
         (user_id, valid_until, price, total_days),
     )
     conn.commit()
@@ -2785,7 +2835,7 @@ def grant_lifetime_sanctum(user_id, price):
         "VALUES (?, ?, ?, 'active', NULL, NULL, ?, 0, NULL, 0, 0, 1) "
         "ON CONFLICT(user_id) DO UPDATE SET valid_until = excluded.valid_until, price = excluded.price, "
         "status = 'active', promise_date = NULL, promise_reminder_sent_for = NULL, winback_sent = 0, "
-        "removed_at = NULL, lastchance_sent = 0, stage_reset_done = 0, lifetime_free = 1",
+        "removed_at = NULL, lastchance_sent = 0, stage_reset_done = 0, lifetime_free = 1, stage_notices_sent = NULL",
         (user_id, LIFETIME_VALID_UNTIL, price, accumulated),
     )
     conn.commit()
@@ -2812,13 +2862,13 @@ def set_sanctum_status(user_id, status):
         if row and row["lifetime_free"]:
             cur = conn.execute(
                 "UPDATE sanctum_membership SET status = 'removed', removed_at = ?, lastchance_sent = 0, "
-                "stage_reset_done = 0, valid_until = ?, lifetime_free = 0 WHERE user_id = ?",
+                "stage_reset_done = 0, valid_until = ?, lifetime_free = 0, stage_notices_sent = NULL WHERE user_id = ?",
                 (today_str, today_str, user_id),
             )
         else:
             cur = conn.execute(
                 "UPDATE sanctum_membership SET status = 'removed', removed_at = ?, lastchance_sent = 0, "
-                "stage_reset_done = 0 WHERE user_id = ?",
+                "stage_reset_done = 0, stage_notices_sent = NULL WHERE user_id = ?",
                 (today_str, user_id),
             )
     else:
@@ -2846,7 +2896,6 @@ def get_promises_due_on(target_date):
     conn = get_conn()
     rows = conn.execute(
         "SELECT * FROM sanctum_membership WHERE promise_date = ? "
-        "AND (status IS NULL OR status != 'removed') "
         "AND ((promise_reminder_sent_for IS NULL) OR (promise_reminder_sent_for != promise_date))",
         (target_date,),
     ).fetchall()

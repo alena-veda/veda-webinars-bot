@@ -1806,10 +1806,12 @@ def _promise_latest_date(membership):
     можно было бы бесконечно "отодвигать" оплату и держать старую цену."""
     if not membership or not membership["valid_until"]:
         return None
-    valid_until = _parse_date(membership["valid_until"])
-    if not valid_until:
+    # у убранного вручную срок сохранения цены считается от дня, когда его убрали (см. _lapse_anchor), а не
+    # от конца оплаченного срока; у остальных точка отсчёта - valid_until, как и раньше
+    anchor = _lapse_anchor(membership)
+    if not anchor:
         return None
-    return valid_until + timedelta(days=_int_setting("price_lock_days", 30))
+    return anchor + timedelta(days=_int_setting("price_lock_days", 30))
 
 
 async def _notify_promise_set(bot, user_id: int, promise_date, membership):
@@ -2248,6 +2250,21 @@ async def adm_feed_add_questions_no(callback: CallbackQuery, state: FSMContext):
 
 # ---------- мой профиль ----------
 
+def _saved_stage(user_id: int, membership):
+    """(ступень, последний день, когда можно вернуться) у ушедшего из Sanctum, за кем ещё хранится накопленное время:
+    была ступень «Искра» и выше, сейчас показывается ниже (убран или просрочил больше 30 дней), обнуление
+    (stage_reset_days) ещё не наступило. Иначе None."""
+    if not membership or membership["lifetime_free"] or membership["stage_reset_done"] or not _is_lapsed(membership):
+        return None
+    base = compute_ascension_level(user_id, ignore_standing=True)
+    if base < 2 or compute_ascension_level(user_id) >= base:
+        return None
+    last_day = _lapse_anchor(membership) + timedelta(days=_int_setting("stage_reset_days", 90) - 1)
+    if last_day < _today():
+        return None
+    return base, last_day
+
+
 @router.message(F.text == BTN_PROFILE)
 async def show_profile(message: Message):
     user_id = message.from_user.id
@@ -2270,6 +2287,15 @@ async def show_profile(message: Message):
             pass
 
     membership = db.get_sanctum_membership(user_id)
+    # ушёл из Sanctum, но накопленное время и ступень ещё хранятся (до обнуления): говорим об этом прямо
+    saved_stage = _saved_stage(user_id, membership)
+    saved_stage_line = ""
+    if saved_stage:
+        saved_stage_line = (
+            db.get_setting("profile_saved_stage_text")
+            .replace("{ступень}", _ascension_level_name(saved_stage[0]))
+            .replace("{дата}", _fmt_date(saved_stage[1]))
+        )
     sanctum_header = db.get_setting("profile_sanctum_header_text").replace("{название}", html.escape(SANCTUM_FULL_NAME))
     sanctum_lines = [sanctum_header]
     sanctum_button = None
@@ -2292,9 +2318,14 @@ async def show_profile(message: Message):
                 sanctum_lines.append(
                     db.get_setting("profile_sanctum_promise_text").replace("{дата}", promise.strftime('%d.%m.%Y'))
                 )
+    elif saved_stage:
+        sanctum_lines.append(saved_stage_line)
+        sanctum_button = InlineKeyboardButton(text=_btn("btn_return"), callback_data="sanctum_apply")
     else:
         sanctum_lines.append(db.get_setting("profile_sanctum_never_joined_text"))
         sanctum_button = InlineKeyboardButton(text=BTN_SANCTUM, callback_data="open_sanctum")
+    if saved_stage and membership["status"] != "removed":
+        sanctum_lines.append(saved_stage_line)
     blocks.append("\n".join(sanctum_lines))
 
     regs = [
@@ -2338,7 +2369,9 @@ async def show_profile(message: Message):
             )
             rank_label = rank_label + "\n" + progress_line
         path_lines.append(rank_label)
-    path_lines.append(_personalize(db.get_setting(f"ascension_level{level}_brief_text"), user_row))
+    if not saved_stage:
+        # у сохранившего ступень краткий текст «Первого Касания» (про «пробыв в поле 2 месяца...») был бы неправдой
+        path_lines.append(_personalize(db.get_setting(f"ascension_level{level}_brief_text"), user_row))
     blocks.append("\n\n".join(path_lines))
 
     luminar_teaser = db.get_setting("luminar_intro_short_text")
@@ -3277,6 +3310,8 @@ REENGAGE_FIELD_LABELS = {
     "sanctum_lastchance_text": "2) «последний шанс сохранить цену» - приходит ПОСЛЕ текста выше, за несколько дней до конца срока (⏱ ниже). Кнопки: «Желаю войти вновь» и «⏰ Оплачу позже»",
     "sanctum_reset_text": "3) «время в поле обнулилось» - приходит ПОСЛЕДНИМ в этой цепочке, если человек так и не вернулся. Кнопка: только «Желаю войти вновь» - «Оплачу позже» здесь уже не предлагается, цена больше не сохраняется",
     "sanctum_reset_luminar_line": "добавка ВНУТРИ текста выше (3), про ранг Люминара - только тем, у кого он есть. Отдельной кнопки не добавляет",
+    "sanctum_keep_stage_text": "4) «ступень сохранена» - приходит ушедшим, у кого была ступень «Искра» и выше, пока накопленное время ещё хранится (по умолчанию на 45-й и 75-й день). Кнопка: «Желаю войти вновь»",
+    "sanctum_door_open_text": "5) «дверь открыта» - короткое письмо после обнуления (по умолчанию на 180-й и 365-й день), дальше бот не пишет. Кнопка: «Желаю войти вновь»",
     "sanctum_reset_meditation_line": "добавка ВНУТРИ текста выше (3), про VEDA HEALING FLOW - только тем, кто уже покупал. Отдельной кнопки не добавляет",
 }
 
@@ -3320,7 +3355,12 @@ def _reengage_screen_text() -> str:
         f"За {db.get_setting('lastchance_days_before') or '5'} дн. до конца срока приходит «последний шанс». "
         f"Через {db.get_setting('stage_reset_days') or '90'} дн. отсутствия время в поле для ступеней "
         "обнуляется (ранг Люминара и покупка медитаций остаются). При удалении вручную человеку сразу "
-        "уходит письмо с этими правилами."
+        "уходит письмо с этими правилами.\n\n"
+        "<b>6. Ступень сохранена / дверь открыта</b>\n"
+        f"Ушедшим со ступенью «Искра» и выше: на {db.get_setting('stage_keep_notice_days') or '45,75'}-й день "
+        "отсутствия письмо «ступень сохранена до такой-то даты». После обнуления: на "
+        f"{db.get_setting('door_open_notice_days') or '180,365'}-й день короткое «дверь открыта», потом бот не пишет. "
+        "Кнопка в письмах одна: «Желаю войти вновь» (ведёт на оплату)."
     )
 
 
@@ -3359,6 +3399,10 @@ def _reengage_screen_kb() -> InlineKeyboardMarkup:
         [InlineKeyboardButton(text="✏️ Текст «время в поле обнулилось»", callback_data="adm_rg_sanctum_reset_text")],
         [InlineKeyboardButton(text="✏️ Строка про Люминара", callback_data="adm_rg_sanctum_reset_luminar_line"),
          InlineKeyboardButton(text="✏️ Строка про медитации", callback_data="adm_rg_sanctum_reset_meditation_line")],
+        [InlineKeyboardButton(text="✏️ Текст «ступень сохранена»", callback_data="adm_rg_sanctum_keep_stage_text")],
+        [InlineKeyboardButton(text="✏️ Текст «дверь открыта»", callback_data="adm_rg_sanctum_door_open_text")],
+        [InlineKeyboardButton(text="⏱ Дни писем «ступень сохранена»", callback_data="adm_rg_stage_keep_notice_days"),
+         InlineKeyboardButton(text="⏱ Дни писем «дверь открыта»", callback_data="adm_rg_door_open_notice_days")],
         [InlineKeyboardButton(text="⏱ Дней сохранения цены", callback_data="adm_rg_price_lock_days"),
          InlineKeyboardButton(text="⏱ Дней до обнуления", callback_data="adm_rg_stage_reset_days")],
         [InlineKeyboardButton(text="⏱ За сколько дней напомнить", callback_data="adm_rg_lastchance_days_before")],
@@ -3462,6 +3506,19 @@ async def adm_reengage_field_start(callback: CallbackQuery, state: FSMContext):
             "Можно вставить <code>{имя}</code>. Метка <code>{сохранено}</code> - сюда бот сам подставит "
             "строки про ранг Люминара и про VEDA HEALING FLOW, но только тем, у кого они есть."
         )
+    elif field in ("sanctum_keep_stage_text", "sanctum_door_open_text"):
+        prompt = (
+            f"{current_block}Пришлите новый {REENGAGE_FIELD_LABELS[field]}.\n\n"
+            "Можно вставить <code>{имя}</code>, <code>{ступень}</code> (название сохранённой ступени), "
+            "<code>{дата_до}</code> (последний день, когда можно вернуться и не потерять накопленное) "
+            "и <code>{цена}</code> (стоимость подписки сейчас)."
+        )
+    elif field in ("stage_keep_notice_days", "door_open_notice_days"):
+        what = {
+            "stage_keep_notice_days": "на какие дни после ухода слать «ступень сохранена» (меньше, чем дней до обнуления)",
+            "door_open_notice_days": "на какие дни после ухода слать «дверь открыта» (после обнуления)",
+        }[field]
+        prompt = f"{current_block}Пришлите числа через запятую: {what}. Например: 45,75"
     elif field == "sanctum_nudge_hours":
         prompt = (
             f"{current_block}Через сколько часов после просмотра VEDA SANCTUM напоминать, если человек "
@@ -4405,6 +4462,8 @@ HTML_TRUSTED_FIELDS = {
     ("reengage", "sanctum_removed_text"),
     ("reengage", "sanctum_lastchance_text"),
     ("reengage", "sanctum_reset_text"),
+    ("reengage", "sanctum_keep_stage_text"),
+    ("reengage", "sanctum_door_open_text"),
     ("reengage", "sanctum_reset_luminar_line"),
     ("reengage", "sanctum_reset_meditation_line"),
     ("webinar_reminder_text", "webinar_reminder_5d_text"),
@@ -4427,6 +4486,7 @@ HTML_TRUSTED_FIELDS = {
     ("profile_text", "profile_sanctum_active_text"),
     ("profile_text", "profile_sanctum_expired_text"),
     ("profile_text", "profile_sanctum_promise_text"),
+    ("profile_text", "profile_saved_stage_text"),
     ("profile_text", "profile_sanctum_never_joined_text"),
     ("profile_text", "profile_webinars_header_text"),
     ("profile_text", "profile_webinars_empty_text"),
@@ -5417,6 +5477,7 @@ PROFILE_TEXT_LABELS = {
     "profile_sanctum_expired_text": "строка «доступ закончился ...»",
     "profile_sanctum_promise_text": "строка «Вы планировали оплатить ...»",
     "profile_sanctum_never_joined_text": "строка для тех, кто ещё не в VEDA SANCTUM",
+    "profile_saved_stage_text": "строка «ступень сохранена до ...» (для ушедших из Sanctum, у кого ещё хранится накопленное время)",
     "profile_webinars_header_text": "заголовок блока «Вебинары»",
     "profile_webinars_empty_text": "строка, если вебинаров ещё не было",
     "profile_meditation_reminder_text": "напоминание о VEDA HEALING FLOW в профиле",
@@ -5441,6 +5502,7 @@ PROFILE_TEXT_PLACEHOLDERS = {
     "profile_sanctum_active_text": ["{дата}"],
     "profile_sanctum_expired_text": ["{дата}"],
     "profile_sanctum_promise_text": ["{дата}"],
+    "profile_saved_stage_text": ["{ступень}", "{дата}"],
     "profile_path_step_label_text": ["{ступень}"],
     "profile_luminar_rank_label_text": ["{ранг}"],
     "profile_referral_intro_text": ["{ссылка}"],
@@ -5933,6 +5995,12 @@ async def edit_field_value(message: Message, state: FSMContext):
                 await message.answer("Нужно целое число больше нуля (например, 24 или 3). Попробуйте ещё раз:")
                 return
             db.set_setting(field, str(n))
+        elif field in ("stage_keep_notice_days", "door_open_notice_days"):
+            parts = [p_.strip() for p_ in value.replace(";", ",").split(",") if p_.strip()]
+            if not parts or not all(p_.isdigit() and int(p_) > 0 for p_ in parts):
+                await message.answer("Нужны целые числа больше нуля через запятую (например, 45,75). Попробуйте ещё раз:")
+                return
+            db.set_setting(field, ",".join(str(n) for n in sorted({int(p_) for p_ in parts})))
         else:
             db.set_setting(field, value)
         await message.answer("Обновлено ✅")
@@ -7031,6 +7099,125 @@ async def check_sanctum_reminders(bot: Bot):
 
 # ---------- автовозврат "потерянных" людей ----------
 
+STAGE_NOTICE_WINDOW_DAYS = 14
+
+
+def _days_list(key: str, default: str) -> list:
+    out = []
+    for part in (db.get_setting(key) or default).replace(";", ",").split(","):
+        part = part.strip()
+        if part.isdigit() and int(part) > 0:
+            out.append(int(part))
+    return sorted(set(out))
+
+
+async def _send_stage_notices(bot: Bot):
+    """Письма ушедшим из Sanctum (её решение 2026-10-14). Пока накопленное время ещё хранится (до обнуления) и у
+    человека была ступень «Искра» и выше - «ступень сохранена до такой-то даты» на 45-й и 75-й день отсутствия
+    (stage_keep_notice_days). После обнуления - короткое «дверь открыта» на 180-й и 365-й день (door_open_notice_days),
+    дальше бот не пишет. Каждое письмо один раз за уход; если день пропущен больше чем на 14 дней (например, бот
+    не работал), письмо не отправляется, а только отмечается. Кнопка одна: «Желаю войти вновь» (ведёт на оплату)."""
+    keep_days = _days_list("stage_keep_notice_days", "45,75")
+    door_days = _days_list("door_open_notice_days", "180,365")
+    today = _today()
+    reset_days = _int_setting("stage_reset_days", 90)
+    kb = _return_kb()
+    for m in db.get_memberships_for_rules():
+        try:
+            if m["blocked"] or m["self_departed"] or m["lifetime_free"] or not _is_lapsed(m) or _promise_active(m):
+                continue
+            anchor = _lapse_anchor(m)
+            since = (today - anchor).days
+            if not m["stage_reset_done"] and since < reset_days:
+                if (m["accumulated_days"] or 0) / 30 < 2:
+                    continue
+                kind, offsets, key = "k", keep_days, "sanctum_keep_stage_text"
+            elif m["stage_reset_done"]:
+                kind, offsets, key = "d", door_days, "sanctum_door_open_text"
+            else:
+                continue
+            due = [d for d in offsets if d <= since]
+            if not due:
+                continue
+            latest = max(due)
+            sent = [t for t in (m["stage_notices_sent"] or "").split(",") if t]
+            tokens = [f"{kind}{d}" for d in due]
+            if f"{kind}{latest}" in sent:
+                continue
+            if since - latest > STAGE_NOTICE_WINDOW_DAYS:
+                db.mark_stage_notices_sent(m["user_id"], tokens)
+                continue
+            level = compute_ascension_level(m["user_id"], ignore_standing=True)
+            text = _lapse_text(
+                db.get_setting(key), m, anchor, anchor + timedelta(days=reset_days - 1), _price_for_user(m["user_id"])
+            ).replace("{ступень}", _ascension_level_name(level))
+            db.mark_stage_notices_sent(m["user_id"], tokens)
+            if text.strip():
+                try:
+                    await bot.send_message(m["user_id"], text, reply_markup=kb)
+                except Exception:
+                    logging.exception("Не удалось отправить письмо «%s» пользователю %s", key, m["user_id"])
+        except Exception:
+            logging.exception("Сбой письма ушедшему из Sanctum, пользователь %s", m["user_id"])
+
+
+async def _notify_lapsed_not_removed(bot: Bot):
+    """Владельцу (и помощникам с правом «Подписчики»): люди, которые не продлили подписку, но остаются в списке и не
+    убраны. Одно сообщение за запуск, о каждом человеке дважды за срок: через winback_days_after_expiry дней после
+    конца срока и когда перестала сохраняться цена. Тем, кто назвал дату «Оплачу позже» и ещё не просрочил её, не пишем."""
+    today = _today()
+    wb_days = _int_setting("winback_days_after_expiry", 7)
+    lock = _int_setting("price_lock_days", 30)
+    first, second = [], []
+    for m in db.get_memberships_for_rules():
+        if m["status"] == "removed" or m["lifetime_free"] or not _is_lapsed(m) or _promise_active(m):
+            continue
+        vu = m["valid_until"]
+        since = (today - _lapse_anchor(m)).days
+        if since > lock:
+            if m["lapsed_notice2_for"] != vu:
+                second.append(m)
+        elif since >= wb_days and m["lapsed_notice1_for"] != vu:
+            first.append(m)
+    if not first and not second:
+        return
+    recipients = [a for a in db.get_all_admin_ids() if db.has_permission(a, "adm_sanctum_list")]
+    if not recipients:
+        return
+
+    def lines(rows):
+        out = []
+        for m in rows[:15]:
+            until = _fmt_date(_parse_date(m["valid_until"]))
+            out.append(
+                f'• <a href="tg://user?id={m["user_id"]}">{html.escape(_user_display_name(m))}</a>, срок закончился {until}'
+            )
+        if len(rows) > 15:
+            out.append(f"…и ещё {len(rows) - 15}")
+        return "\n".join(out)
+
+    parts = ["⚠️ <b>Не продлили подписку и не убраны из VEDA SANCTUM</b>"]
+    if first:
+        parts.append(f"<b>Прошло {wb_days} дней после конца срока</b> (им уже ушло возвратное письмо):\n{lines(first)}")
+    if second:
+        parts.append(
+            f"<b>Цена перестала сохраняться (прошло больше {lock} дней)</b>, напоминания о намерении им больше не "
+            f"приходят:\n{lines(second)}"
+        )
+    parts.append("Решать Вам: оставить как есть или убрать из Sanctum (список подписчиков, карточка человека).")
+    kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="📋 Кто просрочил", callback_data="adm_sanctum_attention")]])
+    for admin_id in recipients:
+        try:
+            await bot.send_message(admin_id, "\n\n".join(parts), reply_markup=kb)
+        except Exception:
+            logging.exception("Не удалось отправить сводку о не продливших админу %s", admin_id)
+    for m in second:
+        db.mark_lapsed_notified(m["user_id"], 2, m["valid_until"])
+        db.mark_lapsed_notified(m["user_id"], 1, m["valid_until"])
+    for m in first:
+        db.mark_lapsed_notified(m["user_id"], 1, m["valid_until"])
+
+
 async def check_reengagement(bot: Bot):
     logging.info("[планировщик] check_reengagement: старт")
     now = datetime.now(TZ)
@@ -7144,6 +7331,16 @@ async def check_reengagement(bot: Bot):
                     await bot.send_message(m["user_id"], text, reply_markup=_return_kb())
                 except Exception:
                     logging.exception("Не удалось отправить письмо об обнулении времени в поле пользователю %s", m["user_id"])
+
+    # «ступень сохранена» / «дверь открыта» для ушедших и сводка владельцу о не продливших и не убранных
+    try:
+        await _send_stage_notices(bot)
+    except Exception:
+        logging.exception("Сбой в письмах ушедшим из Sanctum")
+    try:
+        await _notify_lapsed_not_removed(bot)
+    except Exception:
+        logging.exception("Сбой в сводке о не продливших")
 
     # "поведенческое" напоминание - человек смотрел информацию о Sanctum, но
     # не дошёл до "Инициировать шаг" (её явное решение 2026-09-17: тоньше и
@@ -7284,6 +7481,10 @@ async def check_intention_reminders(bot: Bot):
     logging.info("[планировщик] check_intention_reminders: старт")
     today = _today()
     for m in db.get_active_intentions():
+        # не продлил и срок сохранения цены уже прошёл (убранным напоминания и так не идут) - больше не напоминаем;
+        # вернётся в Sanctum - напоминания возобновятся сами
+        if _price_lock_expired(m):
+            continue
         template = db.get_setting("ascension_intention_recall_text") or ""
         text = template.replace("{намерение}", m["intention_text"])
         rows = [[InlineKeyboardButton(text=_btn("btn_edit_intention"), callback_data="edit_intention")]]
