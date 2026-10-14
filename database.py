@@ -457,6 +457,14 @@ def init_db():
         c.execute("ALTER TABLE sanctum_membership ADD COLUMN accumulated_days INTEGER DEFAULT 0")
     except Exception:
         pass
+    try:
+        # после обнуления времени в поле на 90-й день: когда человек вернётся и оплатит, ему приходит одно сообщение
+        # «Вы снова на Первом Касании, до Искры 60 оплаченных дней» (флаг снимается после отправки). Те, у кого
+        # обнуление уже случилось до этого обновления, тоже получат его при возвращении.
+        c.execute("ALTER TABLE sanctum_membership ADD COLUMN reset_pending_notice INTEGER DEFAULT 0")
+        c.execute("UPDATE sanctum_membership SET reset_pending_notice = 1 WHERE stage_reset_done = 1")
+    except Exception:
+        pass
     for _col in ("stage_notices_sent", "lapsed_notice1_for", "lapsed_notice2_for"):
         try:
             # stage_notices_sent - какие «сохранена ступень» / «дверь открыта» уже ушли за ЭТОТ уход (через запятую);
@@ -584,7 +592,7 @@ def init_db():
         ),
         "price_lock_days": "30",
         "stage_reset_days": "90",
-        "lastchance_days_before": "5",
+        "lastchance_days_before": "2",
         "sanctum_removed_text": (
             "{имя}, Ваш доступ в VEDA SANCTUM | CODEofGOD закончился {дата}.\n\n"
             "Дверь остаётся открытой: до {дата_до} за Вами сохраняется Ваша прежняя цена - {цена}. "
@@ -1214,6 +1222,23 @@ def init_db():
             "🌿 Ваша ступень «{ступень}» сохранена за Вами до {дата}. Если вернуться в VEDA SANCTUM до этой даты, "
             "накопленное время и ступень продолжатся. После этой даты отсчёт начнётся заново."
         ),
+        "ascension_return_after_reset_text": (
+            "{имя}, с возвращением в поле VEDA SANCTUM 🌿\n\n"
+            "Время в поле для ступеней Пути Восхождения начинается заново: сейчас Вы на ступени «{ступень}», "
+            "а до ступени «Искра» нужно 60 оплаченных дней в поле. Дверь открыта, и путь вверх идёт снова. "
+            "Условия ступеней - по кнопке ниже ⬇️"
+        ),
+        "intention_existing_text": (
+            "{имя}, Ваше намерение уже записано:\n«{намерение}»\n\n"
+            "Оно хранится в разделе «Мой профиль». Пока оно не разобрано, Вы можете изменить его там "
+            "или по кнопке ниже ⬇️"
+        ),
+        "intention_locked_text": (
+            "{имя}, Ваше намерение уже разобрано:\n«{намерение}»\n\n"
+            "Личный разбор - мой дар ступени «Искра» - уже использован, поэтому изменить намерение нельзя. "
+            "Оно по-прежнему хранится в разделе «Мой профиль» 🙏"
+        ),
+        "late_month_days": "3",
         "stage_keep_notice_days": "45,75",
         "door_open_notice_days": "180,365",
         "unknown_text_reply": (
@@ -1272,6 +1297,12 @@ def init_db():
             "ON CONFLICT(key) DO UPDATE SET value = '0'"
         )
         c.execute("INSERT INTO settings (key, value) VALUES ('migr_ritual_nudge_off', '1')")
+
+    # 2026-10-14: «последний шанс» за 2 дня до конца срока цены, т.е. с 28-го (было 5): совпадает с последними 3 днями месяца, когда оплата идёт за следующий месяц; если она не меняла сама, т.е. стоит 5
+    c.execute("SELECT value FROM settings WHERE key = 'migr_lastchance_3'")
+    if not c.fetchone():
+        c.execute("UPDATE settings SET value = '2' WHERE key = 'lastchance_days_before' AND value = '5'")
+        c.execute("INSERT INTO settings (key, value) VALUES ('migr_lastchance_3', '1')")
 
     # аудит 2026-09-29: поздравления Люминаров раньше писали дар прямо в тексте,
     # {дар} нигде реально не подставлялся - теперь дар вынесен в отдельную
@@ -2017,8 +2048,16 @@ def mark_stage_reset_done(user_id):
     ранг Люминара и отметку покупки VEDA HEALING FLOW (они в users, а не тут)."""
     conn = get_conn()
     conn.execute(
-        "UPDATE sanctum_membership SET accumulated_days = 0, stage_reset_done = 1 WHERE user_id = ?", (user_id,)
+        "UPDATE sanctum_membership SET accumulated_days = 0, stage_reset_done = 1, reset_pending_notice = 1 "
+        "WHERE user_id = ?", (user_id,)
     )
+    conn.commit()
+    conn.close()
+
+
+def clear_reset_notice(user_id):
+    conn = get_conn()
+    conn.execute("UPDATE sanctum_membership SET reset_pending_notice = 0 WHERE user_id = ?", (user_id,))
     conn.commit()
     conn.close()
 

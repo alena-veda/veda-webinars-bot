@@ -7,7 +7,7 @@ import os
 import random
 import re
 import urllib.parse
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from zoneinfo import ZoneInfo
 
 from aiogram import BaseMiddleware, Bot, Dispatcher, Router, F
@@ -476,7 +476,29 @@ def _price_lock_deadline(membership):
     Sanctum. Единая дата на весь случай ухода - и для текстов, и для цены."""
     if not _is_lapsed(membership):
         return None
-    return _lapse_anchor(membership) + timedelta(days=_int_setting("price_lock_days", 30))
+    return _price_lock_until(membership)
+
+
+def _next_month_end(d):
+    y, m = (d.year, d.month + 1) if d.month < 12 else (d.year + 1, 1)
+    return date(y, m, calendar.monthrange(y, m)[1])
+
+
+def _price_lock_until(membership):
+    """Последний день (включительно), когда за ушедшим сохраняется его прежняя цена - её решение 2026-10-14:
+    до конца календарного месяца, следующего за последним оплаченным (оплачено до 31.10 - цена до 30.11, новая
+    с 01.12). У убранного вручную отсчёт идёт от месяца, в котором его убрали, если это позже конца оплаты.
+    None, если нечего считать."""
+    if not membership or not membership["valid_until"]:
+        return None
+    base = _parse_date(membership["valid_until"])
+    if not base or base.year >= 9000:
+        return None
+    if membership["status"] == "removed" and membership["removed_at"]:
+        removed_at = _parse_date(membership["removed_at"])
+        if removed_at and removed_at > base:
+            base = removed_at
+    return _next_month_end(base)
 
 
 def _price_lock_expired(membership) -> bool:
@@ -577,6 +599,12 @@ def _extend_sanctum_membership(user_id: int, price=None):
         base = current_valid_until + timedelta(days=1)
     else:
         base = today
+        # оплата без действующей подписки в последние N дней месяца (late_month_days, по умолчанию 3) засчитывается
+        # за СЛЕДУЮЩИЙ месяц, а не за остаток этого (её решение 2026-10-14); 0 - выключено
+        raw = db.get_setting("late_month_days")
+        n = int(raw) if (raw or "").strip().isdigit() else 3
+        if n > 0 and (_end_of_month(today) - today).days < n:
+            base = _end_of_month(today) + timedelta(days=1)
 
     new_valid_until = _end_of_month(base)
     resolved_price = _resolve_price(user_id, price)
@@ -751,8 +779,27 @@ async def _invite_intention_ritual(bot: Bot, user_id: int):
 
 @router.callback_query(F.data == "start_intention")
 async def start_intention_cb(callback: CallbackQuery):
+    # намерение уже записано (например, человек вернулся на Искру после обнуления): не просим писать заново, а
+    # говорим, где оно хранится; изменить можно, пока оно не разобрано (её решение 2026-10-14)
+    membership = db.get_sanctum_membership(callback.from_user.id)
+    if membership and membership["intention_text"]:
+        await _show_existing_intention(callback.message, callback.from_user.id, membership)
+        await callback.answer()
+        return
     await _invite_intention_ritual(callback.bot, callback.from_user.id)
     await callback.answer()
+
+
+async def _show_existing_intention(message, user_id: int, membership):
+    reviewed = bool(membership["intention_reviewed"])
+    template = db.get_setting("intention_locked_text" if reviewed else "intention_existing_text") or ""
+    text = _personalize(template, db.get_user(user_id)).replace("{намерение}", membership["intention_text"])
+    kb = None
+    if not reviewed:
+        kb = InlineKeyboardMarkup(inline_keyboard=[[
+            InlineKeyboardButton(text=_btn("btn_edit_intention"), callback_data="edit_intention")
+        ]])
+    await _answer_long(message, text, reply_markup=kb)
 
 
 def _intention_cta_kb(level: int):
@@ -778,10 +825,40 @@ async def _send_return_message(bot, user_id: int, level: int) -> bool:
         callback_data="open_path_overview",
     )]])
     try:
+        # необязательный видеокружок / голосовое ПЕРЕД текстом (загружаются в «Видео/голос на переходе ступени»)
+        await _send_ascension_extra_media(bot, user_id, level, prefix="ascension_return_level")
         await _send_long(bot, user_id, text, reply_markup=kb)
         return True
     except Exception:
         logging.exception("Не удалось отправить «С возвращением» пользователю %s", user_id)
+        return False
+
+
+async def _send_after_reset_notice(bot, user_id: int) -> bool:
+    """Человек вернулся в Sanctum ПОСЛЕ обнуления времени в поле: одно сообщение «Вы снова на Первом Касании, до Искры
+    60 оплаченных дней» (её решение 2026-10-14: обо всём уведомлять). Флаг reset_pending_notice ставится при обнулении
+    и снимается здесь; шлём только когда подписка уже снова действует."""
+    m = db.get_sanctum_membership(user_id)
+    if not m or not m["reset_pending_notice"] or m["status"] == "removed" or not m["valid_until"]:
+        return False
+    valid_until = _parse_date(m["valid_until"])
+    if not valid_until or valid_until < _today():
+        return False
+    db.clear_reset_notice(user_id)
+    text = (db.get_setting("ascension_return_after_reset_text") or "").strip()
+    if not text:
+        return False
+    user_row = db.get_user(user_id)
+    text = _personalize(text, user_row).replace("{ступень}", _ascension_level_name(compute_ascension_level(user_id)))
+    kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(
+        text=db.get_setting("profile_btn_path_overview_text") or "ℹ️ Как устроен Путь?",
+        callback_data="open_path_overview",
+    )]])
+    try:
+        await _send_long(bot, user_id, text, reply_markup=kb)
+        return True
+    except Exception:
+        logging.exception("Не удалось отправить сообщение после обнуления пользователю %s", user_id)
         return False
 
 
@@ -794,6 +871,7 @@ async def _handle_ascension_transition(bot: Bot, user_id: int, old_level: int, n
     сам ритуал (_invite_intention_ritual) запускается ТОЛЬКО по нажатию этой
     кнопки (см. start_intention_cb), не автоматически, иначе приглашение и
     включение ожидания текста дублируются."""
+    await _send_after_reset_notice(bot, user_id)
     if new_level <= old_level:
         return
     # человек ВЕРНУЛСЯ на ступень, которая у него уже была (по накопленному времени он её уже заработал, она лишь
@@ -816,7 +894,7 @@ async def _handle_ascension_transition(bot: Bot, user_id: int, old_level: int, n
             logging.exception("Не удалось отправить поздравление со ступенью пользователю %s", user_id)
 
 
-async def _send_ascension_extra_media(bot: Bot, user_id: int, level: int):
+async def _send_ascension_extra_media(bot: Bot, user_id: int, level: int, prefix: str = "ascension_level"):
     """Необязательный личный штрих на переходе ступени - видеокружок и/или
     голосовое, отдельным сообщением ПЕРЕД текстом-поздравлением (у обоих в
     Telegram не бывает подписи, поэтому не совмещаются с текстом в одно
@@ -827,14 +905,14 @@ async def _send_ascension_extra_media(bot: Bot, user_id: int, level: int):
     # включён запрет на голосовые/видеосообщения не от контактов, ошибка
     # VOICE_MESSAGES_FORBIDDEN, обнаружено 2026-09-18), голосовое всё равно
     # должно попытаться дойти само по себе, а не молча пропуститься вместе с ним
-    video_note_id = db.get_setting(f"ascension_level{level}_video_note")
+    video_note_id = db.get_setting(f"{prefix}{level}_video_note")
     if video_note_id:
         try:
             await bot.send_video_note(user_id, video_note_id)
         except Exception:
             logging.exception("Не удалось отправить видеокружок ступени пользователю %s", user_id)
 
-    voice_id = db.get_setting(f"ascension_level{level}_voice")
+    voice_id = db.get_setting(f"{prefix}{level}_voice")
     if voice_id:
         try:
             await bot.send_voice(user_id, voice_id)
@@ -1348,8 +1426,11 @@ async def name_received(message: Message, state: FSMContext):
     await state.clear()
     # уведомление владельцу: человек назвал имя и идёт дальше; «где он сейчас»
     # зависит от того, что бот сейчас ему отправит
+    known_member = bool(db.get_sanctum_membership(message.from_user.id))
     if pending_webinar_id:
         where = "пришёл по ссылке на вебинар, видит карточку вебинара"
+    elif known_member:
+        where = "уже был в Sanctum: получил приветствие без «важной просьбы», затем «С возвращением» или «Первое Касание»"
     elif _intro_enabled():
         where = f"получил вводное сообщение, ждёт нажатия «{_plain_text(db.get_setting('intro_msg_button') or '')}»"
     else:
@@ -1365,9 +1446,10 @@ async def name_received(message: Message, state: FSMContext):
         # не страшно, он уже в главном меню с полноценной навигацией
         await _send_webinar_card(message, pending_webinar_id, message.from_user.id)
         return
-    if _intro_enabled():
+    if _intro_enabled() and not known_member:
         # сначала короткая просьба читать внимательно и кнопка; приветствие и
-        # «Первое Касание» придут после её нажатия (см. intro_continue)
+        # «Первое Касание» придут после её нажатия (см. intro_continue). Тем, кто уже был в Sanctum, этот шаг
+        # пропускаем: они и так знают пространство (её решение 2026-10-14) - сразу приветствие и ступень
         await _send_intro_message(message.bot, message.from_user.id)
         return
     await _welcome_sequence(message.bot, message.from_user.id)
@@ -1389,6 +1471,12 @@ async def cmd_cancel(message: Message, state: FSMContext):
 async def intention_received(message: Message, state: FSMContext):
     text = await _require_text(message)
     if text is None:
+        return
+    current = db.get_sanctum_membership(message.from_user.id)
+    if current and current["intention_text"] and current["intention_reviewed"]:
+        # пока человек отвечал, разбор уже отметили - не перезаписываем
+        await state.clear()
+        await _show_existing_intention(message, message.from_user.id, current)
         return
     db.set_sanctum_intention(message.from_user.id, text.strip())
     await state.clear()
@@ -1806,12 +1894,7 @@ def _promise_latest_date(membership):
     можно было бы бесконечно "отодвигать" оплату и держать старую цену."""
     if not membership or not membership["valid_until"]:
         return None
-    # у убранного вручную срок сохранения цены считается от дня, когда его убрали (см. _lapse_anchor), а не
-    # от конца оплаченного срока; у остальных точка отсчёта - valid_until, как и раньше
-    anchor = _lapse_anchor(membership)
-    if not anchor:
-        return None
-    return anchor + timedelta(days=_int_setting("price_lock_days", 30))
+    return _price_lock_until(membership)
 
 
 async def _notify_promise_set(bot, user_id: int, promise_date, membership):
@@ -2416,7 +2499,7 @@ async def show_profile(message: Message):
     meditation_btn = _meditation_button()
     if meditation_btn:
         kb_rows.append([meditation_btn])
-    if membership and membership["intention_text"]:
+    if membership and membership["intention_text"] and not membership["intention_reviewed"]:
         kb_rows.append([InlineKeyboardButton(text=_btn("btn_edit_intention"), callback_data="edit_intention")])
     # кнопка календаря - для всех, не только для участников Sanctum: профиль -
     # то место, куда люди возвращаются сами, регулярно (проверить свой
@@ -3351,8 +3434,10 @@ def _reengage_screen_text() -> str:
         "«Хочу оплатить подписку». Получает это напоминание ВМЕСТО «Пришёл и пропал», не вместе с ним.\n"
         f"Текст: {html.escape(nudge_text[:150])}{'…' if len(nudge_text) > 150 else ''}\n\n"
         "<b>5. Правила ухода из Sanctum</b>\n"
-        f"Цена сохраняется {db.get_setting('price_lock_days') or '30'} дн. после ухода (потом - как для новых). "
-        f"За {db.get_setting('lastchance_days_before') or '5'} дн. до конца срока приходит «последний шанс». "
+        "Цена сохраняется до конца месяца, следующего за последним оплаченным (оплачено до 31.10 - цена до 30.11, "
+        "с 01.12 новая). "
+        f"За {db.get_setting('lastchance_days_before') or '2'} дн. до этой даты приходит «последний шанс». "
+        f"Оплата в последние {db.get_setting('late_month_days') or '3'} дн. месяца засчитывается за следующий месяц. "
         f"Через {db.get_setting('stage_reset_days') or '90'} дн. отсутствия время в поле для ступеней "
         "обнуляется (ранг Люминара и покупка медитаций остаются). При удалении вручную человеку сразу "
         "уходит письмо с этими правилами.\n\n"
@@ -3403,8 +3488,8 @@ def _reengage_screen_kb() -> InlineKeyboardMarkup:
         [InlineKeyboardButton(text="✏️ Текст «дверь открыта»", callback_data="adm_rg_sanctum_door_open_text")],
         [InlineKeyboardButton(text="⏱ Дни писем «ступень сохранена»", callback_data="adm_rg_stage_keep_notice_days"),
          InlineKeyboardButton(text="⏱ Дни писем «дверь открыта»", callback_data="adm_rg_door_open_notice_days")],
-        [InlineKeyboardButton(text="⏱ Дней сохранения цены", callback_data="adm_rg_price_lock_days"),
-         InlineKeyboardButton(text="⏱ Дней до обнуления", callback_data="adm_rg_stage_reset_days")],
+        [InlineKeyboardButton(text="⏱ Дней до обнуления", callback_data="adm_rg_stage_reset_days"),
+         InlineKeyboardButton(text="⏱ Последние дни месяца", callback_data="adm_rg_late_month_days")],
         [InlineKeyboardButton(text="⏱ За сколько дней напомнить", callback_data="adm_rg_lastchance_days_before")],
         [InlineKeyboardButton(text="⬅️ Назад", callback_data="adm_back")],
     ])
@@ -3486,6 +3571,12 @@ async def adm_reengage_field_start(callback: CallbackQuery, state: FSMContext):
         prompt = (
             f"{current_block}Через сколько дней после истечения доступа напоминать, если человек так и "
             "не продлил? Пришлите число (например, 7):"
+        )
+    elif field == "late_month_days":
+        prompt = (
+            f"{current_block}Пришлите число дней: если человек, у которого нет действующей подписки, оплачивает в "
+            "последние N дней месяца, оплата засчитывается за СЛЕДУЮЩИЙ месяц, а не за остаток этого. "
+            "0 - выключить. Например: 3"
         )
     elif field in ("price_lock_days", "stage_reset_days", "lastchance_days_before"):
         what = {
@@ -4402,7 +4493,7 @@ async def adm_sanctum_kick(callback: CallbackQuery):
         removed_on = _lapse_anchor(membership) or _today()
         text = _lapse_text(
             db.get_setting("sanctum_removed_text"), user_row, removed_on,
-            removed_on + timedelta(days=_int_setting("price_lock_days", 30)),
+            _price_lock_until(membership) or removed_on,
             membership["price"] or db.get_sanctum()["price"],
         )
         try:
@@ -4478,6 +4569,7 @@ HTML_TRUSTED_FIELDS = {
     ("ascension_text", "ascension_overview_text"),
     ("ascension_text", "ascension_return_level2_text"),
     ("ascension_text", "ascension_return_level3_text"),
+    ("ascension_text", "ascension_return_after_reset_text"),
     ("ascension_text", "luminar_intro_short_text"),
     ("profile_text", "profile_greeting_text"),
     ("profile_text", "profile_meditation_reminder_text"),
@@ -4898,6 +4990,7 @@ async def adm_general_screen_text_field_start(callback: CallbackQuery, state: FS
 ASCENSION_TEXT_LABELS = {
     "ascension_return_level2_text": "«С возвращением» на ступень «Искра» - приходит, когда человек вернулся в Sanctum и снова оказался на ступени, которую уже имел (без видео/голоса и без приглашения написать намерение). Можно вставить {имя} и {ступень}. Под сообщением кнопка «ℹ️ Как устроен Путь?»",
     "ascension_return_level3_text": "«С возвращением» на ступень «Исследователь Глубины» - то же самое для этой ступени. Можно вставить {имя} и {ступень}. Под сообщением кнопка «ℹ️ Как устроен Путь?»",
+    "ascension_return_after_reset_text": "«Вы снова на Первом Касании» - приходит один раз тому, кто вернулся в Sanctum ПОСЛЕ обнуления времени в поле (на 90-й день отсутствия), сразу после «Оплата подтверждена». Можно вставить {имя} и {ступень}. Под сообщением кнопка «ℹ️ Как устроен Путь?»",
     "ascension_level1_brief_text": "краткая сводка «Первое Касание» - видна в профиле, короткая версия полного послания ниже",
     "ascension_level1_text": "полное послание «Первое Касание» - приходит сразу после ПЕРВОГО знакомства (имя + общее приветствие), самое первое послание, до него ничего нет. Кнопки: «⚜️ Что такое VEDA SANCTUM» (только для пришедших по реферальной ссылке) и «🌙 Календарь ритуалов» (всегда); при повторном чтении из профиля - без кнопок",
     "ascension_level2_brief_text": "краткая сводка «Искра» - видна в профиле, короткая версия полного послания ниже",
@@ -4919,6 +5012,7 @@ ASCENSION_TEXT_LABELS = {
 ASCENSION_TEXT_PLACEHOLDERS = {
     "ascension_return_level2_text": ["{имя}", "{ступень}"],
     "ascension_return_level3_text": ["{имя}", "{ступень}"],
+    "ascension_return_after_reset_text": ["{имя}", "{ступень}"],
     "ascension_level1_text": ["{имя}"],
     "ascension_level2_text": ["{имя}"],
     "ascension_level3_text": ["{имя}"],
@@ -4988,6 +5082,8 @@ INTENTION_TEXT_LABELS = {
     "ascension_intention_confirmation_text": "2) Ответ сразу после того, как человек написал намерение - приходит СРАЗУ ПОСЛЕ того, как он ответил на приглашение выше. Кнопка «💌 Написать запрос Алёне», если личная ссылка задана",
     "ascension_intention_recall_text": "3) Ежемесячное напоминание о намерении - приходит 8 и 22 числа каждого месяца ПОСЛЕ того, как намерение уже записано, пока Вы не отметите разбор «дан» в «🕯 Намерения участников». Кнопка «✏️ Изменить намерение» - всегда; кнопка «💌 Написать Алёне лично» - только пока разбор НЕ отмечен",
     "intention_edit_prompt_text": "4) Приглашение переписать намерение - открывается кнопкой «✏️ Изменить намерение» в профиле или в напоминании выше, в ЛЮБОЙ момент после того, как намерение уже записано. Без кнопок - человек просто пишет новый текст в ответ",
+    "intention_existing_text": "5) Если человек нажал «Написать намерение» (например, на повторной Искре), а намерение у него уже записано и ещё НЕ разобрано - показывается вместо приглашения. Можно вставить {имя} и {намерение}. Кнопка: «✏️ Изменить намерение»",
+    "intention_locked_text": "6) То же, но намерение уже РАЗОБРАНО (Вы отметили «Разбор дан») - изменить нельзя, дар использован. Можно вставить {имя} и {намерение}. Без кнопки",
     "intention_missing_text": "Если нажали «Изменить намерение», а оно ещё НЕ записано - редкий случай, обычно до этого доходит только через прямую ссылку, минуя приглашение выше. Это всплывающая подсказка, не отдельное сообщение - кнопок нет",
 }
 
@@ -4995,6 +5091,8 @@ INTENTION_TEXT_PLACEHOLDERS = {
     "ascension_intention_confirmation_text": ["{имя}"],
     "ascension_intention_recall_text": ["{намерение}"],
     "intention_edit_prompt_text": ["{текст}"],
+    "intention_existing_text": ["{имя}", "{намерение}"],
+    "intention_locked_text": ["{имя}", "{намерение}"],
 }
 
 
@@ -5985,7 +6083,16 @@ async def edit_field_value(message: Message, state: FSMContext):
         db.set_setting(field, value)
         await message.answer("Обновлено ✅")
     elif target == "reengage":
-        if field in ("stall_hours", "reengage_days_silent", "winback_days_after_expiry", "sanctum_nudge_hours",
+        if field == "late_month_days":
+            try:
+                n = int(value.strip())
+                if n < 0 or n > 15:
+                    raise ValueError
+            except ValueError:
+                await message.answer("Нужно целое число от 0 до 15 (0 - выключить). Попробуйте ещё раз:")
+                return
+            db.set_setting(field, str(n))
+        elif field in ("stall_hours", "reengage_days_silent", "winback_days_after_expiry", "sanctum_nudge_hours",
                      "price_lock_days", "stage_reset_days", "lastchance_days_before"):
             try:
                 n = int(value.strip())
@@ -6336,6 +6443,10 @@ async def adm_ascension_photo_start(callback: CallbackQuery, state: FSMContext):
 ASCENSION_EXTRA_MEDIA_LABELS = {
     "ascension_level2_video_note": ("🎥 Видеокружок «Искра»", "video_note"),
     "ascension_level2_voice": ("🎤 Голосовое «Искра»", "voice"),
+    "ascension_return_level2_video_note": ("🎥 Видеокружок «С возвращением» (Искра)", "video_note"),
+    "ascension_return_level2_voice": ("🎤 Голосовое «С возвращением» (Искра)", "voice"),
+    "ascension_return_level3_video_note": ("🎥 Видеокружок «С возвращением» (Исследователь Глубины)", "video_note"),
+    "ascension_return_level3_voice": ("🎤 Голосовое «С возвращением» (Исследователь Глубины)", "voice"),
 }
 
 
@@ -7121,6 +7232,7 @@ async def _send_stage_notices(bot: Bot):
     door_days = _days_list("door_open_notice_days", "180,365")
     today = _today()
     reset_days = _int_setting("stage_reset_days", 90)
+    before_days = _int_setting("lastchance_days_before", 2)
     kb = _return_kb()
     for m in db.get_memberships_for_rules():
         try:
@@ -7147,6 +7259,9 @@ async def _send_stage_notices(bot: Bot):
             if since - latest > STAGE_NOTICE_WINDOW_DAYS:
                 db.mark_stage_notices_sent(m["user_id"], tokens)
                 continue
+            lock_end = _price_lock_until(m)
+            if lock_end and (lock_end - timedelta(days=before_days + 1)) <= today <= lock_end + timedelta(days=1):
+                continue  # рядом с «последним шансом»: два похожих письма в один день не нужны, перенесём на пару дней
             level = compute_ascension_level(m["user_id"], ignore_standing=True)
             text = _lapse_text(
                 db.get_setting(key), m, anchor, anchor + timedelta(days=reset_days - 1), _price_for_user(m["user_id"])
@@ -7167,14 +7282,13 @@ async def _notify_lapsed_not_removed(bot: Bot):
     конца срока и когда перестала сохраняться цена. Тем, кто назвал дату «Оплачу позже» и ещё не просрочил её, не пишем."""
     today = _today()
     wb_days = _int_setting("winback_days_after_expiry", 7)
-    lock = _int_setting("price_lock_days", 30)
     first, second = [], []
     for m in db.get_memberships_for_rules():
         if m["status"] == "removed" or m["lifetime_free"] or not _is_lapsed(m) or _promise_active(m):
             continue
         vu = m["valid_until"]
         since = (today - _lapse_anchor(m)).days
-        if since > lock:
+        if _price_lock_expired(m):
             if m["lapsed_notice2_for"] != vu:
                 second.append(m)
         elif since > wb_days and m["lapsed_notice1_for"] != vu:
@@ -7202,7 +7316,7 @@ async def _notify_lapsed_not_removed(bot: Bot):
         parts.append(f"<b>Прошло больше {wb_days} дней после конца срока</b>{sent_note}:\n{lines(first)}")
     if second:
         parts.append(
-            f"<b>Цена перестала сохраняться (прошло больше {lock} дней)</b>, напоминания о намерении им больше не "
+            f"<b>Цена перестала сохраняться</b> (срок сохранения прошёл), напоминания о намерении им больше не "
             f"приходят:\n{lines(second)}"
         )
     parts.append("Решать Вам: оставить как есть или убрать из Sanctum (список подписчиков, карточка человека).")
@@ -7265,10 +7379,9 @@ async def check_reengagement(bot: Bot):
         winback_days = int(db.get_setting("winback_days_after_expiry") or "7")
         cutoff_date = (_today() - timedelta(days=winback_days)).isoformat()
         template = db.get_setting("winback_text") or ""
-        lock_days = _int_setting("price_lock_days", 30)
         for m in db.get_lapsed_sanctum_user_ids(cutoff_date):
             expired = datetime.strptime(m["valid_until"], "%Y-%m-%d").date()
-            deadline = expired + timedelta(days=lock_days)
+            deadline = _next_month_end(expired)
             # человек сам отметил в боте, что оплатит позже, и дата ещё не
             # наступила - не беспокоим (и НЕ отмечаем как отправленное, вернёмся
             # к нему, если дата пройдёт без оплаты)
@@ -7276,7 +7389,7 @@ async def check_reengagement(bot: Bot):
                 promise = _parse_date(m["promise_date"])
                 if promise and promise >= _today():
                     continue
-            if _today() > deadline or _today() >= deadline - timedelta(days=_int_setting("lastchance_days_before", 5)):
+            if _today() > deadline or _today() >= deadline - timedelta(days=_int_setting("lastchance_days_before", 2)):
                 # срок сохранения цены уже прошёл - письмо "цена сохраняется"
                 # было бы неправдой; а если он вот-вот закончится - вместо этого
                 # письма уйдёт "последний шанс" (ниже), два почти одинаковых
@@ -7295,15 +7408,14 @@ async def check_reengagement(bot: Bot):
     # срока сохранения цены - последний шанс вернуться по прежней цене;
     # 2) через stage_reset_days отсутствия - время в поле для ступеней Пути
     # обнуляется (ранг Люминара и покупка VEDA HEALING FLOW остаются навсегда)
-    lock_days = _int_setting("price_lock_days", 30)
     reset_days = _int_setting("stage_reset_days", 90)
-    before_days = _int_setting("lastchance_days_before", 5)
+    before_days = _int_setting("lastchance_days_before", 2)
     today = _today()
     for m in db.get_memberships_for_rules():
         if m["blocked"] or not _is_lapsed(m):
             continue
         anchor = _lapse_anchor(m)
-        deadline = anchor + timedelta(days=lock_days)
+        deadline = _price_lock_until(m)
 
         if not m["lastchance_sent"] and (deadline - timedelta(days=before_days)) <= today <= deadline:
             if not _promise_active(m):
@@ -7488,13 +7600,13 @@ async def check_intention_reminders(bot: Bot):
             continue
         template = db.get_setting("ascension_intention_recall_text") or ""
         text = template.replace("{намерение}", m["intention_text"])
-        rows = [[InlineKeyboardButton(text=_btn("btn_edit_intention"), callback_data="edit_intention")]]
+        rows = [] if m["intention_reviewed"] else [[InlineKeyboardButton(text=_btn("btn_edit_intention"), callback_data="edit_intention")]]
         if not m["intention_reviewed"]:
             personal_link = db.get_setting("admin_personal_chat_link")
             if personal_link:
                 rows.append([InlineKeyboardButton(text=_btn("btn_write_alena"), url=personal_link)])
         try:
-            await bot.send_message(m["user_id"], text, reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
+            await bot.send_message(m["user_id"], text, reply_markup=InlineKeyboardMarkup(inline_keyboard=rows) if rows else None)
         except Exception:
             logging.exception("Не удалось отправить напоминание о намерении пользователю %s", m["user_id"])
         db.mark_intention_reminded(m["user_id"], today.isoformat())
@@ -7507,6 +7619,11 @@ async def edit_intention_start(callback: CallbackQuery, state: FSMContext):
     current = membership["intention_text"] if membership else None
     if not current:
         await callback.answer(db.get_setting("intention_missing_text"), show_alert=True)
+        return
+    if membership["intention_reviewed"]:
+        # разбор уже дан - дар использован, изменить нельзя (снять отметку может только владелец в карточке намерения)
+        await _show_existing_intention(callback.message, callback.from_user.id, membership)
+        await callback.answer()
         return
     await state.set_state(IntentionStates.waiting_text)
     text = db.get_setting("intention_edit_prompt_text").replace("{текст}", current)
@@ -9330,6 +9447,20 @@ async def _send_first_touch(bot, user_id: int):
         rituals.mark_ritual_intro_shown(user_id)
         return
     user_row = db.get_user(user_id)
+    # вышел из Sanctum, но ступень и накопленное время ещё хранятся: вместо «Первого Касания» - «ступень сохранена до
+    # такой-то даты» с кнопкой «Желаю войти вновь»
+    saved = _saved_stage(user_id, db.get_sanctum_membership(user_id))
+    keep_template = (db.get_setting("sanctum_keep_stage_text") or "").strip()
+    if saved and keep_template:
+        keep_text = _lapse_text(
+            keep_template, user_row, saved[1], saved[1], _price_for_user(user_id)
+        ).replace("{ступень}", _ascension_level_name(saved[0]))
+        try:
+            await _send_long(bot, user_id, keep_text, reply_markup=_return_kb())
+            rituals.mark_ritual_intro_shown(user_id)
+            return
+        except Exception:
+            logging.exception("Не удалось отправить «ступень сохранена» пользователю %s", user_id)
     text = db.get_setting(ASCENSION_TEXT_KEYS[1])
     photo = db.get_setting("ascension_level1_photo")
     kb = InlineKeyboardMarkup(inline_keyboard=[
