@@ -7659,7 +7659,12 @@ async def check_reengagement(bot: Bot):
         deadline = _price_lock_until(m)
 
         if deadline and not m["lastchance_sent"] and (deadline - timedelta(days=before_days)) <= today <= deadline:
-            if not _promise_active(m):
+            if today == deadline and (db.get_setting("sanctum_lastday_text") or "").strip():
+                # «последний шанс» не пришёл раньше (бот поставили в последний день, назначенная дата оплаты прошла
+                # накануне, человека убрали за день-два до конца): сегодня уйдёт «последний день», двух писем за утро не нужно
+                if not _promise_active(m):
+                    db.mark_lastchance_sent(m["user_id"])
+            elif not _promise_active(m):
                 price_text = m["price"] or db.get_sanctum()["price"]
                 text = _lapse_text(db.get_setting("sanctum_lastchance_text"), m, anchor, deadline, price_text)
                 try:
