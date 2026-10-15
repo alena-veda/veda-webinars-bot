@@ -487,18 +487,21 @@ def _next_month_end(d):
 def _price_lock_until(membership):
     """Последний день (включительно), когда за ушедшим сохраняется его прежняя цена - её решение 2026-10-14:
     до конца календарного месяца, следующего за последним оплаченным (оплачено до 31.10 - цена до 30.11, новая
-    с 01.12). У убранного вручную отсчёт идёт от месяца, в котором его убрали, если это позже конца оплаты.
-    None, если нечего считать."""
+    с 01.12), даже если человека убрали 1-4 ноября. Если убрали позже этого срока - до конца месяца, в котором
+    убрали. None, если нечего считать."""
     if not membership or not membership["valid_until"]:
         return None
     base = _parse_date(membership["valid_until"])
     if not base or base.year >= 9000:
         return None
+    until = _next_month_end(base)
+    # убрали позже, чем кончился бы срок цены (например, в середине следующего месяца): цена держится хотя бы до
+    # конца месяца, в котором убрали, чтобы в письме не оказалась уже прошедшая дата
     if membership["status"] == "removed" and membership["removed_at"]:
         removed_at = _parse_date(membership["removed_at"])
-        if removed_at and removed_at > base:
-            base = removed_at
-    return _next_month_end(base)
+        if removed_at and _end_of_month(removed_at) > until:
+            until = _end_of_month(removed_at)
+    return until
 
 
 def _price_lock_expired(membership) -> bool:
@@ -3393,6 +3396,7 @@ REENGAGE_FIELD_LABELS = {
     "sanctum_lastchance_text": "2) «последний шанс сохранить цену» - приходит ПОСЛЕ текста выше, за несколько дней до конца срока (⏱ ниже). Кнопки: «Желаю войти вновь» и «⏰ Оплачу позже»",
     "sanctum_reset_text": "3) «время в поле обнулилось» - приходит ПОСЛЕДНИМ в этой цепочке, если человек так и не вернулся. Кнопка: только «Желаю войти вновь» - «Оплачу позже» здесь уже не предлагается, цена больше не сохраняется",
     "sanctum_reset_luminar_line": "добавка ВНУТРИ текста выше (3), про ранг Люминара - только тем, у кого он есть. Отдельной кнопки не добавляет",
+    "sanctum_lastday_text": "3б) «сегодня последний день прежней цены» - приходит в сам последний день срока цены (например, 30.11), после «последнего шанса». Кнопка: «Желаю войти вновь» (без «Оплачу позже»)",
     "sanctum_keep_stage_text": "4) «ступень сохранена» - приходит ушедшим, у кого была ступень «Искра» и выше, пока накопленное время ещё хранится (по умолчанию на 45-й и 75-й день). Кнопка: «Желаю войти вновь»",
     "sanctum_door_open_text": "5) «дверь открыта» - короткое письмо после обнуления (по умолчанию на 180-й и 365-й день), дальше бот не пишет. Кнопка: «Желаю войти вновь»",
     "sanctum_reset_meditation_line": "добавка ВНУТРИ текста выше (3), про VEDA HEALING FLOW - только тем, кто уже покупал. Отдельной кнопки не добавляет",
@@ -3481,6 +3485,7 @@ def _reengage_screen_kb() -> InlineKeyboardMarkup:
         [InlineKeyboardButton(text="⏱ Через сколько часов", callback_data="adm_rg_sanctum_nudge_hours")],
         [InlineKeyboardButton(text="✏️ Текст «убрала вручную»", callback_data="adm_rg_sanctum_removed_text")],
         [InlineKeyboardButton(text="✏️ Текст «последний шанс»", callback_data="adm_rg_sanctum_lastchance_text")],
+        [InlineKeyboardButton(text="✏️ Текст «сегодня последний день»", callback_data="adm_rg_sanctum_lastday_text")],
         [InlineKeyboardButton(text="✏️ Текст «время в поле обнулилось»", callback_data="adm_rg_sanctum_reset_text")],
         [InlineKeyboardButton(text="✏️ Строка про Люминара", callback_data="adm_rg_sanctum_reset_luminar_line"),
          InlineKeyboardButton(text="✏️ Строка про медитации", callback_data="adm_rg_sanctum_reset_meditation_line")],
@@ -3585,7 +3590,7 @@ async def adm_reengage_field_start(callback: CallbackQuery, state: FSMContext):
             "lastchance_days_before": "за сколько дней до конца срока сохранения цены прислать «последний шанс» (сейчас - 5)",
         }[field]
         prompt = f"{current_block}Пришлите число: {what}."
-    elif field in ("sanctum_removed_text", "sanctum_lastchance_text"):
+    elif field in ("sanctum_removed_text", "sanctum_lastchance_text", "sanctum_lastday_text"):
         prompt = (
             f"{current_block}Пришлите новый {REENGAGE_FIELD_LABELS[field]}.\n\n"
             "Можно вставить <code>{имя}</code>, <code>{дата}</code> (когда закончился доступ), "
@@ -4491,6 +4496,10 @@ async def adm_sanctum_kick(callback: CallbackQuery):
     delivered = False
     if membership and user_row:
         removed_on = _lapse_anchor(membership) or _today()
+        # «доступ закончился {дата}»: если срок оплаты кончился раньше, чем Вы убрали, пишем дату конца срока
+        paid_until = _parse_date(membership["valid_until"]) if membership["valid_until"] else None
+        if paid_until and paid_until < removed_on and paid_until.year < 9000:
+            removed_on = paid_until
         text = _lapse_text(
             db.get_setting("sanctum_removed_text"), user_row, removed_on,
             _price_lock_until(membership) or removed_on,
@@ -4553,6 +4562,7 @@ HTML_TRUSTED_FIELDS = {
     ("reengage", "sanctum_removed_text"),
     ("reengage", "sanctum_lastchance_text"),
     ("reengage", "sanctum_reset_text"),
+    ("reengage", "sanctum_lastday_text"),
     ("reengage", "sanctum_keep_stage_text"),
     ("reengage", "sanctum_door_open_text"),
     ("reengage", "sanctum_reset_luminar_line"),
@@ -7417,7 +7427,7 @@ async def check_reengagement(bot: Bot):
         anchor = _lapse_anchor(m)
         deadline = _price_lock_until(m)
 
-        if not m["lastchance_sent"] and (deadline - timedelta(days=before_days)) <= today <= deadline:
+        if deadline and not m["lastchance_sent"] and (deadline - timedelta(days=before_days)) <= today <= deadline:
             if not _promise_active(m):
                 price_text = m["price"] or db.get_sanctum()["price"]
                 text = _lapse_text(db.get_setting("sanctum_lastchance_text"), m, anchor, deadline, price_text)
@@ -7426,6 +7436,20 @@ async def check_reengagement(bot: Bot):
                 except Exception:
                     logging.exception("Не удалось отправить напоминание 'последний шанс' пользователю %s", m["user_id"])
                 db.mark_lastchance_sent(m["user_id"])
+
+        # в сам последний день срока цены - ещё одно короткое письмо «сегодня последний день» (её решение 2026-10-14);
+        # только кнопка «Желаю войти вновь», «Оплачу позже» сегодня уже не имеет смысла
+        if (deadline and today == deadline and "lastday" not in (m["stage_notices_sent"] or "").split(",")
+                and not _promise_active(m)):
+            lastday_template = (db.get_setting("sanctum_lastday_text") or "").strip()
+            db.mark_stage_notices_sent(m["user_id"], ["lastday"])
+            if lastday_template:
+                price_text = m["price"] or db.get_sanctum()["price"]
+                text = _lapse_text(lastday_template, m, anchor, deadline, price_text)
+                try:
+                    await bot.send_message(m["user_id"], text, reply_markup=_return_kb())
+                except Exception:
+                    logging.exception("Не удалось отправить письмо «последний день цены» пользователю %s", m["user_id"])
 
         if not m["stage_reset_done"] and today >= anchor + timedelta(days=reset_days):
             had_stage = (m["accumulated_days"] or 0) / 30 >= 2  # была ступень "Искра" и выше
