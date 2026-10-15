@@ -162,6 +162,12 @@ def init_db():
         c.execute("ALTER TABLE users ADD COLUMN reintro_pending INTEGER DEFAULT 0")
     except Exception:
         pass
+    for _col in ("silent_letter_count INTEGER DEFAULT 0", "silent_letter_at TEXT"):
+        try:
+            # письмо «давно не заходил» (2026-10-15): сколько раз отправлено и когда последний раз
+            c.execute(f"ALTER TABLE users ADD COLUMN {_col}")
+        except Exception:
+            pass
     try:
         # когда человек впервые открыл экран VEDA SANCTUM (не сбрасывается, нужен для отчёта «Путь новичков»)
         c.execute("ALTER TABLE users ADD COLUMN sanctum_first_opened_at TEXT")
@@ -1048,12 +1054,23 @@ def init_db():
             "{ограничение}"
         ),
         "sanctum_promise_invalid_date_text": (
-            "Не получилось распознать дату.\nПришлите в формате ДД.ММ.ГГГГ, например: 15.09.2026."
+            "Напишите, пожалуйста, дату оплаты в строке ввода сообщения и отправьте её сюда. "
+            "Например: 25.11.2026.\n\n"
+            "Нажимать кнопки меню сейчас не нужно: дата зафиксируется, когда Вы напишете её и отправите сообщением. "
+            "Если передумали, отправьте /cancel."
         ),
         "sanctum_promise_past_date_text": "Дата должна быть в будущем.\nПришлите, пожалуйста, другую дату.",
         "sanctum_promise_too_late_text": (
-            "Эту дату я, к сожалению, принять не могу: прежняя цена сохраняется до {дата}.\n"
-            "Пришлите, пожалуйста, дату не позже {дата}."
+            "Эту дату я принять не могу: Ваша прежняя цена сохраняется до {дата}.\n"
+            "Это значит, что, выбрав «Оплачу позже», напишите, пожалуйста, дату не позже {дата}."
+        ),
+        "silent_letter_enabled": "1",
+        "silent_letter_days": "60",
+        "silent_letter_text": (
+            "{имя}, давно не виделись ☀️\n\n"
+            "Рада, что Вы остаётесь в моём пространстве. Если откликнется, загляните в канал VEDA SANCTUM "
+            "или в Архив публикаций: там новое, ближайшие даты ритуалов, вебинары. "
+            "Выбор здесь всегда за Вами."
         ),
         "sanctum_promise_confirm_text": "Хорошо 🙏\nЯ напомню Вам {дата_напоминания}, за день до {дата}.",
         "sanctum_lifetime_profile_line": "🏆 Доступ пожизненный и бесплатный - дар за ключ Люминар III.",
@@ -1389,6 +1406,30 @@ def init_db():
                       (_new_lc, _old))
         c.execute("INSERT INTO settings (key, value) VALUES ('migr_letters_3', '1')")
 
+    # 2026-10-15 (её формулировки): сообщения при вводе даты «Оплачу позже»; меняем только нетронутые тексты
+    c.execute("SELECT value FROM settings WHERE key = 'migr_promise_texts_1'")
+    if not c.fetchone():
+        c.execute(
+            "UPDATE settings SET value = ? WHERE key = 'sanctum_promise_invalid_date_text' AND value = ?",
+            (
+                "Напишите, пожалуйста, дату оплаты в строке ввода сообщения и отправьте её сюда. "
+                "Например: 25.11.2026.\n\n"
+                "Нажимать кнопки меню сейчас не нужно: дата зафиксируется, когда Вы напишете её и отправите "
+                "сообщением. Если передумали, отправьте /cancel.",
+                "Не получилось распознать дату.\nПришлите в формате ДД.ММ.ГГГГ, например: 15.09.2026.",
+            ),
+        )
+        c.execute(
+            "UPDATE settings SET value = ? WHERE key = 'sanctum_promise_too_late_text' AND value = ?",
+            (
+                "Эту дату я принять не могу: Ваша прежняя цена сохраняется до {дата}.\n"
+                "Это значит, что, выбрав «Оплачу позже», напишите, пожалуйста, дату не позже {дата}.",
+                "Эту дату я, к сожалению, принять не могу: прежняя цена сохраняется до {дата}.\n"
+                "Пришлите, пожалуйста, дату не позже {дата}.",
+            ),
+        )
+        c.execute("INSERT INTO settings (key, value) VALUES ('migr_promise_texts_1', '1')")
+
     # аудит 2026-09-29: поздравления Люминаров раньше писали дар прямо в тексте,
     # {дар} нигде реально не подставлялся - теперь дар вынесен в отдельную
     # редактируемую настройку (luminar_gift_N), тексты переведены на {дар}.
@@ -1628,6 +1669,47 @@ def get_unnamed_users():
     ).fetchall()
     conn.close()
     return rows
+
+
+def get_silent_letter_due(days, baseline_date):
+    """Люди для письма «давно не заходил»: назвали имя и прошли вводное, не заблокированы и не вышли, не администраторы,
+    никогда не были в Sanctum и нет висящей оплаты Sanctum. Молчат (нет действий в боте) дольше days дней; если у
+    человека ещё нет записи последнего действия (запись началась позже), отсчёт идёт от более поздней из дат:
+    регистрации и baseline_date (день включения письма). Не больше двух писем, второе - не раньше чем через days
+    дней после первого."""
+    conn = get_conn()
+    now = datetime.now()
+    cutoff = (now - timedelta(days=days)).strftime("%Y-%m-%d %H:%M:%S")
+    base = baseline_date + " 00:00:00"
+    rows = conn.execute(
+        """SELECT u.*, COALESCE(u.last_action_at, MAX(u.created_at, ?)) AS activity_at FROM users u
+           WHERE u.preferred_name IS NOT NULL AND TRIM(u.preferred_name) != ''
+           AND u.ritual_intro_shown_at IS NOT NULL
+           AND (u.blocked IS NULL OR u.blocked = 0)
+           AND (u.self_departed IS NULL OR u.self_departed = 0)
+           AND COALESCE(u.silent_letter_count, 0) < 2
+           AND (u.silent_letter_at IS NULL OR u.silent_letter_at <= ?)
+           AND COALESCE(u.last_action_at, MAX(u.created_at, ?)) <= ?
+           AND u.user_id NOT IN (SELECT admin_id FROM admins)
+           AND u.user_id NOT IN (SELECT user_id FROM sanctum_membership)
+           AND u.user_id NOT IN (
+               SELECT user_id FROM registrations
+               WHERE product_type = 'sanctum' AND status IN ('awaiting_receipt', 'awaiting_confirmation')
+           )""",
+        (base, cutoff, base, cutoff),
+    ).fetchall()
+    conn.close()
+    return rows
+
+
+def mark_silent_letter_sent(user_id):
+    conn = get_conn()
+    conn.execute(
+        "UPDATE users SET silent_letter_count = COALESCE(silent_letter_count, 0) + 1, silent_letter_at = ? WHERE user_id = ?",
+        (_now(), user_id),
+    )
+    conn.commit()
+    conn.close()
 
 
 def get_user(user_id):

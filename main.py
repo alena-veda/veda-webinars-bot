@@ -311,6 +311,8 @@ BUTTON_DEFS = [
     ("btn_return_now", "Желаю вернуться сейчас", "в письме об уходе: когда Вы убрали человека из Sanctum, ведёт на оплату"),
     ("btn_remind_later", "Напомни. Благодарю.", "в письме об уходе: бот напомнит человеку перед концом срока прежней цены"),
     ("btn_lastday_pay", "Желаю оплатить подписку", "в письме «сегодня последний день прежней цены», ведёт на оплату"),
+    ("btn_open_archive", "📖 Архив публикаций", "в письме «давно не заходил», открывает архив публикаций"),
+    ("btn_open_webinars", "📅 Вебинары, Практики, Расстановки", "в письме «давно не заходил», открывает список вебинаров"),
     ("btn_pay_later", "⏰ Оплачу позже", "на экране оплаты и при ручном внесении просроченного"),
     ("btn_pay_later_date", "⏰ Оплачу позже - назначить дату", "в напоминаниях об окончании, на экране «Доступ закончился», в письмах возврата"),
     ("btn_return_sanctum", "⚜️ Вернуться к VEDA SANCTUM", "в напоминании про календарь и возврат"),
@@ -1833,6 +1835,18 @@ async def open_sanctum_cb(callback: CallbackQuery):
     await callback.answer()
 
 
+@router.callback_query(F.data == "open_archive")
+async def open_archive_cb(callback: CallbackQuery):
+    await _send_feed_months(callback.message)
+    await callback.answer()
+
+
+@router.callback_query(F.data == "open_webinars")
+async def open_webinars_cb(callback: CallbackQuery):
+    await show_webinars(callback.message)
+    await callback.answer()
+
+
 
 @router.callback_query(F.data == "open_path_overview")
 async def open_path_overview_cb(callback: CallbackQuery):
@@ -1995,14 +2009,66 @@ async def _notify_promise_set(bot, user_id: int, promise_date, membership):
         logging.exception("Сбой уведомления об «Оплачу позже»")
 
 
+_RU_MONTHS_GEN = {
+    "января": 1, "февраля": 2, "марта": 3, "апреля": 4, "мая": 5, "июня": 6,
+    "июля": 7, "августа": 8, "сентября": 9, "октября": 10, "ноября": 11, "декабря": 12,
+}
+
+
+def _parse_user_date(text: str, today: date):
+    """Дата, как её написал человек: 25.11.2026, 25.11.26, 25/11/2026, 25-11-2026, 25 11 2026, 25.11 (без года - ближайшая
+    будущая), «25 ноября» и «25 ноября 2026». Возвращает date или None, если не удалось разобрать."""
+    s = (text or "").strip().lower().rstrip(".")
+    if not s:
+        return None
+    day = month = year = None
+    m = re.fullmatch(r"(\d{1,2})\s+([а-яё]+)(?:\s+(\d{2}|\d{4}))?(?:\s*г(?:ода|\.)?)?", s)
+    if m and m.group(2) in _RU_MONTHS_GEN:
+        day, month, year = int(m.group(1)), _RU_MONTHS_GEN[m.group(2)], m.group(3)
+    else:
+        m = re.fullmatch(r"(\d{1,2})[\s./,\-]+(\d{1,2})(?:[\s./,\-]+(\d{2}|\d{4}))?", s)
+        if not m:
+            return None
+        day, month, year = int(m.group(1)), int(m.group(2)), m.group(3)
+    try:
+        if year is None:
+            candidate = date(today.year, month, day)
+            if candidate <= today:
+                candidate = date(today.year + 1, month, day)
+            return candidate
+        y = int(year)
+        if y < 100:
+            y += 2000
+        return date(y, month, day)
+    except ValueError:
+        return None
+
+
+class PromiseMenuGuardMiddleware(BaseMiddleware):
+    """Пока бот ждёт дату после «Оплачу позже», нажатие кнопки нижнего меню не должно ни открывать другой раздел,
+    ни считаться неверной датой: человеку снова мягко объясняется, что надо написать дату (её решение 2026-10-15)."""
+
+    async def __call__(self, handler, event, data):
+        try:
+            text = (getattr(event, "text", None) or "").strip()
+            if text and text in (_MENU_BUTTON_TEXTS | {BTN_ADMIN}):
+                state = data.get("state")
+                current = await state.get_state() if state is not None else None
+                if current == PromiseStates.waiting_date.state:
+                    await event.answer(db.get_setting("sanctum_promise_invalid_date_text"))
+                    return None
+        except Exception:
+            logging.exception("Сбой в защите ввода даты")
+        return await handler(event, data)
+
+
 @router.message(PromiseStates.waiting_date)
 async def sanctum_promise_date(message: Message, state: FSMContext):
     text = await _require_text(message)
     if text is None:
         return
-    try:
-        promise_date = datetime.strptime(text.strip(), "%d.%m.%Y").date()
-    except ValueError:
+    promise_date = _parse_user_date(text, _today())
+    if promise_date is None:
         await message.answer(db.get_setting("sanctum_promise_invalid_date_text"))
         return
     if promise_date <= _today():
@@ -3465,6 +3531,7 @@ REENGAGE_FIELD_LABELS = {
     "sanctum_lastchance_text": "2) «последний шанс сохранить цену» - приходит ПОСЛЕ текста выше, за несколько дней до конца срока (⏱ ниже). Кнопки: «Желаю войти вновь» и «⏰ Оплачу позже»",
     "sanctum_reset_text": "3) «время в поле обнулилось» - приходит ПОСЛЕДНИМ в этой цепочке, если человек так и не вернулся. Кнопка: только «Желаю войти вновь» - «Оплачу позже» здесь уже не предлагается, цена больше не сохраняется",
     "sanctum_reset_luminar_line": "добавка ВНУТРИ текста выше (3), про ранг Люминара - только тем, у кого он есть. Отдельной кнопки не добавляет",
+    "silent_letter_text": "7) «давно не заходил» - одно-два письма тем, кто остаётся в боте, но 60 дней ничего не делал (не участникам Sanctum и не ушедшим). Можно вставить {имя}. Кнопки: «Что такое VEDA SANCTUM», «Архив публикаций», «Вебинары, Практики, Расстановки»",
     "sanctum_remind_confirm_text": "1б) ответ человеку, когда он нажал «Напомни. Благодарю.» под письмом об уходе. Можно вставить {дата_напоминания} (день, когда придёт «последний шанс»)",
     "sanctum_remind_expired_text": "1в) короткое всплывающее окно, если «Напомни. Благодарю.» нажали, когда срок прежней цены уже прошёл или доступ снова действует (до 200 знаков)",
     "sanctum_lastday_text": "3б) «сегодня последний день прежней цены» - приходит в сам последний день срока цены (например, 30.11), после «последнего шанса». Кнопка: «Желаю войти вновь» (без «Оплачу позже»)",
@@ -3520,7 +3587,11 @@ def _reengage_screen_text() -> str:
         f"Ушедшим со ступенью «Искра» и выше: на {db.get_setting('stage_keep_notice_days') or '45,75'}-й день "
         "отсутствия письмо «ступень сохранена до такой-то даты». После обнуления: на "
         f"{db.get_setting('door_open_notice_days') or '180,365'}-й день короткое «дверь открыта», потом бот не пишет. "
-        "Кнопка в письмах одна: «Желаю войти вновь» (ведёт на оплату)."
+        "Кнопка в письмах одна: «Желаю войти вновь» (ведёт на оплату).\n\n"
+        f"<b>7. Давно не заходил</b> - {_on_off(db.get_setting('silent_letter_enabled') or '1')}\n"
+        f"Тем, кто в боте, но {db.get_setting('silent_letter_days') or '60'} дн. ничего не делал (не участникам Sanctum "
+        "и не ушедшим): письмо с кнопками «Что такое VEDA SANCTUM», «Архив публикаций», «Вебинары». "
+        "Не больше двух писем, второе - ещё через столько же дней молчания."
     )
 
 
@@ -3556,6 +3627,12 @@ def _reengage_screen_kb() -> InlineKeyboardMarkup:
         [InlineKeyboardButton(text="⏱ Через сколько часов", callback_data="adm_rg_sanctum_nudge_hours")],
         [InlineKeyboardButton(text="✏️ Текст «убрала вручную»", callback_data="adm_rg_sanctum_removed_text")],
         [InlineKeyboardButton(text="✏️ Текст «последний шанс»", callback_data="adm_rg_sanctum_lastchance_text")],
+        [InlineKeyboardButton(
+            text=("🚫 Выключить" if (db.get_setting("silent_letter_enabled") or "1") == "1" else "✅ Включить") + " «давно не заходил»",
+            callback_data="adm_reeng_toggle_silentletter",
+        )],
+        [InlineKeyboardButton(text="✏️ Текст «давно не заходил»", callback_data="adm_rg_silent_letter_text"),
+         InlineKeyboardButton(text="⏱ Через сколько дней молчания", callback_data="adm_rg_silent_letter_days")],
         [InlineKeyboardButton(text="✏️ Текст «сегодня последний день»", callback_data="adm_rg_sanctum_lastday_text")],
         [InlineKeyboardButton(text="✏️ Ответ на «Напомни. Благодарю.»", callback_data="adm_rg_sanctum_remind_confirm_text"),
          InlineKeyboardButton(text="✏️ Окно, если поздно", callback_data="adm_rg_sanctum_remind_expired_text")],
@@ -3614,6 +3691,17 @@ async def adm_reeng_toggle_winback(callback: CallbackQuery):
     await callback.answer()
 
 
+@router.callback_query(F.data == "adm_reeng_toggle_silentletter")
+async def adm_reeng_toggle_silentletter(callback: CallbackQuery):
+    if not db.is_admin(callback.from_user.id):
+        await callback.answer("Только для администраторов", show_alert=True)
+        return
+    current = db.get_setting("silent_letter_enabled") or "1"
+    db.set_setting("silent_letter_enabled", "0" if current == "1" else "1")
+    await callback.message.edit_text(_reengage_screen_text(), reply_markup=_reengage_screen_kb())
+    await callback.answer()
+
+
 @router.callback_query(F.data == "adm_reeng_toggle_nudge")
 async def adm_reeng_toggle_nudge(callback: CallbackQuery):
     if not db.is_admin(callback.from_user.id):
@@ -3663,6 +3751,16 @@ async def adm_reengage_field_start(callback: CallbackQuery, state: FSMContext):
             "lastchance_days_before": "за сколько дней до конца срока сохранения цены прислать «последний шанс» (сейчас - 5)",
         }[field]
         prompt = f"{current_block}Пришлите число: {what}."
+    elif field == "silent_letter_days":
+        prompt = (
+            f"{current_block}Через сколько дней молчания присылать письмо «давно не заходил»? Это же число между "
+            "первым и вторым письмом. Пришлите число (например, 60):"
+        )
+    elif field == "silent_letter_text":
+        prompt = (
+            f"{current_block}Пришлите новый {REENGAGE_FIELD_LABELS[field]}.\n\n"
+            "Можно вставить <code>{имя}</code>."
+        )
     elif field in ("sanctum_remind_confirm_text", "sanctum_remind_expired_text"):
         prompt = (
             f"{current_block}Пришлите новый {REENGAGE_FIELD_LABELS[field]}."
@@ -4645,6 +4743,7 @@ HTML_TRUSTED_FIELDS = {
     ("reengage", "sanctum_reset_text"),
     ("reengage", "sanctum_lastday_text"),
     ("reengage", "sanctum_remind_confirm_text"),
+    ("reengage", "silent_letter_text"),
     ("reengage", "sanctum_keep_stage_text"),
     ("reengage", "sanctum_door_open_text"),
     ("reengage", "sanctum_reset_luminar_line"),
@@ -6187,7 +6286,7 @@ async def edit_field_value(message: Message, state: FSMContext):
                 return
             db.set_setting(field, str(n))
         elif field in ("stall_hours", "reengage_days_silent", "winback_days_after_expiry", "sanctum_nudge_hours",
-                     "price_lock_days", "stage_reset_days", "lastchance_days_before"):
+                     "price_lock_days", "stage_reset_days", "lastchance_days_before", "silent_letter_days"):
             try:
                 n = int(value.strip())
                 if n <= 0:
@@ -7307,6 +7406,35 @@ async def check_sanctum_reminders(bot: Bot):
 STAGE_NOTICE_WINDOW_DAYS = 14
 
 
+async def send_silent_letters(bot: Bot):
+    """Письмо «давно не заходил» (её решение 2026-10-15): тем, кто остаётся в боте, но не делал в нём ничего
+    silent_letter_days (60) дней. Не больше двух писем, второе - ещё через 60 дней молчания. Не участникам Sanctum
+    и не ушедшим (у них свои письма). Отсчёт для тех, у кого ещё нет записи последнего действия, начинается со дня
+    включения письма, поэтому в день установки оно никому не уходит."""
+    if (db.get_setting("silent_letter_enabled") or "1") != "1":
+        return
+    template = (db.get_setting("silent_letter_text") or "").strip()
+    if not template:
+        return
+    baseline = db.get_setting("silent_letter_since")
+    if not baseline:
+        baseline = _today().isoformat()
+        db.set_setting("silent_letter_since", baseline)
+    days = _int_setting("silent_letter_days", 60)
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=_btn("btn_what_is_sanctum"), callback_data="open_sanctum")],
+        [InlineKeyboardButton(text=_btn("btn_open_archive"), callback_data="open_archive")],
+        [InlineKeyboardButton(text=_btn("btn_open_webinars"), callback_data="open_webinars")],
+    ])
+    for u in db.get_silent_letter_due(days, baseline):
+        db.mark_silent_letter_sent(u["user_id"])  # одноразово, даже если отправка не удалась
+        try:
+            await bot.send_message(u["user_id"], _personalize(template, u), reply_markup=kb)
+        except Exception:
+            logging.exception("Не удалось отправить письмо «давно не заходил» пользователю %s", u["user_id"])
+        await asyncio.sleep(0.05)
+
+
 def _days_list(key: str, default: str) -> list:
     out = []
     for part in (db.get_setting(key) or default).replace(";", ",").split(","):
@@ -7562,6 +7690,10 @@ async def check_reengagement(bot: Bot):
         await _notify_lapsed_not_removed(bot)
     except Exception:
         logging.exception("Сбой в сводке о не продливших")
+    try:
+        await send_silent_letters(bot)
+    except Exception:
+        logging.exception("Сбой в письме «давно не заходил»")
 
     # "поведенческое" напоминание - человек смотрел информацию о Sanctum, но
     # не дошёл до "Инициировать шаг" (её явное решение 2026-09-17: тоньше и
@@ -9902,6 +10034,7 @@ router.message.outer_middleware(LastActionMiddleware())
 router.callback_query.outer_middleware(LastActionMiddleware())
 router.message.outer_middleware(ReintroGateMiddleware())
 router.callback_query.outer_middleware(ReintroGateMiddleware())
+router.message.outer_middleware(PromiseMenuGuardMiddleware())
 
 
 def _newcomer_notify_enabled() -> bool:
