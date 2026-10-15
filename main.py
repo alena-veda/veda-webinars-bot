@@ -3532,6 +3532,7 @@ REENGAGE_FIELD_LABELS = {
     "sanctum_reset_text": "3) «время в поле обнулилось» - приходит ПОСЛЕДНИМ в этой цепочке, если человек так и не вернулся. Кнопка: только «Желаю войти вновь» - «Оплачу позже» здесь уже не предлагается, цена больше не сохраняется",
     "sanctum_reset_luminar_line": "добавка ВНУТРИ текста выше (3), про ранг Люминара - только тем, у кого он есть. Отдельной кнопки не добавляет",
     "silent_letter_text": "7) «давно не заходил» - одно-два письма тем, кто остаётся в боте, но 60 дней ничего не делал (не участникам Sanctum и не ушедшим). Можно вставить {имя}. Кнопки: «Что такое VEDA SANCTUM», «Архив публикаций», «Вебинары, Практики, Расстановки»",
+    "silent_letter_meditation_line": "7а) строка про VEDA HEALING FLOW в конце письма «давно не заходил» - добавляется ТОЛЬКО когда ссылка на VEDA HEALING FLOW уже задана (тогда же появляется и кнопка «Перейти в VEDA HEALING FLOW» второй по порядку)",
     "sanctum_remind_confirm_text": "1б) ответ человеку, когда он нажал «Напомни. Благодарю.» под письмом об уходе. Можно вставить {дата_напоминания} (день, когда придёт «последний шанс»)",
     "sanctum_remind_expired_text": "1в) короткое всплывающее окно, если «Напомни. Благодарю.» нажали, когда срок прежней цены уже прошёл или доступ снова действует (до 200 знаков)",
     "sanctum_lastday_text": "3б) «сегодня последний день прежней цены» - приходит в сам последний день срока цены (например, 30.11), после «последнего шанса». Кнопка: «Желаю войти вновь» (без «Оплачу позже»)",
@@ -3633,6 +3634,7 @@ def _reengage_screen_kb() -> InlineKeyboardMarkup:
         )],
         [InlineKeyboardButton(text="✏️ Текст «давно не заходил»", callback_data="adm_rg_silent_letter_text"),
          InlineKeyboardButton(text="⏱ Через сколько дней молчания", callback_data="adm_rg_silent_letter_days")],
+        [InlineKeyboardButton(text="✏️ Строка про VEDA HEALING FLOW (письмо «давно не заходил»)", callback_data="adm_rg_silent_letter_meditation_line")],
         [InlineKeyboardButton(text="✏️ Текст «сегодня последний день»", callback_data="adm_rg_sanctum_lastday_text")],
         [InlineKeyboardButton(text="✏️ Ответ на «Напомни. Благодарю.»", callback_data="adm_rg_sanctum_remind_confirm_text"),
          InlineKeyboardButton(text="✏️ Окно, если поздно", callback_data="adm_rg_sanctum_remind_expired_text")],
@@ -4744,6 +4746,7 @@ HTML_TRUSTED_FIELDS = {
     ("reengage", "sanctum_lastday_text"),
     ("reengage", "sanctum_remind_confirm_text"),
     ("reengage", "silent_letter_text"),
+    ("reengage", "silent_letter_meditation_line"),
     ("reengage", "sanctum_keep_stage_text"),
     ("reengage", "sanctum_door_open_text"),
     ("reengage", "sanctum_reset_luminar_line"),
@@ -7421,15 +7424,22 @@ async def send_silent_letters(bot: Bot):
         baseline = _today().isoformat()
         db.set_setting("silent_letter_since", baseline)
     days = _int_setting("silent_letter_days", 60)
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text=_btn("btn_what_is_sanctum"), callback_data="open_sanctum")],
-        [InlineKeyboardButton(text=_btn("btn_open_archive"), callback_data="open_archive")],
-        [InlineKeyboardButton(text=_btn("btn_open_webinars"), callback_data="open_webinars")],
-    ])
+    rows = [[InlineKeyboardButton(text=_btn("btn_what_is_sanctum"), callback_data="open_sanctum")]]
+    # про VEDA HEALING FLOW - строка и кнопка (второй по порядку) только когда ссылка на бот с медитациями уже задана
+    meditation_btn = _meditation_button("🧘🏽‍♀️ Перейти в VEDA HEALING FLOW")
+    meditation_line = (db.get_setting("silent_letter_meditation_line") or "").strip() if meditation_btn else ""
+    if meditation_btn:
+        rows.append([meditation_btn])
+    rows.append([InlineKeyboardButton(text=_btn("btn_open_archive"), callback_data="open_archive")])
+    rows.append([InlineKeyboardButton(text=_btn("btn_open_webinars"), callback_data="open_webinars")])
+    kb = InlineKeyboardMarkup(inline_keyboard=rows)
     for u in db.get_silent_letter_due(days, baseline):
         db.mark_silent_letter_sent(u["user_id"])  # одноразово, даже если отправка не удалась
         try:
-            await bot.send_message(u["user_id"], _personalize(template, u), reply_markup=kb)
+            text = _personalize(template, u)
+            if meditation_line:
+                text += "\n\n" + meditation_line
+            await bot.send_message(u["user_id"], text, reply_markup=kb)
         except Exception:
             logging.exception("Не удалось отправить письмо «давно не заходил» пользователю %s", u["user_id"])
         await asyncio.sleep(0.05)
