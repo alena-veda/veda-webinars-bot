@@ -308,6 +308,9 @@ BUTTON_DEFS = [
     ("btn_resume", "Возобновить", "на экране «Доступ закончился»"),
     ("btn_resume_long", "Возобновить подписку", "в сообщении, когда Вы вручную вносите человека с закончившимся доступом"),
     ("btn_return", "Желаю войти вновь", "в письмах возврата («последний шанс» и др.)"),
+    ("btn_return_now", "Желаю вернуться сейчас", "в письме об уходе: когда Вы убрали человека из Sanctum, ведёт на оплату"),
+    ("btn_remind_later", "Напомни. Благодарю.", "в письме об уходе: бот напомнит человеку перед концом срока прежней цены"),
+    ("btn_lastday_pay", "Желаю оплатить подписку", "в письме «сегодня последний день прежней цены», ведёт на оплату"),
     ("btn_pay_later", "⏰ Оплачу позже", "на экране оплаты и при ручном внесении просроченного"),
     ("btn_pay_later_date", "⏰ Оплачу позже - назначить дату", "в напоминаниях об окончании, на экране «Доступ закончился», в письмах возврата"),
     ("btn_return_sanctum", "⚜️ Вернуться к VEDA SANCTUM", "в напоминании про календарь и возврат"),
@@ -534,6 +537,69 @@ def _lapse_text(template: str, user_row, expired_date, deadline, price: str) -> 
     )
 
 
+def _lastchance_date(membership):
+    """Дата письма «последний шанс»: за lastchance_days_before дней до конца срока цены, но не раньше завтрашнего дня
+    (письма уходят по утрам) и не позже самого последнего дня срока."""
+    deadline = _price_lock_until(membership)
+    if not deadline:
+        return None
+    d = deadline - timedelta(days=_int_setting("lastchance_days_before", 3))
+    tomorrow = _today() + timedelta(days=1)
+    if d < tomorrow:
+        d = tomorrow
+    return min(d, deadline)
+
+
+@router.callback_query(F.data == "remind_later")
+async def remind_later_cb(callback: CallbackQuery):
+    """«Напомни. Благодарю.» под письмом об уходе: письмо «последний шанс» и так придёт само в свой день, поэтому
+    человеку просто подтверждаем дату, а Вам один раз сообщаем, что он собирается вернуться."""
+    user_id = callback.from_user.id
+    m = db.get_sanctum_membership(user_id)
+    if not m or not _is_lapsed(m) or _price_lock_expired(m):
+        await callback.answer(db.get_setting("sanctum_remind_expired_text") or "Благодарю 🙏", show_alert=True)
+        return
+    remind_on = _lastchance_date(m)
+    await callback.message.answer(
+        (db.get_setting("sanctum_remind_confirm_text") or "Хорошо 🙏").replace("{дата_напоминания}", _fmt_date(remind_on))
+    )
+    await callback.answer()
+    if "remind" in (m["stage_notices_sent"] or "").split(","):
+        return
+    db.mark_stage_notices_sent(user_id, ["remind"])
+    try:
+        user_row = db.get_user(user_id)
+        who = html.escape(_user_display_name(user_row)) if user_row else str(user_id)
+        text = (
+            "🔔 <b>Попросил(а) напомнить о возврате в Sanctum</b>\n\n"
+            f'Пользователь: <a href="tg://user?id={user_id}">{who}</a>\n'
+            f"Прежняя цена сохраняется до: {_fmt_date(_price_lock_until(m))}\n"
+            f"Напомню ему: {_fmt_date(remind_on)}"
+        )
+        for admin_id in db.get_all_admin_ids():
+            if db.has_permission(admin_id, "adm_pending"):
+                try:
+                    await callback.bot.send_message(admin_id, text)
+                except Exception:
+                    logging.exception("Не удалось отправить уведомление «напомнить» админу %s", admin_id)
+    except Exception:
+        logging.exception("Сбой уведомления «напомнить»")
+
+
+def _removal_kb() -> InlineKeyboardMarkup:
+    """Под письмом об уходе: вернуться сейчас (оплата) или попросить напомнить перед концом срока цены."""
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=_btn("btn_return_now"), callback_data="sanctum_apply")],
+        [InlineKeyboardButton(text=_btn("btn_remind_later"), callback_data="remind_later")],
+    ])
+
+
+def _lastday_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=_btn("btn_lastday_pay"), callback_data="sanctum_apply")],
+    ])
+
+
 def _return_kb(with_promise: bool = False) -> InlineKeyboardMarkup:
     rows = [[InlineKeyboardButton(text=_btn("btn_return"), callback_data="sanctum_apply")]]
     if with_promise:
@@ -580,36 +646,35 @@ def _resolve_price(user_id: int, explicit_price):
     return _price_for_user(user_id)
 
 
-def _extend_sanctum_membership(user_id: int, price=None):
-    """Оплата покрывает до конца месяца: если текущий период ещё активен —
-    до конца СЛЕДУЮЩЕГО месяца (продление), если истёк или подписки не было —
-    до конца ТЕКУЩЕГО месяца (человек просто "догнал" оплату сейчас).
-    Цена: если передана явно (например, из заявки) — берём её, иначе —
-    сохраняем ту, что уже закреплена за человеком, а если её никогда не было —
-    текущую базовую."""
+def _next_sanctum_valid_until(membership):
+    """До какого числа откроется (продлится) доступ при оплате СЕГОДНЯ: если период ещё активен - до конца СЛЕДУЮЩЕГО
+    месяца; если истёк, убран или подписки не было - до конца ТЕКУЩЕГО месяца, а в последние late_month_days дней
+    месяца (по умолчанию 4) - до конца следующего (её решение 2026-10-14). Один расчёт и для подтверждения оплаты, и
+    для строки «оплата откроет доступ до...» на экране оплаты."""
     today = _today()
-    membership = db.get_sanctum_membership(user_id)
-    current_valid_until = _parse_date(membership["valid_until"]) if membership else None
-    # защита от переполнения даты: пожизненный доступ (дар Люминара III) хранит
-    # valid_until в 9999 году; set_sanctum_status уже сбрасывает её при ручном
-    # удалении, но это - второй, независимый барьер на случай, если где-то ещё
-    # останется такая же "зависшая" дата - без него date + timedelta(1 день)
-    # от 31.12.9999 упало бы с OverflowError
+    current_valid_until = _parse_date(membership["valid_until"]) if membership and membership["valid_until"] else None
+    # защита от переполнения даты: пожизненный доступ (дар Люминара III) хранит valid_until в 9999 году;
+    # set_sanctum_status сбрасывает её при ручном удалении, это второй, независимый барьер
     if current_valid_until and current_valid_until.year >= 9000:
         current_valid_until = None
-
+    # убранный вручную, у кого оплаченный срок ещё не кончился, получает продление после него (оплаченное не пропадает)
     if current_valid_until and current_valid_until >= today:
         base = current_valid_until + timedelta(days=1)
     else:
         base = today
-        # оплата без действующей подписки в последние N дней месяца (late_month_days, по умолчанию 3) засчитывается
-        # за СЛЕДУЮЩИЙ месяц, а не за остаток этого (её решение 2026-10-14); 0 - выключено
         raw = db.get_setting("late_month_days")
         n = int(raw) if (raw or "").strip().isdigit() else 4
         if n > 0 and (_end_of_month(today) - today).days < n:
             base = _end_of_month(today) + timedelta(days=1)
+    return _end_of_month(base)
 
-    new_valid_until = _end_of_month(base)
+
+def _extend_sanctum_membership(user_id: int, price=None):
+    """Оплата покрывает до конца месяца: см. _next_sanctum_valid_until. Цена: если передана явно (например, из
+    заявки) - берём её, иначе - сохраняем ту, что уже закреплена за человеком, а если её никогда не было - текущую
+    базовую."""
+    membership = db.get_sanctum_membership(user_id)
+    new_valid_until = _next_sanctum_valid_until(membership)
     resolved_price = _resolve_price(user_id, price)
     db.upsert_sanctum_membership(user_id, new_valid_until.isoformat(), resolved_price)
     return new_valid_until, resolved_price
@@ -1858,6 +1923,10 @@ async def sanctum_apply(callback: CallbackQuery, state: FSMContext):
         .replace("{цена}", price)
         .replace("{реквизиты}", _payment_block("payment_purpose_sanctum"))
     )
+    # человеку сразу видно, до какого числа откроет доступ эта оплата (в последние дни месяца - до конца следующего)
+    period_line = (db.get_setting("sanctum_payment_period_line") or "").strip()
+    if period_line and not (membership and membership["lifetime_free"]):
+        text += "\n\n" + period_line.replace("{дата}", _fmt_date(_next_sanctum_valid_until(membership)))
     await callback.message.answer(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=kb_rows))
     await _send_payment_screenshot_hint(callback.message)
     await callback.answer()
@@ -3396,6 +3465,8 @@ REENGAGE_FIELD_LABELS = {
     "sanctum_lastchance_text": "2) «последний шанс сохранить цену» - приходит ПОСЛЕ текста выше, за несколько дней до конца срока (⏱ ниже). Кнопки: «Желаю войти вновь» и «⏰ Оплачу позже»",
     "sanctum_reset_text": "3) «время в поле обнулилось» - приходит ПОСЛЕДНИМ в этой цепочке, если человек так и не вернулся. Кнопка: только «Желаю войти вновь» - «Оплачу позже» здесь уже не предлагается, цена больше не сохраняется",
     "sanctum_reset_luminar_line": "добавка ВНУТРИ текста выше (3), про ранг Люминара - только тем, у кого он есть. Отдельной кнопки не добавляет",
+    "sanctum_remind_confirm_text": "1б) ответ человеку, когда он нажал «Напомни. Благодарю.» под письмом об уходе. Можно вставить {дата_напоминания} (день, когда придёт «последний шанс»)",
+    "sanctum_remind_expired_text": "1в) короткое всплывающее окно, если «Напомни. Благодарю.» нажали, когда срок прежней цены уже прошёл или доступ снова действует (до 200 знаков)",
     "sanctum_lastday_text": "3б) «сегодня последний день прежней цены» - приходит в сам последний день срока цены (например, 30.11), после «последнего шанса». Кнопка: «Желаю войти вновь» (без «Оплачу позже»)",
     "sanctum_keep_stage_text": "4) «ступень сохранена» - приходит ушедшим, у кого была ступень «Искра» и выше, пока накопленное время ещё хранится (по умолчанию на 45-й и 75-й день). Кнопка: «Желаю войти вновь»",
     "sanctum_door_open_text": "5) «дверь открыта» - короткое письмо после обнуления (по умолчанию на 180-й и 365-й день), дальше бот не пишет. Кнопка: «Желаю войти вновь»",
@@ -3486,6 +3557,8 @@ def _reengage_screen_kb() -> InlineKeyboardMarkup:
         [InlineKeyboardButton(text="✏️ Текст «убрала вручную»", callback_data="adm_rg_sanctum_removed_text")],
         [InlineKeyboardButton(text="✏️ Текст «последний шанс»", callback_data="adm_rg_sanctum_lastchance_text")],
         [InlineKeyboardButton(text="✏️ Текст «сегодня последний день»", callback_data="adm_rg_sanctum_lastday_text")],
+        [InlineKeyboardButton(text="✏️ Ответ на «Напомни. Благодарю.»", callback_data="adm_rg_sanctum_remind_confirm_text"),
+         InlineKeyboardButton(text="✏️ Окно, если поздно", callback_data="adm_rg_sanctum_remind_expired_text")],
         [InlineKeyboardButton(text="✏️ Текст «время в поле обнулилось»", callback_data="adm_rg_sanctum_reset_text")],
         [InlineKeyboardButton(text="✏️ Строка про Люминара", callback_data="adm_rg_sanctum_reset_luminar_line"),
          InlineKeyboardButton(text="✏️ Строка про медитации", callback_data="adm_rg_sanctum_reset_meditation_line")],
@@ -3590,11 +3663,18 @@ async def adm_reengage_field_start(callback: CallbackQuery, state: FSMContext):
             "lastchance_days_before": "за сколько дней до конца срока сохранения цены прислать «последний шанс» (сейчас - 5)",
         }[field]
         prompt = f"{current_block}Пришлите число: {what}."
+    elif field in ("sanctum_remind_confirm_text", "sanctum_remind_expired_text"):
+        prompt = (
+            f"{current_block}Пришлите новый {REENGAGE_FIELD_LABELS[field]}."
+            + ("\n\nМожно вставить <code>{дата_напоминания}</code>." if field == "sanctum_remind_confirm_text" else "")
+        )
     elif field in ("sanctum_removed_text", "sanctum_lastchance_text", "sanctum_lastday_text"):
         prompt = (
             f"{current_block}Пришлите новый {REENGAGE_FIELD_LABELS[field]}.\n\n"
             "Можно вставить <code>{имя}</code>, <code>{дата}</code> (когда закончился доступ), "
-            "<code>{дата_до}</code> (последний день сохранения цены) и <code>{цена}</code>."
+            "<code>{дата_до}</code> (последний день сохранения цены), <code>{цена}</code>"
+            + (" и <code>{дата_напоминания}</code> (день, когда придёт «последний шанс»)."
+               if field == "sanctum_removed_text" else ".")
         )
     elif field == "sanctum_reset_text":
         prompt = (
@@ -4500,13 +4580,14 @@ async def adm_sanctum_kick(callback: CallbackQuery):
         paid_until = _parse_date(membership["valid_until"]) if membership["valid_until"] else None
         if paid_until and paid_until < removed_on and paid_until.year < 9000:
             removed_on = paid_until
+        remind_on = _lastchance_date(membership)
         text = _lapse_text(
             db.get_setting("sanctum_removed_text"), user_row, removed_on,
             _price_lock_until(membership) or removed_on,
             membership["price"] or db.get_sanctum()["price"],
-        )
+        ).replace("{дата_напоминания}", _fmt_date(remind_on) if remind_on else "перед концом срока")
         try:
-            await callback.bot.send_message(user_id, text, reply_markup=_return_kb(with_promise=True))
+            await callback.bot.send_message(user_id, text, reply_markup=_removal_kb())
             delivered = True
         except Exception:
             logging.exception("Не удалось отправить письмо об уходе из Sanctum пользователю %s", user_id)
@@ -4563,6 +4644,7 @@ HTML_TRUSTED_FIELDS = {
     ("reengage", "sanctum_lastchance_text"),
     ("reengage", "sanctum_reset_text"),
     ("reengage", "sanctum_lastday_text"),
+    ("reengage", "sanctum_remind_confirm_text"),
     ("reengage", "sanctum_keep_stage_text"),
     ("reengage", "sanctum_door_open_text"),
     ("reengage", "sanctum_reset_luminar_line"),
@@ -4743,11 +4825,13 @@ PAYMENT_FLOW_TEXT_LABELS = {
     "resend_receipt_already_confirmed_text": "если оплата уже успела подтвердиться, пока он жал кнопку - редкий случай. Всплывающая подсказка (alert) - кнопок нет",
     "resend_receipt_already_sent_text": "если чек уже отправлен и ждёт проверки - предупреждение вместо повтора. Всплывающая подсказка (alert) - кнопок нет",
     "resend_receipt_prompt_text": "обычный случай - просьба прислать чек ещё раз, возвращает к шагу 1 выше. Без кнопок",
+    "sanctum_payment_period_line": "0а) строка в конце экрана оплаты Sanctum: до какого числа откроет доступ эта оплата. Можно вставить {дата}",
     "payment_screenshot_text": "0) «после оплаты пришлите скриншот чека» - приходит ВТОРЫМ сообщением сразу после экрана с реквизитами (вебинара или Sanctum), то есть ДО шага 1. Без кнопок - человек просто присылает картинку",
 }
 
 PAYMENT_FLOW_TEXT_PLACEHOLDERS = {
     "payment_confirmed_text": ["{название}"],
+    "sanctum_payment_period_line": ["{дата}"],
     "payment_confirmed_sanctum_line": ["{дата}", "{цена}"],
     "payment_declined_text": ["{название}"],
     "resend_receipt_prompt_text": ["{название}"],
@@ -7447,7 +7531,7 @@ async def check_reengagement(bot: Bot):
                 price_text = m["price"] or db.get_sanctum()["price"]
                 text = _lapse_text(lastday_template, m, anchor, deadline, price_text)
                 try:
-                    await bot.send_message(m["user_id"], text, reply_markup=_return_kb())
+                    await bot.send_message(m["user_id"], text, reply_markup=_lastday_kb())
                 except Exception:
                     logging.exception("Не удалось отправить письмо «последний день цены» пользователю %s", m["user_id"])
 
