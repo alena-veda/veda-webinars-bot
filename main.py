@@ -562,6 +562,15 @@ async def remind_later_cb(callback: CallbackQuery):
         await callback.answer(db.get_setting("sanctum_remind_expired_text") or "Благодарю 🙏", show_alert=True)
         return
     remind_on = _lastchance_date(m)
+    if remind_on is None:
+        await callback.answer(db.get_setting("sanctum_remind_expired_text") or "Благодарю 🙏", show_alert=True)
+        return
+    if m["lastchance_sent"]:
+        # «последний шанс» уже приходил (нажали на старое письмо): ближайшее письмо - в сам последний день срока цены
+        remind_on = _price_lock_until(m)
+        if remind_on <= _today():
+            await callback.answer("Сегодня последний день прежней цены. Вернуться можно кнопкой «Желаю вернуться сейчас» 🌿", show_alert=True)
+            return
     await callback.message.answer(
         (db.get_setting("sanctum_remind_confirm_text") or "Хорошо 🙏").replace("{дата_напоминания}", _fmt_date(remind_on))
     )
