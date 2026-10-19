@@ -298,7 +298,7 @@ def _strip_html_tags(text: str) -> str:
 # Правятся в админке: «Общие тексты бота» -> «🔘 Названия кнопок». Кнопки главного меню внизу экрана
 # («Профиль», «Вебинары» и др.) сюда не входят: бот узнаёт их по точному тексту.
 BUTTON_DEFS = [
-    ("btn_what_is_sanctum", "⚜️ Что такое VEDA SANCTUM", "под «Первым Касанием», в тексте «календарь только для участников», у прошедшего вебинара без записи"),
+    ("btn_what_is_sanctum", "⚜️ Что такое VEDA SANCTUM", "под «Первым Касанием», в тексте «календарь только для участников», у прошедшего вебинара без записи, на экране VEDA SANCTUM у убранного (открывает манифест)"),
     ("btn_enter_depth", "Войти в глубину", "под манифестом VEDA SANCTUM, ведёт к законам"),
     ("btn_pay", "Хочу оплатить подписку", "под законами и в тексте «календарь только для участников», ведёт к оплате"),
     ("btn_calendar", "🌙 Календарь ритуалов", "на экране законов, в профиле, в «Инфо», на экранах участников"),
@@ -307,14 +307,14 @@ BUTTON_DEFS = [
     ("btn_renew", "Продлить", "в напоминаниях об окончании подписки и на экране активной подписки"),
     ("btn_resume", "Возобновить", "на экране «Доступ закончился»"),
     ("btn_resume_long", "Возобновить подписку", "в сообщении, когда Вы вручную вносите человека с закончившимся доступом"),
-    ("btn_return", "Желаю войти вновь", "в письмах возврата («последний шанс» и др.)"),
+    ("btn_return", "Желаю войти вновь", "в письмах возврата («последний шанс» и др.) и на экране VEDA SANCTUM у убранного, ведёт на оплату"),
     ("btn_return_now", "Желаю вернуться сейчас", "в письме об уходе: когда Вы убрали человека из Sanctum, ведёт на оплату"),
     ("btn_remind_later", "Напомни. Благодарю.", "в письме об уходе: бот напомнит человеку перед концом срока прежней цены"),
     ("btn_lastday_pay", "Желаю оплатить подписку", "в письме «сегодня последний день прежней цены», ведёт на оплату"),
     ("btn_open_archive", "📖 Архив публикаций", "в письме «давно не заходил», открывает архив публикаций"),
     ("btn_open_webinars", "📅 Вебинары, Практики, Расстановки", "в письме «давно не заходил», открывает список вебинаров"),
     ("btn_pay_later", "⏰ Оплачу позже", "на экране оплаты и при ручном внесении просроченного"),
-    ("btn_pay_later_date", "⏰ Оплачу позже - назначить дату", "в напоминаниях об окончании, на экране «Доступ закончился», в письмах возврата"),
+    ("btn_pay_later_date", "⏰ Оплачу позже - назначить дату", "в напоминаниях об окончании, на экране «Доступ закончился», на экране VEDA SANCTUM у убранного (пока держится цена), в письмах возврата"),
     ("btn_return_sanctum", "⚜️ Вернуться к VEDA SANCTUM", "в напоминании про календарь и возврат"),
     ("btn_continue_ref", "Продолжить", "в особом приветствии для пришедших по реферальной ссылке"),
     ("btn_write_intention", "📝 Написать намерение", "в поздравлении со ступенью «Искра»"),
@@ -334,6 +334,8 @@ BUTTON_DEFS = [
     ("intro_msg_button", "Понятно. Продолжить ➡️", "под вводным сообщением и его напоминанием"),
     ("support_btn_text", "💬 Написать Куратору", "в «Моём профиле», «Инфо», «Как пользоваться» и под напоминаниями об оплате"),
     ("btn_promo_off", "🔕 Больше не присылать", "под ежемесячным приглашением в Sanctum для тех, кто ещё не подписан"),
+    ("btn_followup_more", "✍️ Хочу уточнить", "под вопросом «Всё ли стало понятно?», который приходит после ответа Куратора"),
+    ("btn_followup_ok", "✅ Всё понятно, благодарю", "там же: человеку всё понятно, ответ достаточен"),
 ]
 BUTTON_DEFAULTS = {k: d for k, d, _ in BUTTON_DEFS}
 BUTTON_WHERE = {k: w for k, _, w in BUTTON_DEFS}
@@ -343,6 +345,27 @@ BUTTON_NAME_MAX = 60
 def _btn(key: str) -> str:
     """Название кнопки из настроек (то, что Вы задали в админке), а если не задано - стандартное."""
     return (db.get_setting(key) or "").strip() or BUTTON_DEFAULTS[key]
+
+
+# Картинки экранов (админка: «Общие тексты бота» -> «🖼 Картинки экранов»). Картинка приходит ОТДЕЛЬНЫМ сообщением
+# перед текстом экрана; если не задана или не отправилась, экран приходит как обычно.
+SCREEN_PHOTO_LABELS = {
+    "screen_photo_sanctum_active": "Sanctum «Ваш доступ активен до...»",
+    "screen_photo_sanctum_expired": "Sanctum «доступ закончился» (и экран для убранных из Sanctum)",
+    "screen_photo_pay_sanctum": "Экран оплаты Sanctum",
+    "screen_photo_calendar": "Календарь ритуалов (перед списком дат)",
+    "screen_photo_profile": "Мой профиль (одна картинка для всех)",
+}
+
+
+async def _send_screen_photo(bot, chat_id: int, key: str):
+    file_id = (db.get_setting(key) or "").strip()
+    if not file_id:
+        return
+    try:
+        await bot.send_photo(chat_id, file_id)
+    except Exception:
+        logging.exception("Не отправилась картинка экрана %s пользователю %s", key, chat_id)
 
 
 def _support_admin_ids() -> list:
@@ -1145,6 +1168,7 @@ ADMIN_PERMISSION_SECTIONS = [
         ("adm_photo_welcome", "🖼 Фото приветствия (/start)"),
         ("adm_intro_message", "🌟 Вводное сообщение и напоминания новичку"),
         ("adm_button_names", "🔘 Названия кнопок"),
+        ("adm_screen_pictures", "🖼 Картинки экранов"),
         ("adm_about", "💠 Текст «Философия Alena Veda»"),
         ("adm_photo_about", "🖼 Фото «Философия Alena Veda»"),
         ("adm_faq", "❓ Текст «Частые вопросы»"),
@@ -1789,9 +1813,13 @@ async def show_sanctum(message: Message, user_id: int = None):
 
     # уже существующего подписчика (активного или с истёкшей подпиской) не
     # прогоняем заново через вступление-манифест и законы — это только для
-    # тех, кто в VEDA SANCTUM никогда не был (или был, но удалён оттуда)
+    # тех, кто в VEDA SANCTUM никогда не был. Убранному из Sanctum показываем свой короткий экран
+    # (его даты и цена те же, что в письмах), манифест открывается по кнопке «Что такое VEDA SANCTUM»
     membership = db.get_sanctum_membership(user_id)
     today = _today()
+    if membership and membership["status"] == "removed" and not membership["lifetime_free"]:
+        if await _show_removed_sanctum(message, user_id, membership):
+            return
     if membership and membership["status"] != "removed" and membership["valid_until"]:
         valid_until = _parse_date(membership["valid_until"])
         price = membership["price"] or s["price"]
@@ -1807,9 +1835,11 @@ async def show_sanctum(message: Message, user_id: int = None):
                 .replace("{цена}", price)
             )
             button_text = _btn("btn_renew")
+            await _send_screen_photo(message.bot, message.chat.id, "screen_photo_sanctum_active")
         else:
             text, price_locked = _expired_screen_text(user_id, membership, price)
             button_text = _btn("btn_resume")
+            await _send_screen_photo(message.bot, message.chat.id, "screen_photo_sanctum_expired")
         rows = [[InlineKeyboardButton(text=button_text, callback_data="sanctum_apply")]]
         # "Оплачу позже" имеет смысл показывать только пока цена ещё правда
         # сохраняется - после дедлайна любая названная дата всё равно будет
@@ -1820,6 +1850,78 @@ async def show_sanctum(message: Message, user_id: int = None):
             rows.append([_ritual_calendar_btn()])
         kb = InlineKeyboardMarkup(inline_keyboard=rows)
         await message.answer(text, reply_markup=kb, protect_content=_protect_for(user_id))
+        return
+
+    await _show_sanctum_manifest(message, user_id)
+
+
+def _removed_screen_content(user_id: int, membership):
+    """Текст и кнопки экрана VEDA SANCTUM для убранного из Sanctum. Даты и цена считаются теми же правилами, что в
+    письмах об уходе («последний шанс» и др.): конец доступа, срок хранения ступени, срок прежней цены."""
+    anchor = _lapse_anchor(membership)
+    paid_until = _parse_date(membership["valid_until"]) if membership["valid_until"] else None
+    if paid_until and paid_until.year >= 9000:
+        paid_until = None
+    ended = anchor
+    if paid_until and (not anchor or paid_until < anchor):
+        ended = paid_until  # «доступ закончился {дата}»: если срок оплаты кончился раньше, чем убрали, пишем дату конца срока
+    if not ended:
+        return None
+    saved = _saved_stage(user_id, membership)
+    if saved:
+        stage_line = (
+            (db.get_setting("sanctum_removed_stage_line") or "")
+            .replace("{ступень}", _ascension_level_name(saved[0]))
+            .replace("{дата_до}", _fmt_date(saved[1]))
+        )
+    elif membership["stage_reset_done"]:
+        stage_line = db.get_setting("sanctum_removed_reset_line") or ""
+    else:
+        stage_line = ""
+    deadline = _price_lock_deadline(membership)
+    price_locked = bool(deadline and not _price_lock_expired(membership))
+    if price_locked:
+        price_line = (
+            (db.get_setting("sanctum_price_locked_line") or "")
+            .replace("{цена}", membership["price"] or db.get_sanctum()["price"])
+            .replace("{дата_до}", _fmt_date(deadline))
+        )
+    else:
+        price_line = (db.get_setting("sanctum_price_current_line") or "").replace("{цена}", _price_for_user(user_id))
+    text = (
+        _personalize(db.get_setting("sanctum_removed_screen_text") or "", db.get_user(user_id))
+        .replace("{дата}", _fmt_date(ended))
+        .replace("{строка_ступени}", stage_line)
+        .replace("{строка_цены}", price_line)
+    )
+    text = re.sub(r"\n{3,}", "\n\n", text).strip()
+    rows = [[InlineKeyboardButton(text=_btn("btn_return"), callback_data="sanctum_apply")]]
+    # «Оплачу позже» - только пока прежняя цена правда сохраняется и дату ещё можно назвать (та же граница, что в sanctum_promise_date)
+    if price_locked:
+        latest = _promise_latest_date(membership)
+        if latest and latest >= _today():
+            rows.append([InlineKeyboardButton(text=_btn("btn_pay_later_date"), callback_data="sanctum_promise")])
+    rows.append([InlineKeyboardButton(text=_btn("btn_what_is_sanctum"), callback_data="sanctum_manifest")])
+    return text, InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+async def _show_removed_sanctum(message: Message, user_id: int, membership) -> bool:
+    """Экран для убранного из Sanctum. False - если показать нечего (нет дат) и нужно открыть обычный манифест."""
+    content = _removed_screen_content(user_id, membership)
+    if not content or not content[0]:
+        return False
+    text, kb = content
+    await _send_screen_photo(message.bot, message.chat.id, "screen_photo_sanctum_expired")
+    await _answer_long(message, text, reply_markup=kb, protect_content=_protect_for(user_id))
+    return True
+
+
+async def _show_sanctum_manifest(message: Message, user_id: int):
+    """Манифест VEDA SANCTUM (картинка, вступление, кнопка «Войти в глубину») - для тех, кто в Sanctum не был, и по
+    кнопке «Что такое VEDA SANCTUM» у убранного."""
+    s = db.get_sanctum()
+    if s["intro_text"] == db.PLACEHOLDER_SANCTUM_INTRO or s["price"] == db.PLACEHOLDER_PRICE:
+        await message.answer(db.get_setting("sanctum_placeholder_text"))
         return
 
     # человек смотрит информацию о Sanctum, но ещё ни разу не начинал оформление -
@@ -1841,6 +1943,13 @@ async def show_sanctum(message: Message, user_id: int = None):
 @router.callback_query(F.data == "open_sanctum")
 async def open_sanctum_cb(callback: CallbackQuery):
     await show_sanctum(callback.message, user_id=callback.from_user.id)
+    await callback.answer()
+
+
+@router.callback_query(F.data == "sanctum_manifest")
+async def sanctum_manifest_cb(callback: CallbackQuery):
+    """«Что такое VEDA SANCTUM» на экране убранного: сразу манифест (не возвращаясь на экран убранного)."""
+    await _show_sanctum_manifest(callback.message, callback.from_user.id)
     await callback.answer()
 
 
@@ -1950,6 +2059,7 @@ async def sanctum_apply(callback: CallbackQuery, state: FSMContext):
     period_line = (db.get_setting("sanctum_payment_period_line") or "").strip()
     if period_line and not (membership and membership["lifetime_free"]):
         text += "\n\n" + period_line.replace("{дата}", _fmt_date(_next_sanctum_valid_until(membership)))
+    await _send_screen_photo(callback.bot, callback.message.chat.id, "screen_photo_pay_sanctum")
     await callback.message.answer(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=kb_rows))
     await _send_payment_screenshot_hint(callback.message)
     await callback.answer()
@@ -2659,6 +2769,7 @@ async def show_profile(message: Message):
     greeting = _personalize(db.get_setting("profile_greeting_text"), user_row)
     text = f"{greeting}\n\n" + "\n\n".join(blocks)
     # «Мой профиль» намеренно БЕЗ защиты: в нём реферальная ссылка, которую человек должен уметь скопировать
+    await _send_screen_photo(message.bot, message.chat.id, "screen_photo_profile")
     await message.answer(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=kb_rows), protect_content=False)
 
 
@@ -2925,16 +3036,19 @@ async def support_topic_chosen(callback: CallbackQuery, state: FSMContext):
 
 @router.message(ContactAdminStates.waiting_message)
 async def contact_admin_received(message: Message, state: FSMContext):
-    topic = ((await state.get_data()).get("topic") or "").strip()
+    data = await state.get_data()
+    topic = (data.get("topic") or "").strip()
+    followup = bool(data.get("followup"))  # человек уточняет ответ Куратора («Хочу уточнить»)
     await state.clear()
     user = message.from_user
     user_row = db.get_user(user.id)
     name = _user_display_name(user_row) if user_row else (f"@{user.username}" if user.username else str(user.id))
-    header = f"✉️ Сообщение от {html.escape(name)}\nID: {user.id}"
+    header = (f"🔁 Уточнение от {html.escape(name)}" if followup else f"✉️ Сообщение от {html.escape(name)}") + f"\nID: {user.id}"
     if topic:
         header += f"\nТема: <b>{html.escape(topic)}</b>"
+    # «Ответить» отсюда (admin_answer_) после ответа присылает человеку вопрос «Всё ли стало понятно?»
     kb = InlineKeyboardMarkup(inline_keyboard=[[
-        InlineKeyboardButton(text="↩️ Ответить", callback_data=f"admin_reply_{user.id}"),
+        InlineKeyboardButton(text="↩️ Ответить", callback_data=f"admin_answer_{user.id}"),
         InlineKeyboardButton(text="👤 Профиль", callback_data=f"adm_user_view_{user.id}"),
     ]])
     delivered = False
@@ -2946,21 +3060,66 @@ async def contact_admin_received(message: Message, state: FSMContext):
         except Exception:
             logging.exception("Не удалось передать сообщение администратору %s", admin_id)
     if delivered:
-        await message.answer(db.get_setting("contact_admin_thanks_text"))
+        await message.answer(db.get_setting("support_followup_thanks_text" if followup else "contact_admin_thanks_text"))
     else:
         await message.answer(db.get_setting("contact_admin_failed_text"))
 
 
-@router.callback_query(F.data.startswith("admin_reply_"))
-async def admin_reply_start(callback: CallbackQuery, state: FSMContext):
-    if not await _require_permission(callback, "adm_support"):
-        return
-    target_user_id = int(callback.data[len("admin_reply_"):])
+async def _admin_reply_prompt(callback: CallbackQuery, state: FSMContext, target_user_id: int, followup: bool):
     target_row = db.get_user(target_user_id)
     name = _user_display_name(target_row) if target_row else str(target_user_id)
     await state.set_state(AdminReplyStates.waiting_reply)
-    await state.update_data(target_user_id=target_user_id)
+    await state.update_data(target_user_id=target_user_id, followup=followup)
     await callback.message.answer(f"Напишите ответ для {name} (текст, фото - что угодно):")
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("admin_reply_"))
+async def admin_reply_start(callback: CallbackQuery, state: FSMContext):
+    """«✍️ Написать» из карточки человека и старые кнопки «Ответить»: просто сообщение человеку, без вопроса «Всё ли стало понятно?»."""
+    if not await _require_permission(callback, "adm_support"):
+        return
+    await _admin_reply_prompt(callback, state, int(callback.data[len("admin_reply_"):]), followup=False)
+
+
+@router.callback_query(F.data.startswith("admin_answer_"))
+async def admin_answer_start(callback: CallbackQuery, state: FSMContext):
+    """«↩️ Ответить» под обращением человека: после ответа ему приходит вопрос «Всё ли стало понятно?»."""
+    if not await _require_permission(callback, "adm_support"):
+        return
+    await _admin_reply_prompt(callback, state, int(callback.data[len("admin_answer_"):]), followup=True)
+
+
+async def _send_support_followup(bot, user_id: int):
+    """После ответа Куратора: «Всё ли стало понятно, или хотите что-то уточнить?» с двумя кнопками."""
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=_btn("btn_followup_more"), callback_data="sup_more")],
+        [InlineKeyboardButton(text=_btn("btn_followup_ok"), callback_data="sup_ok")],
+    ])
+    await bot.send_message(user_id, db.get_setting("support_followup_text"), reply_markup=kb)
+
+
+@router.callback_query(F.data == "sup_more")
+async def support_more(callback: CallbackQuery, state: FSMContext):
+    """«Хочу уточнить»: человек пишет ещё одно сообщение, оно уходит Куратору как «Уточнение»."""
+    try:
+        await callback.message.edit_reply_markup(reply_markup=None)
+    except Exception:
+        pass
+    await state.set_state(ContactAdminStates.waiting_message)
+    await state.update_data(topic="", followup=True)
+    await callback.message.answer(db.get_setting("support_followup_prompt_text"))
+    await callback.answer()
+
+
+@router.callback_query(F.data == "sup_ok")
+async def support_ok(callback: CallbackQuery):
+    """«Всё понятно, благодарю»: кнопки под вопросом убираются, человеку благодарность. Куратору ничего не приходит."""
+    try:
+        await callback.message.edit_reply_markup(reply_markup=None)
+    except Exception:
+        pass
+    await callback.message.answer(db.get_setting("support_followup_ok_text"))
     await callback.answer()
 
 
@@ -2980,6 +3139,12 @@ async def admin_reply_send(message: Message, state: FSMContext):
         await message.answer(
             "Не удалось отправить - возможно, человек заблокировал бота или ни разу не писал ему."
         )
+        return
+    if data.get("followup"):
+        try:
+            await _send_support_followup(message.bot, target_user_id)
+        except Exception:
+            logging.exception("Не удалось отправить вопрос «Всё ли стало понятно?» пользователю %s", target_user_id)
 
 
 # ---------- вопросы под вебинарами и публикациями архива ----------
@@ -3536,7 +3701,7 @@ REENGAGE_FIELD_LABELS = {
     "reengage_text": "текст «пришёл и пропал» - независимый случай, ни разу ничего не покупал и молчит. Кнопка «🧘🏽‍♀️ Перейти в VEDA HEALING FLOW» - и само это напоминание отправляется, только если ссылка на бот медитаций уже задана (иначе не уходит вообще никому)",
     "winback_text": "текст «возврат после ухода из Sanctum» - независимый случай, был в Sanctum и не продлил. Кнопки: «Желаю войти вновь» и «⏰ Оплачу позже»",
     "sanctum_nudge_text": "текст «посмотрел, не начал» - независимый случай, открыл Sanctum, но не нажал оплату (приходит ВМЕСТО «пришёл и пропал»). Кнопка «⚜️ Вернуться к VEDA SANCTUM»",
-    "sanctum_removed_text": "1) «убрала вручную» - уходит СРАЗУ, как только Вы нажали «🚫 Убрать» в списке подписчиков. Кнопки: «Желаю войти вновь» и «⏰ Оплачу позже»",
+    "sanctum_removed_text": "1) «убрала вручную» - уходит СРАЗУ, как только Вы нажали «🚫 Убрать» в списке подписчиков. Кнопки: «Желаю вернуться сейчас» (ведёт на оплату) и «Напомни. Благодарю.» (бот напомнит перед концом срока цены)",
     "sanctum_lastchance_text": "2) «последний шанс сохранить цену» - приходит ПОСЛЕ текста выше, за несколько дней до конца срока (⏱ ниже). Кнопки: «Желаю войти вновь» и «⏰ Оплачу позже»",
     "sanctum_reset_text": "3) «время в поле обнулилось» - приходит ПОСЛЕДНИМ в этой цепочке, если человек так и не вернулся. Кнопка: только «Желаю войти вновь» - «Оплачу позже» здесь уже не предлагается, цена больше не сохраняется",
     "sanctum_reset_luminar_line": "добавка ВНУТРИ текста выше (3), про ранг Люминара - только тем, у кого он есть. Отдельной кнопки не добавляет",
@@ -3544,7 +3709,7 @@ REENGAGE_FIELD_LABELS = {
     "silent_letter_meditation_line": "7а) строка про VEDA HEALING FLOW в конце письма «давно не заходил» - добавляется ТОЛЬКО когда ссылка на VEDA HEALING FLOW уже задана (тогда же появляется и кнопка «Перейти в VEDA HEALING FLOW» второй по порядку)",
     "sanctum_remind_confirm_text": "1б) ответ человеку, когда он нажал «Напомни. Благодарю.» под письмом об уходе. Можно вставить {дата_напоминания} (день, когда придёт «последний шанс»)",
     "sanctum_remind_expired_text": "1в) короткое всплывающее окно, если «Напомни. Благодарю.» нажали, когда срок прежней цены уже прошёл или доступ снова действует (до 200 знаков)",
-    "sanctum_lastday_text": "3б) «сегодня последний день прежней цены» - приходит в сам последний день срока цены (например, 30.11), после «последнего шанса». Кнопка: «Желаю войти вновь» (без «Оплачу позже»)",
+    "sanctum_lastday_text": "3б) «сегодня последний день прежней цены» - приходит в сам последний день срока цены (например, 30.11), после «последнего шанса». Кнопка: «Желаю оплатить подписку» (ведёт на оплату; «Оплачу позже» сегодня уже не предлагается)",
     "sanctum_keep_stage_text": "4) «ступень сохранена» - приходит ушедшим, у кого была ступень «Искра» и выше, пока накопленное время ещё хранится (по умолчанию на 45-й и 75-й день). Кнопка: «Желаю войти вновь»",
     "sanctum_door_open_text": "5) «дверь открыта» - короткое письмо после обнуления (по умолчанию на 180-й и 365-й день), дальше бот не пишет. Кнопка: «Желаю войти вновь»",
     "sanctum_reset_meditation_line": "добавка ВНУТРИ текста выше (3), про VEDA HEALING FLOW - только тем, кто уже покупал. Отдельной кнопки не добавляет",
@@ -4711,7 +4876,7 @@ async def adm_sanctum_kick(callback: CallbackQuery):
 
 
 REMINDER_TEXT_LABELS = {
-    "sanctum_reminder_text_early": "1) напоминание заранее (за 2 дня до нового месяца) - первое из двух. Кнопки: «Продлить» и «⏰ Оплачу позже - назначить дату»",
+    "sanctum_reminder_text_early": "1) напоминание заранее (за день до конца срока) - первое из двух. Кнопки: «Продлить» и «⏰ Оплачу позже - назначить дату»",
     "sanctum_reminder_text_due": "2) напоминание в день истечения - приходит ПОСЛЕ напоминания заранее, если так и не продлили. Кнопки те же: «Продлить» и «⏰ Оплачу позже - назначить дату»",
     "sanctum_promise_reminder_text": "отдельный случай, вне цепочки выше - приходит только тем, кто сам назвал дату оплаты через «⏰ Оплачу позже» (раздел «✏️ Тексты экранов VEDA SANCTUM»), за день до этой даты. Кнопка: только «Продлить» (повторно «Оплачу позже» здесь уже не предлагается)",
 }
@@ -4815,7 +4980,7 @@ async def adm_reminder_texts(callback: CallbackQuery):
     promise = db.get_setting("sanctum_promise_reminder_text")
     text = (
         "<b>✉️ Тексты напоминаний VEDA SANCTUM</b>\n\n"
-        f"Заранее (за 2 дня до нового месяца):\n{html.escape(early)}\n\n"
+        f"Заранее (за день до конца срока):\n{html.escape(early)}\n\n"
         f"В день истечения:\n{html.escape(due)}\n\n"
         f"Об обещанной дате оплаты (за день до неё):\n{html.escape(promise)}\n\n"
         "Подсказка: <code>{date}</code> - дата, <code>{price}</code> - цена ИМЕННО этого человека "
@@ -4856,6 +5021,9 @@ SANCTUM_SCREEN_TEXT_LABELS = {
     "sanctum_lifetime_text": "экран VEDA SANCTUM для тех, у кого пожизненный доступ (Люминар III) - вместо «активен»/«закончился» ниже. Кнопка: «🌙 Календарь ритуалов»",
     "sanctum_active_text": "экран «доступ активен до...» - открывается, если человек уже был в Sanctum и оплата действует. Кнопки: «Продлить» (ведёт к реквизитам ниже) и «🌙 Календарь ритуалов»",
     "sanctum_expired_text": "экран «доступ закончился...» - открывается вместо экрана выше, если оплата истекла. Кнопки: «Возобновить» (к тем же реквизитам) и «⏰ Оплачу позже - назначить дату» (только пока прежняя цена ещё сохраняется)",
+    "sanctum_removed_screen_text": "экран VEDA SANCTUM для УБРАННОГО из Sanctum - открывается, когда он нажимает «Sanctum» в меню (вместо манифеста для новичков). Метки: {имя}, {дата} (когда закончился доступ), {строка_ступени} и {строка_цены} (подставляются сами из двух строк про ступень ниже и из строк цены экрана «закончился»). Кнопки: «Желаю войти вновь» (на оплату), «⏰ Оплачу позже - назначить дату» (только пока держится прежняя цена), «Что такое VEDA SANCTUM» (манифест)",
+    "sanctum_removed_stage_line": "строка ВНУТРИ экрана для убранного (выше): ступень ещё хранится. Метки {ступень}, {дата_до} (последний день, когда можно вернуться со ступенью). Если ступень не хранится, строки нет",
+    "sanctum_removed_reset_line": "строка ВНУТРИ экрана для убранного (выше): время в поле уже обнулилось (после 90-го дня). Без меток",
     "sanctum_price_locked_line": "строка цены ВНУТРИ экрана «закончился» выше, если прежняя цена ещё сохраняется - отдельной кнопки не добавляет, кнопки экрана см. выше",
     "sanctum_price_current_line": "строка цены ВНУТРИ экрана «закончился» выше, если прежняя цена уже не сохраняется - альтернатива строке выше, кнопки те же",
     "sanctum_already_lifetime_text": "всплывающая подсказка (alert) при попытке нажать оплату, если доступ уже пожизненный - не отдельное сообщение, кнопок нет",
@@ -4874,6 +5042,8 @@ SANCTUM_SCREEN_TEXT_LABELS = {
 SANCTUM_SCREEN_TEXT_PLACEHOLDERS = {
     "sanctum_active_text": ["{дата}", "{цена}"],
     "sanctum_expired_text": ["{дата_часть}", "{строка_цены}"],
+    "sanctum_removed_screen_text": ["{имя}", "{дата}", "{строка_ступени}", "{строка_цены}"],
+    "sanctum_removed_stage_line": ["{ступень}", "{дата_до}"],
     "sanctum_price_locked_line": ["{цена}", "{дата_до}"],
     "sanctum_price_current_line": ["{цена}"],
     "sanctum_payment_instructions_text": ["{цена}", "{реквизиты}"],
@@ -5132,6 +5302,10 @@ GENERAL_SCREEN_TEXT_LABELS = {
     "contact_admin_prompt_text": "приглашение написать «💬 Написать куратору» - после него человек пишет сообщение, дальше уходит одно из двух ниже. Без кнопок",
     "contact_admin_thanks_text": "подтверждение, что сообщение передано - приходит СРАЗУ ПОСЛЕ того, как человек написал (обычный исход). Без кнопок",
     "unknown_text_reply": "ответ, когда человек написал что-то, что бот не ждал (например, просто «здравствуйте» без вопроса). Под сообщением кнопка «Написать Куратору». Администраторам бот так не отвечает",
+    "support_followup_text": "вопрос ПОСЛЕ Вашего ответа человеку (когда Вы или помощник ответили кнопкой «↩️ Ответить» под его обращением). Две кнопки: «✍️ Хочу уточнить» и «✅ Всё понятно, благодарю» (названия кнопок - в «🔘 Названия кнопок»)",
+    "support_followup_prompt_text": "после «Хочу уточнить» - приглашение написать уточнение. Без кнопок, человек пишет в ответ текстом, фото или голосовым",
+    "support_followup_thanks_text": "подтверждение, что уточнение передано - приходит СРАЗУ ПОСЛЕ того, как человек написал уточнение. Вам оно приходит с пометкой «🔁 Уточнение» и кнопкой «↩️ Ответить». Без кнопок",
+    "support_followup_ok_text": "после «Всё понятно, благодарю» - благодарность. Кнопки под вопросом после нажатия исчезают. Вам ничего не приходит. Без кнопок",
     "support_topic_prompt_text": "вопрос «О чём Ваше обращение?» - приходит СРАЗУ после нажатия «Написать Куратору», под ним кнопки-темы (сами темы - в экране «💬 Обращения людей»)",
     "support_btn_text": "название кнопки, по которой человек пишет куратору прямо в боте (стоит в «Инфо», «Как пользоваться» и под напоминаниями об оплате). Это название кнопки, а не сообщение",
     "support_signature_text": "подпись, которая добавляется к ответам помощника (администратора с правом «Обращения людей»). Ваши ответы идут без подписи",
@@ -6643,6 +6817,48 @@ async def adm_ascension_photo_start(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
 
 
+@router.callback_query(F.data == "adm_screen_pictures")
+async def adm_screen_pictures(callback: CallbackQuery):
+    if not await _require_permission(callback, "adm_screen_pictures"):
+        return
+    lines = [
+        "<b>🖼 Картинки экранов</b>",
+        "",
+        "Картинка приходит ОТДЕЛЬНЫМ сообщением прямо перед текстом экрана, а текст с кнопками идёт сразу под ней. "
+        "Если картинка не задана, экран приходит как раньше. Картинка защищена от пересылки и сохранения, как и "
+        "остальные сообщения бота. Нажмите нужный экран, чтобы прислать картинку или убрать её («-»).",
+        "",
+    ]
+    for key, label in SCREEN_PHOTO_LABELS.items():
+        status = "✅ задана" if db.get_setting(key) else "- не задана"
+        lines.append(f"{label}: {status}")
+    rows = [
+        [InlineKeyboardButton(text=f"🖼 {label}"[:60], callback_data=f"adm_sp_{key[len('screen_photo_'):]}")]
+        for key, label in SCREEN_PHOTO_LABELS.items()
+    ]
+    rows.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="adm_back")])
+    await callback.message.edit_text("\n".join(lines), reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("adm_sp_"))
+async def adm_screen_picture_start(callback: CallbackQuery, state: FSMContext):
+    if not await _require_permission(callback, "adm_screen_pictures"):
+        return
+    field = "screen_photo_" + callback.data[len("adm_sp_"):]
+    if field not in SCREEN_PHOTO_LABELS:
+        await callback.answer("Этот экран не найден.", show_alert=True)
+        return
+    await state.set_state(PhotoUploadStates.waiting_photo)
+    await state.update_data(target="screen_photo", field=field)
+    current = "уже задана" if db.get_setting(field) else "не задана"
+    await callback.message.answer(
+        f"Пришлите картинку для экрана «{SCREEN_PHOTO_LABELS[field]}» (сейчас {current}).\n\n"
+        "Или отправьте «-», чтобы убрать картинку."
+    )
+    await callback.answer()
+
+
 # (label, тип содержимого) - на будущее легко добавить сюда и для других ступеней,
 # сейчас заведено только для «Искра», как она попросила первой
 ASCENSION_EXTRA_MEDIA_LABELS = {
@@ -6799,6 +7015,9 @@ async def photo_upload_value(message: Message, state: FSMContext):
         db.update_webinar_field(data["target_id"], "photo", file_id)
     elif target == "ascension_photo":
         db.set_setting(data["field"], file_id)
+    elif target == "screen_photo":
+        if data.get("field") in SCREEN_PHOTO_LABELS:
+            db.set_setting(data["field"], file_id)
 
     await state.clear()
     await message.answer("Фото обновлено ✅" if file_id else "Фото убрано ✅")
@@ -8163,6 +8382,7 @@ async def ritual_open(callback: CallbackQuery):
         blocks.append(f"<b>{rituals.month_title(ym)}</b>\n{body}")
     blocks.append(db.get_setting("ritual_kyiv_time_text"))
     user_row = db.get_user(user_id)
+    await _send_screen_photo(callback.bot, callback.message.chat.id, "screen_photo_calendar")
     await _send_long(callback.bot, callback.message.chat.id, "\n\n".join(blocks), _ritual_kb(ym_now, user_row))
     await callback.answer()
 
