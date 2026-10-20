@@ -3602,6 +3602,171 @@ _ERROR_HINTS = (
 )
 
 
+_JOB_LINE_RE = re.compile(r"\[планировщик\] (\w+): (старт|завершено)")
+
+# ежедневные задачи, которые обязаны отработать каждый день: (час, минута, как назвать для неё)
+_DAILY_JOBS = {
+    "backup_database": (3, 0, "резервная копия базы"),
+    "check_sanctum_reminders": (config.SANCTUM_REMINDER_HOUR, 0, "напоминания о продлении Sanctum"),
+    "check_reengagement": (config.SANCTUM_REMINDER_HOUR, 30, "письма ушедшим и автовозврат"),
+    "cleanup_feed_posts": (config.SANCTUM_REMINDER_HOUR, 45, "очистка ленты"),
+}
+
+
+def _log_overview(days: int = 7):
+    """Один проход по bot.log за последние days дней. Возвращает словарь или None, если журнала нет:
+    starts - моменты запусков бота («Bot started!»), errors_by_day - число ошибок по дням, job_start / job_done -
+    последний «старт» и последнее «завершено» каждой запланированной задачи, missed - сколько раз планировщик
+    пропустил запуск задачи (бот был выключен или перегружен)."""
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "bot.log")
+    if not os.path.isfile(path):
+        return None
+    cutoff = datetime.now(TZ) - timedelta(days=days)
+    res = {"starts": [], "errors_by_day": {}, "job_start": {}, "job_done": {}, "missed": [], "size": 0}
+    try:
+        res["size"] = os.path.getsize(path)
+        with open(path, encoding="utf-8", errors="ignore") as f:
+            for line in f:
+                if not _LOG_TS_RE.match(line):
+                    continue
+                try:
+                    ts = datetime.strptime(line[:19], "%Y-%m-%d %H:%M:%S").replace(tzinfo=TZ)
+                except ValueError:
+                    continue
+                if ts < cutoff:
+                    continue
+                if " ERROR " in line:
+                    d = ts.strftime("%Y-%m-%d")
+                    res["errors_by_day"][d] = res["errors_by_day"].get(d, 0) + 1
+                elif "Bot started!" in line:
+                    res["starts"].append(ts)
+                elif "was missed by" in line:
+                    res["missed"].append((ts, line))
+                else:
+                    mj = _JOB_LINE_RE.search(line)
+                    if mj:
+                        (res["job_start"] if mj.group(2) == "старт" else res["job_done"])[mj.group(1)] = ts
+    except OSError:
+        return None
+    return res
+
+
+def _health_extra(now, problems: list, ok_lines: list, info: list):
+    """Дополнительные проверки для «Состояния сейчас»: всё, что бот может узнать о себе сам. Каждая проверка
+    независима: сбой в одной не мешает остальным и не ломает экран."""
+    def safe(fn):
+        try:
+            fn()
+        except Exception as e:
+            logging.warning("«Состояние сейчас»: проверка %s не удалась: %r", getattr(fn, "__name__", "?"), e)
+
+    ov = _log_overview(7)
+
+    def restarts():
+        if ov is None:
+            return
+        n24 = sum(1 for t in ov["starts"] if t >= now - timedelta(hours=24))
+        last = max(ov["starts"]) if ov["starts"] else None
+        when = f", последний {last.strftime('%d.%m %H:%M')}" if last else ""
+        if n24 >= 3:
+            problems.append(f"🔁 Бот запускался заново {n24} раз(а) за сутки{when}. Если это не обновление, спросите Никиту, почему он перезапускается.")
+        else:
+            info.append(f"перезапусков бота за сутки: {n24}{when}; за 7 дней: {len(ov['starts'])}")
+
+    def jobs():
+        if ov is None:
+            return
+        for name, (h, mi, label) in _DAILY_JOBS.items():
+            due = now.replace(hour=h, minute=mi, second=0, microsecond=0)
+            if now < due + timedelta(minutes=20):
+                continue
+            done = ov["job_done"].get(name)
+            if done is None or done < due - timedelta(minutes=5):
+                restarted = [t for t in ov["starts"] if t > due]
+                tail = f" (бот перезапускался в {max(restarted).strftime('%H:%M')}, после этого задача до завтра не пойдёт)" if restarted else ""
+                problems.append(f"⏰ Сегодняшняя задача «{label}» ({h:02d}:{mi:02d}) не отработала{tail}.")
+        for name in list(_DAILY_JOBS) + ["check_webinar_reminders"]:
+            st, dn = ov["job_start"].get(name), ov["job_done"].get(name)
+            if st and (dn is None or dn < st) and now - st > timedelta(minutes=30):
+                problems.append(f"🧊 Задача «{name}» началась {st.strftime('%d.%m %H:%M')} и не закончилась. Нужен перезапуск или журнал.")
+        today_events = rituals.events_on(now.date().isoformat())
+        if today_events and now >= now.replace(hour=9, minute=20, second=0, microsecond=0):
+            done = ov["job_done"].get("send_ritual_daily")
+            if done is None or done.date() != now.date():
+                problems.append("🌙 Сегодня праздник календаря, а утренняя практика участникам не отправлялась.")
+        miss24 = [t for t, _ in ov["missed"] if t >= now - timedelta(hours=24)]
+        if miss24:
+            problems.append(f"⏳ Планировщик пропустил запуск задач {len(miss24)} раз(а) за сутки (бот был выключен или перегружен).")
+        if ov["size"] > 200 * 1024 * 1024:
+            problems.append(f"🗂 Файл журнала bot.log вырос до {ov['size'] // (1024 * 1024)} МБ: пора его чистить (Никита).")
+
+    def disk_and_db():
+        import shutil
+        base = os.path.dirname(os.path.abspath(__file__))
+        du = shutil.disk_usage(base)
+        free_gb = du.free / (1024 ** 3)
+        if free_gb < 1 or du.free / du.total < 0.05:
+            problems.append(f"💽 На сервере мало места: свободно {free_gb:.1f} ГБ. Резервные копии и база могут перестать записываться.")
+        else:
+            info.append(f"свободно места на сервере: {free_gb:.1f} ГБ")
+        conn = db.get_conn()
+        try:
+            res = conn.execute("PRAGMA quick_check").fetchone()[0]
+        finally:
+            conn.close()
+        if res != "ok":
+            problems.append(f"🛑 Проверка целостности базы вернула: {res}. Срочно сообщите Никите и не перезапускайте бота.")
+        else:
+            ok_lines.append("база данных целая")
+
+    def blocked_members():
+        conn = db.get_conn()
+        try:
+            rows = conn.execute(
+                "SELECT u.user_id, u.preferred_name, u.first_name FROM users u JOIN sanctum_membership m ON m.user_id = u.user_id "
+                "WHERE u.blocked = 1 AND COALESCE(m.status, '') != 'removed' AND m.valid_until >= ?", (now.strftime("%Y-%m-%d"),)
+            ).fetchall()
+        finally:
+            conn.close()
+        if rows:
+            names = ", ".join(html.escape((r["preferred_name"] or r["first_name"] or str(r["user_id"]))) for r in rows[:5])
+            problems.append(f"🚫 Действующие участники Sanctum, заблокировавшие бота: {len(rows)} ({names}). Письма им не доходят.")
+
+    def payment_requisites():
+        if not (db.get_setting("payment_requisites") or "").strip():
+            problems.append("💳 Не заполнены реквизиты оплаты («💳 Оплаты» → «💳 Реквизиты оплаты»): люди не смогут получить от Вас данные для оплаты.")
+
+    def webinars_without_time():
+        conn = db.get_conn()
+        try:
+            rows = conn.execute("SELECT title FROM webinars WHERE is_active = 1 AND (event_dt IS NULL OR TRIM(event_dt) = '')").fetchall()
+        finally:
+            conn.close()
+        if rows:
+            problems.append("📅 У вебинара не задана настоящая дата и время, напоминания людям работать не будут: " + ", ".join(html.escape(r["title"]) for r in rows[:3]))
+
+    def calendar_practice():
+        soon = rituals.events_between(now.date().isoformat(), (now.date() + timedelta(days=3)).isoformat())
+        empty = [e for e in soon if not rituals.practice_of(e)]
+        if empty:
+            e = empty[0]
+            problems.append(f"🌙 Скоро «{html.escape(e['title'])}» ({datetime.strptime(e['event_date'], '%Y-%m-%d').strftime('%d.%m')}), а практика этого дня не заполнена («🌙 Календарь ритуалов»).")
+
+    def activity():
+        conn = db.get_conn()
+        try:
+            r = conn.execute("SELECT MAX(last_action_at) FROM users WHERE user_id NOT IN (SELECT admin_id FROM admins)").fetchone()
+        finally:
+            conn.close()
+        if r and r[0]:
+            last = datetime.strptime(r[0][:19], "%Y-%m-%d %H:%M:%S")
+            hours = (datetime.now() - last).total_seconds() / 3600
+            info.append(f"последнее действие людей в боте: {hours:.0f} ч. назад" if hours >= 1 else "последнее действие людей в боте: только что")
+
+    for fn in (restarts, jobs, disk_and_db, blocked_members, payment_requisites, webinars_without_time, calendar_practice, activity):
+        safe(fn)
+
+
 def _recent_log_error_groups(hours: int = 24, limit: int = 8):
     """Ошибки из bot.log за последние hours часов, сгруппированные по одинаковому тексту (цифры, например номера
     людей, в сравнении не участвуют). Возвращает (список групп, всего ошибок) или None, если файла нет.
@@ -3642,14 +3807,20 @@ def _recent_log_error_groups(hours: int = 24, limit: int = 8):
     return ordered[:limit], len(entries), len(groups)
 
 
-def _errors_screen_text() -> str:
-    res = _recent_log_error_groups(24)
+def _errors_screen_text(hours: int = 24) -> str:
+    period = "последние сутки" if hours <= 24 else "последние 7 дней"
+    res = _recent_log_error_groups(hours)
     if res is None:
         return "Файл bot.log не найден рядом с ботом."
     groups, total, kinds = res
     if not total:
-        return "✅ За последние сутки ошибок в журнале нет."
-    lines = [f"🔎 <b>Ошибки за последние сутки</b>\nВсего: {total}, разных видов: {kinds}. Сначала самые частые.\n"]
+        return f"✅ За {period} ошибок в журнале нет."
+    lines = [f"🔎 <b>Ошибки за {period}</b>\nВсего: {total}, разных видов: {kinds}. Сначала самые частые.\n"]
+    if hours > 24:
+        ov = _log_overview(7)
+        if ov and ov["errors_by_day"]:
+            days = sorted(ov["errors_by_day"].items())
+            lines.append("По дням: " + ", ".join(f"{datetime.strptime(d, '%Y-%m-%d').strftime('%d.%m')} - {n}" for d, n in days) + "\n")
     for i, g in enumerate(groups, 1):
         blob = g["msg"] + " " + g["exc"]
         hint = next((h for keys, h in _ERROR_HINTS if any(k.lower() in blob.lower() for k in keys)), "")
@@ -3717,6 +3888,9 @@ def _health_screen_text() -> str:
     if months and months[-1]["ym"] < (_today() + timedelta(days=120)).strftime("%Y-%m"):
         problems.append("🌙 Даты календаря ритуалов заканчиваются меньше чем через 4 месяца - пора досчитать новые.")
 
+    info = []
+    _health_extra(now, problems, ok_lines, info)
+
     # содержимое, которое она ещё не заполнила - не "ошибка", а напоминание
     todo = []
     if not db.get_setting("meditation_bot_link"):
@@ -3743,6 +3917,8 @@ def _health_screen_text() -> str:
         text += "\n".join(problems) + "\n\n"
     if ok_lines:
         text += "В порядке: " + ", ".join(ok_lines) + ".\n\n"
+    if info:
+        text += "ℹ️ " + "; ".join(info) + ".\n\n"
     if todo:
         text += "📝 Не забыть заполнить:\n" + "\n".join(f"• {t}" for t in todo)
     return text.strip()
@@ -3753,7 +3929,7 @@ async def adm_health(callback: CallbackQuery):
     if not await _require_permission(callback, "adm_health"):
         return
     rows = [[InlineKeyboardButton(text="🔄 Проверить заново", callback_data="adm_health")]]
-    if (_count_recent_log_errors(24) or 0) > 0:
+    if (_count_recent_log_errors(24 * 7) or 0) > 0:
         rows.append([InlineKeyboardButton(text="🔎 Показать ошибки", callback_data="adm_health_errors")])
     rows.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="adm_back")])
     kb = InlineKeyboardMarkup(inline_keyboard=rows)
@@ -3767,14 +3943,18 @@ async def adm_health(callback: CallbackQuery):
 
 
 @router.callback_query(F.data == "adm_health_errors")
+@router.callback_query(F.data == "adm_health_errors_7d")
 async def adm_health_errors(callback: CallbackQuery):
     """Список ошибок из журнала за сутки, сгруппированный и с пояснениями (только чтение bot.log)."""
     if not await _require_permission(callback, "adm_health"):
         return
+    week = callback.data == "adm_health_errors_7d"
     kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="📅 За сутки" if week else "📅 За 7 дней",
+                              callback_data="adm_health_errors" if week else "adm_health_errors_7d")],
         [InlineKeyboardButton(text="⬅️ К состоянию", callback_data="adm_health")],
     ])
-    text = _errors_screen_text()
+    text = _errors_screen_text(168 if week else 24)
     if len(text) > 3900:
         text = text[:3850].rsplit("\n", 1)[0] + "\n…"
     await callback.message.edit_text(text, reply_markup=kb)
@@ -4023,13 +4203,13 @@ async def adm_reengage_field_start(callback: CallbackQuery, state: FSMContext):
         prompt = (
             f"{current_block}Пришлите число дней: если человек, у которого нет действующей подписки, оплачивает в "
             "последние N дней месяца, оплата засчитывается за СЛЕДУЮЩИЙ месяц, а не за остаток этого. "
-            "0 - выключить. Например: 3"
+            "0 - выключить. Сейчас - 4"
         )
     elif field in ("price_lock_days", "stage_reset_days", "lastchance_days_before"):
         what = {
-            "price_lock_days": "сколько дней после ухода из Sanctum сохраняется прежняя цена (сейчас по договорённости - 30)",
+            "price_lock_days": "(не используется: цена теперь держится до конца месяца)",
             "stage_reset_days": "через сколько дней отсутствия обнуляется время в поле для ступеней (сейчас по договорённости - 90)",
-            "lastchance_days_before": "за сколько дней до конца срока сохранения цены прислать «последний шанс» (сейчас - 5)",
+            "lastchance_days_before": "за сколько дней до конца срока сохранения цены прислать «последний шанс» (сейчас - 3)",
         }[field]
         prompt = f"{current_block}Пришлите число: {what}."
     elif field == "silent_letter_days":
