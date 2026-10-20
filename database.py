@@ -1224,7 +1224,7 @@ def init_db():
             "Писать ничего не нужно."
         ),
         "intro_already_text": "Вы уже на следующем шаге, листайте чат вниз 🌿",
-        "support_signature_text": "— Ваш Куратор",
+        "support_signature_text": "С уважением, Ваш Куратор",
         "support_btn_text": "💬 Написать Куратору",
         "ascension_return_level2_text": (
             "{имя}, с возвращением в поле VEDA SANCTUM 🌿\n\n"
@@ -1451,6 +1451,14 @@ def init_db():
             ),
         )
         c.execute("INSERT INTO settings (key, value) VALUES ('migr_promise_texts_1', '1')")
+
+    # 2026-10-19 (её просьба): подпись Куратора теперь «С уважением, Ваш Куратор» (меняем только прежний стандартный текст)
+    c.execute("SELECT value FROM settings WHERE key = 'migr_signature_1'")
+    if not c.fetchone():
+        c.execute(
+            "UPDATE settings SET value = 'С уважением, Ваш Куратор' WHERE key = 'support_signature_text' AND value = '— Ваш Куратор'"
+        )
+        c.execute("INSERT INTO settings (key, value) VALUES ('migr_signature_1', '1')")
 
     # аудит 2026-09-29: поздравления Люминаров раньше писали дар прямо в тексте,
     # {дар} нигде реально не подставлялся - теперь дар вынесен в отдельную

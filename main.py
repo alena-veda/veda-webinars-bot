@@ -328,7 +328,9 @@ BUTTON_DEFS = [
     ("btn_guide", "🧭 Как пользоваться", "в «Инфо»"),
     ("btn_suggest_q", "💡 Предложить свой вопрос", "под «Частыми вопросами»"),
     ("btn_about_month", "📖 О практиках месяца", "под календарём"),
-    ("btn_mantra", "🎧 Слушать мантру", "под практикой праздника, ведёт по Вашей ссылке"),
+    ("btn_ritual_optout", "🔕 Не присылать сообщения о праздниках", "под календарём участника: отключает и календарь 1-го числа, и утреннюю практику в день праздника"),
+    ("btn_ritual_optin", "🔔 Присылать сообщения о праздниках", "та же кнопка под календарём у того, кто сообщения отключил: включает их обратно"),
+    ("btn_mantra", "🎧 Слушать мантру", "в утреннем сообщении в день праздника, ведёт по Вашей ссылке"),
     ("btn_watch_record", "🎬 Смотреть запись", "у прошедшего вебинара, если вписана ссылка на запись"),
     ("btn_webinar_details", "📄 Подробнее о вебинаре", "в напоминаниях о вебинаре"),
     ("intro_msg_button", "Понятно. Продолжить ➡️", "под вводным сообщением и его напоминанием"),
@@ -387,11 +389,12 @@ def _support_btn(callback_data: str = "contact_admin") -> InlineKeyboardButton:
     return InlineKeyboardButton(text=_btn("support_btn_text"), callback_data=callback_data)
 
 
-async def _send_staff_reply(message: Message, target_user_id: int):
-    """Ответ человеку. Ответ владельца уходит как есть. Ответ помощника (не владельца) подписывается
-    («— Ваш Куратор» по умолчанию, текст правится в админке), чтобы человек понимал, кто ему пишет."""
+async def _send_staff_reply(message: Message, target_user_id: int, sign: bool = False):
+    """Ответ человеку. Подпись («С уважением, Ваш Куратор» по умолчанию, текст правится в админке) ставится ТОЛЬКО
+    когда это ответ на обращение через кнопку «Написать Куратору» (sign=True), и тогда она есть и у владельца,
+    и у помощников. Во всех остальных ответах (✍️ Написать из карточки человека и т.п.) подписи нет."""
     bot = message.bot
-    sig = "" if db.is_owner(message.from_user.id) else _support_signature()
+    sig = _support_signature() if sign else ""
     raw = message.text or message.caption or ""
     has_name_mark = isinstance(raw, str) and "{имя}" in raw
     if not sig and not has_name_mark:
@@ -3131,7 +3134,7 @@ async def admin_reply_send(message: Message, state: FSMContext):
     target_user_id = data.get("target_user_id")
     await state.clear()
     try:
-        await _send_staff_reply(message, target_user_id)
+        await _send_staff_reply(message, target_user_id, sign=bool(data.get("followup")))
         await message.answer("Ответ отправлен ✅")
         await _notify_other_support(message.bot, message.from_user.id, target_user_id)
     except Exception:
@@ -3258,8 +3261,6 @@ async def _q_answer_finalize(callback: CallbackQuery, state: FSMContext, is_publ
     db.set_question_answer(q_id, answer_text, is_public)
     try:
         answer_msg = db.get_setting("question_answer_prefix_text").replace("{ответ}", answer_text)
-        if not db.is_owner(callback.from_user.id) and _support_signature():
-            answer_msg += "\n\n" + html.escape(_support_signature())
         await callback.bot.send_message(q["user_id"], answer_msg)
     except Exception:
         logging.exception("Не удалось отправить ответ на вопрос пользователю %s", q["user_id"])
@@ -3585,6 +3586,85 @@ def _count_recent_log_errors(hours: int = 24) -> int | None:
     return count
 
 
+_LOG_TS_RE = re.compile(r"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}")
+
+# что означает самая частая ошибка (чтобы не гадать по тексту на английском)
+_ERROR_HINTS = (
+    (("TelegramNetworkError", "ClientConnectorError", "TimeoutError", "ServerDisconnected", "Request timeout", "Cannot connect"),
+     "сбой связи с Telegram (сеть или сервер Telegram). Обычно проходит сам, если не повторяется всё время"),
+    (("bot was blocked", "user is deactivated", "chat not found", "Forbidden"),
+     "человек заблокировал бота или удалил аккаунт, сообщение ему не дошло. Это не поломка бота"),
+    (("message is not modified",), "безобидно: сообщение уже было таким же"),
+    (("can't parse entities", "parse entities"), "в тексте с разметкой не закрыт тег (жирный и т.п.): проверьте последний правленый текст"),
+    (("message to edit not found", "message can't be edited", "query is too old"),
+     "человек нажал кнопку под очень старым сообщением, Telegram не дал его изменить. Безобидно"),
+    (("database is locked",), "база данных в этот момент была занята. Если повторяется часто, сообщите Никите"),
+)
+
+
+def _recent_log_error_groups(hours: int = 24, limit: int = 8):
+    """Ошибки из bot.log за последние hours часов, сгруппированные по одинаковому тексту (цифры, например номера
+    людей, в сравнении не участвуют). Возвращает (список групп, всего ошибок) или None, если файла нет.
+    Группа: {"n", "last", "msg", "exc"}; самые частые первыми."""
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "bot.log")
+    if not os.path.isfile(path):
+        return None
+    cutoff = datetime.now(TZ) - timedelta(hours=hours)
+    entries = []  # [время, текст первой строки, последняя строка блока (обычно «ТипОшибки: пояснение»)]
+    try:
+        with open(path, encoding="utf-8", errors="ignore") as f:
+            cur = None
+            for line in f:
+                line = line.rstrip("\n")
+                if _LOG_TS_RE.match(line):
+                    cur = None
+                    if " ERROR " not in line:
+                        continue
+                    try:
+                        ts = datetime.strptime(line[:19], "%Y-%m-%d %H:%M:%S").replace(tzinfo=TZ)
+                    except ValueError:
+                        continue
+                    if ts >= cutoff:
+                        cur = [ts, line.split(" ERROR ", 1)[1].strip(), ""]
+                        entries.append(cur)
+                elif cur is not None and line.strip():
+                    cur[2] = line.strip()
+    except OSError:
+        return None
+    groups = {}
+    for ts, msg, exc in entries:
+        key = (re.sub(r"\d+", "N", msg), re.sub(r"\d+", "N", exc))
+        g = groups.setdefault(key, {"n": 0, "last": ts, "msg": msg, "exc": exc})
+        g["n"] += 1
+        if ts >= g["last"]:
+            g["last"], g["msg"], g["exc"] = ts, msg, exc
+    ordered = sorted(groups.values(), key=lambda g: (-g["n"], -g["last"].timestamp()))
+    return ordered[:limit], len(entries), len(groups)
+
+
+def _errors_screen_text() -> str:
+    res = _recent_log_error_groups(24)
+    if res is None:
+        return "Файл bot.log не найден рядом с ботом."
+    groups, total, kinds = res
+    if not total:
+        return "✅ За последние сутки ошибок в журнале нет."
+    lines = [f"🔎 <b>Ошибки за последние сутки</b>\nВсего: {total}, разных видов: {kinds}. Сначала самые частые.\n"]
+    for i, g in enumerate(groups, 1):
+        blob = g["msg"] + " " + g["exc"]
+        hint = next((h for keys, h in _ERROR_HINTS if any(k.lower() in blob.lower() for k in keys)), "")
+        part = f"<b>{i}. ×{g['n']}</b>, последний раз {g['last'].strftime('%d.%m %H:%M')}\n{html.escape(g['msg'][:200])}"
+        if g["exc"]:
+            part += f"\n<code>{html.escape(g['exc'][:200])}</code>"
+        if hint:
+            part += f"\n💬 {hint}."
+        lines.append(part)
+    if kinds > len(groups):
+        lines.append(f"…и ещё видов ошибок: {kinds - len(groups)} (они реже). Полный список - в файле bot.log на сервере.")
+    lines.append("Если ошибка повторяется и не похожа на сбой связи, перешлите этот экран Никите (скриншотом).")
+    return "\n\n".join(lines)
+
+
 def _health_screen_text() -> str:
     now = datetime.now(TZ)
     problems = []
@@ -3596,7 +3676,7 @@ def _health_screen_text() -> str:
     elif error_count == 0:
         ok_lines.append("Ошибок за последние сутки не было")
     else:
-        problems.append(f"⚠️ Ошибок за последние сутки: {error_count}. Подробности - в файле bot.log.")
+        problems.append(f"⚠️ Ошибок за последние сутки: {error_count}. Нажмите «🔎 Показать ошибки» ниже.")
 
     stall_hours = int(db.get_setting("stall_hours") or "24")
     stall_cutoff = (now - timedelta(hours=stall_hours)).strftime("%Y-%m-%d %H:%M:%S")
@@ -3646,6 +3726,15 @@ def _health_screen_text() -> str:
             todo.append(f"фото для поздравления Люминар {['I','II','III'][n-1]}")
     if not db.get_setting("ascension_level2_voice"):
         todo.append("голосовое сообщение на переход ступени «Искра» (видеокружок уже загружен)")
+    # кнопку «Напоминать в день» убрали (2026-10-19): в Её собственных правленых текстах календаря она могла остаться
+    _stale_ritual = re.compile(r"напоминать\s+в\s+день|включить\s+напоминание|напоминани[ея]\s+о\s+датах|с\s+напоминаниями", re.I)
+    for key, label in (("ritual_teaser_text", "текст для тех, кто не в Sanctum (кнопка «Календарь ритуалов»)"),
+                       ("ritual_announce_text", "анонс календаря участникам"),
+                       ("ritual_sanctum_line", "строка про календарь в «Войти в глубину»"),
+                       ("ritual_monthly_intro", "начало ежемесячного календаря"),
+                       ("ritual_monthly_footer", "конец ежемесячного календаря")):
+        if _stale_ritual.search(db.get_setting(key) or ""):
+            todo.append(f"в тексте «{label}» осталось про кнопку «Напоминать в день» (её больше нет, утренняя практика приходит сама). Раздел «🌙 Календарь ритуалов» → «✏️ Тексты календаря»")
 
     text = f"🩺 <b>Состояние сейчас</b>\n<i>проверено {now.strftime('%d.%m.%Y %H:%M')}</i>\n\n"
     if not problems:
@@ -3663,16 +3752,32 @@ def _health_screen_text() -> str:
 async def adm_health(callback: CallbackQuery):
     if not await _require_permission(callback, "adm_health"):
         return
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🔄 Проверить заново", callback_data="adm_health")],
-        [InlineKeyboardButton(text="⬅️ Назад", callback_data="adm_back")],
-    ])
+    rows = [[InlineKeyboardButton(text="🔄 Проверить заново", callback_data="adm_health")]]
+    if (_count_recent_log_errors(24) or 0) > 0:
+        rows.append([InlineKeyboardButton(text="🔎 Показать ошибки", callback_data="adm_health_errors")])
+    rows.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="adm_back")])
+    kb = InlineKeyboardMarkup(inline_keyboard=rows)
     try:
         await callback.message.edit_text(_health_screen_text(), reply_markup=kb)
     except TelegramBadRequest:
         # "message is not modified" - если нажали "Проверить заново", а за это
         # время ничего не изменилось; не ошибка, просто нечего перерисовывать
         pass
+    await callback.answer()
+
+
+@router.callback_query(F.data == "adm_health_errors")
+async def adm_health_errors(callback: CallbackQuery):
+    """Список ошибок из журнала за сутки, сгруппированный и с пояснениями (только чтение bot.log)."""
+    if not await _require_permission(callback, "adm_health"):
+        return
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="⬅️ К состоянию", callback_data="adm_health")],
+    ])
+    text = _errors_screen_text()
+    if len(text) > 3900:
+        text = text[:3850].rsplit("\n", 1)[0] + "\n…"
+    await callback.message.edit_text(text, reply_markup=kb)
     await callback.answer()
 
 
@@ -5308,7 +5413,7 @@ GENERAL_SCREEN_TEXT_LABELS = {
     "support_followup_ok_text": "после «Всё понятно, благодарю» - благодарность. Кнопки под вопросом после нажатия исчезают. Вам ничего не приходит. Без кнопок",
     "support_topic_prompt_text": "вопрос «О чём Ваше обращение?» - приходит СРАЗУ после нажатия «Написать Куратору», под ним кнопки-темы (сами темы - в экране «💬 Обращения людей»)",
     "support_btn_text": "название кнопки, по которой человек пишет куратору прямо в боте (стоит в «Инфо», «Как пользоваться» и под напоминаниями об оплате). Это название кнопки, а не сообщение",
-    "support_signature_text": "подпись, которая добавляется к ответам помощника (администратора с правом «Обращения людей»). Ваши ответы идут без подписи",
+    "support_signature_text": "подпись в конце ответа, который человек получает на своё обращение через кнопку «Написать Куратору» (ответ кнопкой «↩️ Ответить» под обращением; подпись ставится и на Ваши ответы, и на ответы помощников). В остальных сообщениях людям (например, «✍️ Написать» из карточки человека) подписи нет",
     "contact_admin_failed_text": "если передать не удалось (сбой) - редкая альтернатива подтверждению выше. Без кнопок",
     "question_unavailable_text": "если вопросы под вебинаром/публикацией выключены - вместо приглашения написать вопрос. Всплывающая подсказка (alert) - кнопок нет",
     "question_prompt_text": "приглашение написать вопрос под вебинаром/публикацией - после него человек пишет вопрос, дальше уходит одно из двух ниже. Без кнопок",
@@ -6403,7 +6508,7 @@ async def edit_field_value(message: Message, state: FSMContext):
     html_trusted = (
         (target, field) in HTML_TRUSTED_FIELDS or target == "feed_post"
         or (target == "ritual_text" and not str(field).startswith("ritual_mantra_"))
-        or (target == "ritual_event" and field in ("meaning", "practice"))
+        or (target == "ritual_event" and field in ("meaning", "practice", "short"))
         or target in (
             "sanctum_screen_text", "payment_flow_text", "webinar_screen_text",
             "general_screen_text", "intention_text",
@@ -8188,17 +8293,12 @@ def _ritual_teaser_kb(from_laws: bool = False) -> InlineKeyboardMarkup:
 
 
 def _ritual_kb(ym: str, user_row) -> InlineKeyboardMarkup:
-    reminders_on = bool(user_row and user_row["ritual_reminders"])
     opted_out = bool(user_row and user_row["ritual_optout"])
     rows = []
     if ym != "x":
         rows.append([InlineKeyboardButton(text=_btn("btn_about_month"), callback_data=f"rit_about_{ym}")])
     rows.append([InlineKeyboardButton(
-        text="🔕 Не напоминать в день" if reminders_on else "🔔 Напоминать в день",
-        callback_data=f"rit_remind_{ym}",
-    )])
-    rows.append([InlineKeyboardButton(
-        text="🔔 Присылать календарь 1-го числа" if opted_out else "🔕 Больше не присылать календарь",
+        text=_btn("btn_ritual_optin") if opted_out else _btn("btn_ritual_optout"),
         callback_data=f"rit_optout_{ym}",
     )])
     return InlineKeyboardMarkup(inline_keyboard=rows)
@@ -8393,36 +8493,20 @@ async def ritual_about(callback: CallbackQuery):
         await callback.answer(db.get_setting("ritual_members_only_text"), show_alert=True)
         return
     ym = callback.data[len("rit_about_"):]
-    blocks = rituals.about_blocks(ym)
-    if not blocks:
+    text = rituals.about_message(ym)
+    if not text:
         await callback.answer(db.get_setting("ritual_month_no_dates_text"), show_alert=True)
         return
-    # каждый праздник отдельным сообщением; под ним кнопка мантры, если она задана
-    for b in blocks:
-        url = _clean_url(b["mantra"])
-        kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text=_btn("btn_mantra"), url=url)]]) if url else None
-        await _send_long(callback.bot, callback.message.chat.id, b["text"], kb)
+    # одно сообщение на весь месяц (если очень длинное, _send_long разделит его по абзацам)
+    await _send_long(callback.bot, callback.message.chat.id, text)
     await callback.answer()
 
 
 @router.callback_query(F.data.startswith("rit_remind_"))
 async def ritual_toggle_remind(callback: CallbackQuery):
-    user_id = callback.from_user.id
-    if not _ritual_is_member(user_id):
-        await callback.answer(db.get_setting("ritual_members_only_text"), show_alert=True)
-        return
-    ym = callback.data[len("rit_remind_"):]
-    user_row = db.get_user(user_id)
-    new_value = 0 if (user_row and user_row["ritual_reminders"]) else 1
-    rituals.set_user_flag(user_id, "ritual_reminders", new_value)
-    try:
-        await callback.message.edit_reply_markup(reply_markup=_ritual_kb(ym, db.get_user(user_id)))
-    except Exception:
-        pass
-    await callback.answer(
-        db.get_setting("ritual_reminder_on_text") if new_value else db.get_setting("ritual_reminder_off_text"),
-        show_alert=True,
-    )
+    """Кнопку «Напоминать в день» убрали (утреннее сообщение приходит всем участникам), но она осталась
+    под давними сообщениями в чатах: объясняем и ничего не меняем."""
+    await callback.answer(db.get_setting("ritual_remind_gone_text") or "Теперь сообщения о праздниках приходят сами.", show_alert=True)
 
 
 @router.callback_query(F.data.startswith("rit_optout_"))
@@ -8526,15 +8610,9 @@ async def send_ritual_monthly(bot: Bot):
     logging.info("[планировщик] send_ritual_monthly: завершено, отправлено %s", sent)
 
 
-async def send_ritual_daily(bot: Bot):
-    """Каждое утро: тем, кто включил «Напоминать в день», если сегодня в
-    календаре есть событие. В сообщении название, смысл (личная фраза и общий
-    текст), практика; под ним кнопки мантры (если заданы) и «Календарь ритуалов»."""
-    logging.info("[планировщик] send_ritual_daily: старт")
-    today_iso = _today().isoformat()
-    evs = rituals.events_on(today_iso)
-    if not evs:
-        return
+def _ritual_day_message(evs, name: str) -> str:
+    """Утреннее сообщение в день праздника: вступление, затем по каждому празднику дня название,
+    смысл и полная практика."""
     blocks = []
     for e in evs:
         emoji = rituals.KINDS.get(e["kind"], ("•", ""))[0]
@@ -8547,14 +8625,26 @@ async def send_ritual_daily(bot: Bot):
         if practice:
             block += f"\n\n{practice}"
         blocks.append(block)
+    header = (db.get_setting("ritual_day_text") or "").replace("{имя}", name or "друг")
+    return header + "\n\n" + "\n\n".join(blocks)
+
+
+async def send_ritual_daily(bot: Bot):
+    """Каждое утро в 09:00: ВСЕМ действующим участникам, кроме отказавшихся от сообщений о праздниках, если сегодня
+    в календаре есть событие. В сообщении название, смысл (личная фраза и общий текст), полная практика;
+    под ним кнопки мантры (если заданы) и «Календарь ритуалов»."""
+    logging.info("[планировщик] send_ritual_daily: старт")
+    today_iso = _today().isoformat()
+    evs = rituals.events_on(today_iso)
+    if not evs:
+        return
     kb = _ritual_mantra_kb(evs, with_calendar=True)
     sent = 0
     for u in rituals.active_members():
-        if not u["ritual_reminders"] or u["ritual_last_day"] == today_iso:
+        if u["ritual_optout"] or u["ritual_last_day"] == today_iso:
             continue
-        header = (db.get_setting("ritual_day_text") or "").replace("{имя}", _user_first_name_for_text(u) or "друг")
         try:
-            await _send_long(bot, u["user_id"], header + "\n\n" + "\n\n".join(blocks), kb)
+            await _send_long(bot, u["user_id"], _ritual_day_message(evs, _user_first_name_for_text(u)), kb)
             rituals.set_user_flag(u["user_id"], "ritual_last_day", today_iso)
             sent += 1
         except Exception:
@@ -8585,10 +8675,9 @@ def _ritual_admin_screen():
         f"Дат в таблице: {total} (период: {span})\n"
         f"Ближайшая: {nxt}\n\n"
         f"Участников Санктума сейчас: {st['members']}\n"
-        f"Включили «напоминать в день»: {st['reminders']}\n"
-        f"Отказались от ежемесячного календаря: {st['optout']}\n"
+        f"Отключили сообщения о праздниках (ни календаря 1-го числа, ни утренней практики): {st['optout']}\n"
         f"Анонс участникам: {announced}\n\n"
-        "Ежемесячное сообщение уходит 1-го числа в 11:11 по Киеву, напоминания в день события - в 09:00. "
+        "Календарь на месяц уходит 1-го числа в 11:11 по Киеву, а утром в день праздника в 09:00 приходит полная практика (оба сообщения получают все участники, кроме отключивших). "
         "Даты бот не считает сам: он берёт их из этой таблицы, поэтому любую можно поправить здесь.\n\n"
         f"Напоминание тем, кто увидел кнопку календаря, но ни разу её не открыл: "
         f"{'включено' if nudge_on else 'выключено'}, через {nudge_days} дн. после показа, один раз на человека.\n\n"
@@ -8602,7 +8691,9 @@ def _ritual_admin_screen():
         [InlineKeyboardButton(text="📅 Даты по месяцам", callback_data="adm_rit_months")],
         [InlineKeyboardButton(text="➕ Добавить дату", callback_data="adm_rit_add")],
         [InlineKeyboardButton(text="✏️ Тексты календаря", callback_data="adm_rit_texts")],
-        [InlineKeyboardButton(text="📨 Прислать мне пробное сообщение", callback_data="adm_rit_test")],
+        [InlineKeyboardButton(text="📨 Мне пробный календарь месяца", callback_data="adm_rit_test")],
+        [InlineKeyboardButton(text="📖 Мне пробные «Практики месяца»", callback_data="adm_rit_test_about")],
+        [InlineKeyboardButton(text="🌅 Мне пробное утреннее сообщение", callback_data="adm_rit_test_day")],
         [InlineKeyboardButton(text="📣 Анонс календаря участникам", callback_data="adm_rit_announce")],
         [InlineKeyboardButton(
             text="🔕 Выключить напоминание «не открыл»" if nudge_on else "🔔 Включить напоминание «не открыл»",
@@ -8740,11 +8831,14 @@ def _ritual_event_screen(event_id: int):
     general_meaning = (db.get_setting(f"ritual_meaning_{e['kind']}") or "").strip()
     own_practice = (e["practice"] or "").strip()
     general_practice = (db.get_setting(f"ritual_practice_{e['kind']}") or "").strip()
+    own_short = (e["short"] or "").strip()
+    general_short = (db.get_setting(f"ritual_short_{e['kind']}") or "").strip()
     own_mantra = (e["mantra"] or "").strip()
     general_mantra = (db.get_setting(f"ritual_mantra_{e['kind']}") or "").strip()
     meaning_note = " (только она: стоит «!»)" if exclusive else ""
     general_note = " - не показывается, у даты стоит «!»" if exclusive else ""
     practice_src = "своя у даты" if own_practice else ("общая для типа" if general_practice else "нигде не задана")
+    short_src = "своя у даты" if own_short else ("общая для типа" if general_short else "не задана, покажется только личная фраза дня")
     mantra_src = "своя у даты" if own_mantra else ("общая для типа" if general_mantra else "нигде не задана")
     text = (
         f"{rituals.KINDS.get(e['kind'], ('•', ''))[0]} <b>{e['title']}</b>\n"
@@ -8754,10 +8848,12 @@ def _ritual_event_screen(event_id: int):
         f"<b>Общий смысл для «{kind_name}»:</b> {_ritual_preview(general_meaning)}{general_note}\n\n"
         f"<b>Практика для этой даты:</b> {_ritual_preview(own_practice) if own_practice else '(не задана - берётся общая для типа)'}\n"
         f"<b>Общая практика для «{kind_name}»:</b> {_ritual_preview(general_practice)}\n\n"
+        f"<b>Краткая практика для этой даты:</b> {_ritual_preview(own_short) if own_short else '(не задана - берётся общая для типа)'}\n"
+        f"<b>Общая краткая практика для «{kind_name}»:</b> {_ritual_preview(general_short)}\n\n"
         f"<b>Мантра для этой даты:</b> {html.escape(own_mantra) if own_mantra else '(не задана)'}\n"
         f"<b>Общая мантра для «{kind_name}»:</b> {html.escape(general_mantra) if general_mantra else '(не задана)'}\n\n"
         f"<b>Людям покажется:</b> смысл - личная фраза{' и общий текст' if not exclusive and general_meaning else ''}; "
-        f"практика - {practice_src}; мантра - {mantra_src}."
+        f"практика (утром в день праздника) - {practice_src}; краткая (в «О практиках месяца») - {short_src}; мантра - {mantra_src}."
     )
     ym = e["event_date"][:7]
     rows = [
@@ -8766,7 +8862,8 @@ def _ritual_event_screen(event_id: int):
         [InlineKeyboardButton(text="✏️ Уточнение", callback_data=f"adm_rit_ef_{event_id}_detail"),
          InlineKeyboardButton(text="✏️ Личная фраза", callback_data=f"adm_rit_ef_{event_id}_meaning")],
         [InlineKeyboardButton(text="✍️ Практика", callback_data=f"adm_rit_ef_{event_id}_practice"),
-         InlineKeyboardButton(text="🎧 Мантра (ссылка)", callback_data=f"adm_rit_ef_{event_id}_mantra")],
+         InlineKeyboardButton(text="✂️ Краткая практика", callback_data=f"adm_rit_ef_{event_id}_short")],
+        [InlineKeyboardButton(text="🎧 Мантра (ссылка)", callback_data=f"adm_rit_ef_{event_id}_mantra")],
     ]
     if rituals.same_title_dates(event_id):
         rows.append([InlineKeyboardButton(
@@ -8794,8 +8891,8 @@ async def adm_rit_copy_ask(callback: CallbackQuery):
         return
     dates = ", ".join(datetime.strptime(x, "%Y-%m-%d").strftime("%d.%m.%Y") for x in others)
     await callback.message.edit_text(
-        f"Скопировать личную фразу, практику и мантру этой даты на другие даты с названием "
-        f"«{_plain_text(e['title'])}»?\n\nДаты: {dates}\n\nИх прежние личная фраза, практика и мантра будут заменены.",
+        f"Скопировать личную фразу, практику, краткую практику и мантру этой даты на другие даты с названием "
+        f"«{_plain_text(e['title'])}»?\n\nДаты: {dates}\n\nИх прежние личная фраза, практика, краткая практика и мантра будут заменены.",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="✅ Да, скопировать", callback_data=f"adm_rit_cpy_{event_id}")],
             [InlineKeyboardButton(text="Отмена", callback_data=f"adm_rit_e_{event_id}")],
@@ -8834,6 +8931,9 @@ RITUAL_FIELD_PROMPTS = {
                "(сам знак людям не виден). Отправьте «-», чтобы убрать личную фразу:",
     "practice": "Пришлите практику именно для ЭТОЙ даты - она заменит собой общую практику для этого типа "
                 "события (если она есть). Отправьте «-», чтобы убрать и снова показывать общую:",
+    "short": "Пришлите КРАТКУЮ практику именно для ЭТОЙ даты (2-3 предложения): она покажется в сообщении «📖 О практиках месяца» "
+             "вместо общей краткой практики типа. Полная практика с мантрой приходит утром в день праздника. "
+             "Отправьте «-», чтобы убрать и снова показывать общую:",
     "mantra": "Пришлите ссылку на мантру именно для ЭТОЙ даты (например, с YouTube, ссылка начинается с https://). "
               "У людей появится кнопка «🎧 Слушать мантру». Отправьте «-», чтобы убрать и снова брать общую мантру типа:",
 }
@@ -8940,7 +9040,7 @@ async def _ritual_edit_value(message: Message, state: FSMContext, data: dict, ta
             await message.answer("Ссылка на мантру сохранена ✅")
             return False
         if raw_value == "-":
-            if rituals_text_key.startswith(("ritual_meaning_", "ritual_practice_")):
+            if rituals_text_key.startswith(("ritual_meaning_", "ritual_practice_", "ritual_short_")) or rituals_text_key == "ritual_about_footer":
                 db.set_setting(rituals_text_key, "")
                 await message.answer(
                     f"Текст «{rituals.TEXT_LABELS.get(field, field)}» очищен ✅ Теперь он людям не показывается.",
@@ -8991,7 +9091,7 @@ async def _ritual_edit_value(message: Message, state: FSMContext, data: dict, ta
                     )
                     return True
                 rituals.update_event(event_id, "mantra", url)
-        else:  # meaning / practice: доверенный HTML (жирный и т.п. сохраняется)
+        else:  # meaning / practice / short: доверенный HTML (жирный и т.п. сохраняется)
             rituals.update_event(event_id, field, "" if raw == "-" else value)
         text, kb = _ritual_event_screen(event_id)
         await message.answer("Обновлено ✅\n\n" + text, reply_markup=kb)
@@ -9062,6 +9162,36 @@ async def adm_rit_test(callback: CallbackQuery):
         await callback.answer("На текущий месяц нет дат", show_alert=True)
         return
     await _send_long(callback.bot, callback.from_user.id, text, _ritual_kb(ym, db.get_user(callback.from_user.id)))
+    await callback.answer("Пробное сообщение отправлено Вам ✅")
+
+
+@router.callback_query(F.data == "adm_rit_test_day")
+async def adm_rit_test_day(callback: CallbackQuery):
+    """Пробное УТРЕННЕЕ сообщение: берётся ближайший день с праздником (сегодня или позже) - только Вам."""
+    if not await _require_permission(callback, "adm_rituals"):
+        return
+    upcoming = rituals.events_between(_today().isoformat(), "2100-01-01")
+    if not upcoming:
+        await callback.answer("Впереди нет ни одной даты", show_alert=True)
+        return
+    day = upcoming[0]["event_date"]
+    evs = rituals.events_on(day)
+    name = _user_first_name_for_text(db.get_user(callback.from_user.id))
+    await _send_long(callback.bot, callback.from_user.id, _ritual_day_message(evs, name), _ritual_mantra_kb(evs, with_calendar=True))
+    await callback.answer("Пробное утреннее сообщение (за %s) отправлено Вам ✅" % datetime.strptime(day, "%Y-%m-%d").strftime("%d.%m"), show_alert=True)
+
+
+@router.callback_query(F.data == "adm_rit_test_about")
+async def adm_rit_test_about(callback: CallbackQuery):
+    """Пробное сообщение «О практиках месяца» за текущий месяц - только Вам."""
+    if not await _require_permission(callback, "adm_rituals"):
+        return
+    ym = _today().strftime("%Y-%m")
+    text = rituals.about_message(ym)
+    if not text:
+        await callback.answer("На текущий месяц нет дат", show_alert=True)
+        return
+    await _send_long(callback.bot, callback.from_user.id, text)
     await callback.answer("Пробное сообщение отправлено Вам ✅")
 
 
@@ -10281,6 +10411,37 @@ router.callback_query.outer_middleware(ReintroGateMiddleware())
 router.message.outer_middleware(PromiseMenuGuardMiddleware())
 
 
+class SideFlowGuardMiddleware(BaseMiddleware):
+    """Если человек нажал «Написать Куратору» / «Задать вопрос» / «Предложить вопрос», но вместо текста нажал кнопку
+    нижнего меню, команду или любую кнопку под сообщением, режим ввода заканчивается (её решение 2026-10-19):
+    иначе следующее же случайное сообщение ушло бы Куратору или в вопросы. Другие режимы ввода (намерение, дата
+    «Оплачу позже», чек, имя, админка) это не затрагивает."""
+
+    STATES = (
+        ContactAdminStates.waiting_message.state,
+        QuestionStates.waiting_question.state,
+        FaqSuggestionStates.waiting_text.state,
+    )
+
+    async def __call__(self, handler, event, data):
+        try:
+            leaves = isinstance(event, CallbackQuery)
+            if not leaves:
+                text = (getattr(event, "text", None) or "").strip()
+                leaves = bool(text) and (text.startswith("/") or text in (_MENU_BUTTON_TEXTS | {BTN_ADMIN}))
+            if leaves:
+                state = data.get("state")
+                if state is not None and await state.get_state() in self.STATES:
+                    await state.clear()
+        except Exception:
+            logging.exception("Сбой в защите режима «Написать Куратору»")
+        return await handler(event, data)
+
+
+router.message.outer_middleware(SideFlowGuardMiddleware())
+router.callback_query.outer_middleware(SideFlowGuardMiddleware())
+
+
 def _newcomer_notify_enabled() -> bool:
     return (db.get_setting("newcomer_notify_enabled") or "1") == "1"
 
@@ -10374,8 +10535,8 @@ async def adm_support(callback: CallbackQuery):
         "и под напоминаниями об оплате). Человек пишет прямо в боте, одним сообщением в строке внизу экрана, "
         "а ответ получает здесь же, в чате с ботом.\n\n"
         "Сообщения людей приходят владельцу и тем администраторам, у кого включено право «Обращения людей» "
-        "(👥 Администраторы → права). Ответ помощника подписывается: "
-        f"«{html.escape(_support_signature())}». Ваши ответы идут без подписи.\n\n"
+        "(👥 Администраторы → права). Ответ на обращение кнопкой «↩️ Ответить» подписывается: "
+        f"«{html.escape(_support_signature())}» (и Ваш, и помощника). Сообщения, отправленные кнопкой «✍️ Написать» из карточки человека, идут без подписи.\n\n"
         "Чеки об оплате к этому не относятся: они приходят только владельцу и тем, у кого есть право "
         "«Заявки на подтверждение».\n\n"
         "Сейчас обращения получают:\n" + "\n".join(names) + "\n\n"
@@ -10587,7 +10748,7 @@ async def main():
     scheduler.add_job(check_intention_reminders, "cron", day="8,22", hour=11, args=[bot])
     scheduler.add_job(cleanup_feed_posts, "cron", hour=config.SANCTUM_REMINDER_HOUR, minute=45)
     # календарь ритуалов: 1-го числа в 11:11 по Киеву - календарь на месяц; каждое
-    # утро в 09:00 - напоминания тем, кто включил "Напоминать в день"
+    # утро в 09:00 - полная практика дня всем участникам, кроме отключивших сообщения о праздниках
     scheduler.add_job(send_ritual_monthly, "cron", day=1, hour=11, minute=11, args=[bot],
                       misfire_grace_time=6 * 3600)
     scheduler.add_job(send_ritual_daily, "cron", hour=9, minute=0, args=[bot], misfire_grace_time=3 * 3600)
