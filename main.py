@@ -4238,7 +4238,8 @@ def _reengage_screen_kb() -> InlineKeyboardMarkup:
          InlineKeyboardButton(text="⏱ Дни писем «дверь открыта»", callback_data="adm_rg_door_open_notice_days")],
         [InlineKeyboardButton(text="⏱ Дней до обнуления", callback_data="adm_rg_stage_reset_days"),
          InlineKeyboardButton(text="⏱ Последние дни месяца", callback_data="adm_rg_late_month_days")],
-        [InlineKeyboardButton(text="⏱ За сколько дней напомнить", callback_data="adm_rg_lastchance_days_before")],
+        [InlineKeyboardButton(text="⏱ Напоминание о продлении: за сколько дней", callback_data="adm_rg_renew_reminder_days")],
+        [InlineKeyboardButton(text="⏱ «Последний шанс»: за сколько дней", callback_data="adm_rg_lastchance_days_before")],
         [InlineKeyboardButton(text="⬅️ Назад", callback_data="adm_back")],
     ])
 
@@ -4330,6 +4331,12 @@ async def adm_reengage_field_start(callback: CallbackQuery, state: FSMContext):
         prompt = (
             f"{current_block}Через сколько дней после истечения доступа напоминать, если человек так и "
             "не продлил? Пришлите число (например, 7):"
+        )
+    elif field == "renew_reminder_days":
+        prompt = (
+            f"Сейчас: {_renew_reminder_days()}\n\nПришлите число дней от 1 до 10: за столько дней до конца оплаченного срока "
+            "действующим участникам придёт первое напоминание о продлении (кнопки «Продлить» и «Оплачу позже»). "
+            "Второе приходит в сам последний день, его число не меняется. Рекомендую 3."
         )
     elif field == "late_month_days":
         prompt = (
@@ -5293,7 +5300,7 @@ async def adm_sanctum_kick(callback: CallbackQuery):
 
 
 REMINDER_TEXT_LABELS = {
-    "sanctum_reminder_text_early": "1) напоминание заранее (за день до конца срока) - первое из двух. Кнопки: «Продлить» и «⏰ Оплачу позже - назначить дату»",
+    "sanctum_reminder_text_early": "1) напоминание заранее (за несколько дней до конца срока, по умолчанию за 3; число меняется в «Автовозврат» → «Напоминание о продлении: за сколько дней») - первое из двух. Кнопки: «Продлить» и «⏰ Оплачу позже - назначить дату»",
     "sanctum_reminder_text_due": "2) напоминание в день истечения - приходит ПОСЛЕ напоминания заранее, если так и не продлили. Кнопки те же: «Продлить» и «⏰ Оплачу позже - назначить дату»",
     "sanctum_promise_reminder_text": "отдельный случай, вне цепочки выше - приходит только тем, кто сам назвал дату оплаты через «⏰ Оплачу позже» (раздел «✏️ Тексты экранов VEDA SANCTUM»), за день до этой даты. Кнопка: только «Продлить» (повторно «Оплачу позже» здесь уже не предлагается)",
 }
@@ -5397,7 +5404,7 @@ async def adm_reminder_texts(callback: CallbackQuery):
     promise = db.get_setting("sanctum_promise_reminder_text")
     text = (
         "<b>✉️ Тексты напоминаний VEDA SANCTUM</b>\n\n"
-        f"Заранее (за день до конца срока):\n{html.escape(early)}\n\n"
+        f"Заранее (за {_renew_reminder_days()} дн. до конца срока):\n{html.escape(early)}\n\n"
         f"В день истечения:\n{html.escape(due)}\n\n"
         f"Об обещанной дате оплаты (за день до неё):\n{html.escape(promise)}\n\n"
         "Подсказка: <code>{date}</code> - дата, <code>{price}</code> - цена ИМЕННО этого человека "
@@ -6885,7 +6892,16 @@ async def edit_field_value(message: Message, state: FSMContext):
         db.set_setting(field, value)
         await message.answer("Обновлено ✅")
     elif target == "reengage":
-        if field == "late_month_days":
+        if field == "renew_reminder_days":
+            try:
+                n = int(value.strip())
+                if n < 1 or n > 10:
+                    raise ValueError
+            except ValueError:
+                await message.answer("Нужно целое число от 1 до 10. Попробуйте ещё раз:")
+                return
+            db.set_setting(field, str(n))
+        elif field == "late_month_days":
             try:
                 n = int(value.strip())
                 if n < 0 or n > 15:
@@ -8005,6 +8021,11 @@ async def adm_broadcast_send(callback: CallbackQuery, state: FSMContext):
 
 # ---------- напоминания о продлении VEDA SANCTUM ----------
 
+def _renew_reminder_days() -> int:
+    """За сколько дней до конца срока уходит первое напоминание о продлении (1-10, по умолчанию 3; правится в админке)."""
+    return max(1, min(10, _int_setting("renew_reminder_days", config.SANCTUM_REMINDER_DAYS_BEFORE)))
+
+
 async def check_sanctum_reminders(bot: Bot):
     logging.info("[планировщик] check_sanctum_reminders: старт")
     today = _today()
@@ -8013,7 +8034,7 @@ async def check_sanctum_reminders(bot: Bot):
         [InlineKeyboardButton(text=_btn("btn_pay_later_date"), callback_data="sanctum_promise")],
     ])
 
-    reminder_date = (today + timedelta(days=config.SANCTUM_REMINDER_DAYS_BEFORE)).isoformat()
+    reminder_date = (today + timedelta(days=_renew_reminder_days())).isoformat()
     early_template = db.get_setting("sanctum_reminder_text_early")
     for m in db.get_memberships_expiring_on(reminder_date, "reminder_3d_sent_for"):
         date_text = datetime.strptime(m["valid_until"], "%Y-%m-%d").strftime("%d.%m.%Y")
@@ -9704,7 +9725,7 @@ def _sanctum_member_block(m, today, reminder_from, current_base_price):
 
 def _build_sanctum_view(page: int, query: str = ""):
     today = _today()
-    reminder_from = today + timedelta(days=config.SANCTUM_REMINDER_DAYS_BEFORE)
+    reminder_from = today + timedelta(days=_renew_reminder_days())
     current_base_price = db.get_sanctum()["price"]
     members = db.get_all_sanctum_memberships()
     total = len(members)
