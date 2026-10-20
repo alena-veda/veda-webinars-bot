@@ -581,13 +581,14 @@ def mark_promo_sent(user_id, ym):
 
 def active_members():
     """Все действующие участники Санктума (не удалённые, срок не истёк) с их
-    настройками календаря."""
+    настройками календаря. Кто сам заблокировал бота, не входит: рассылки ему всё равно не доходят и
+    только засоряли бы журнал ошибками."""
     today_iso = datetime.now().strftime("%Y-%m-%d")
     conn = db.get_conn()
     rows = conn.execute(
         "SELECT u.* FROM users u JOIN sanctum_membership m ON m.user_id = u.user_id "
         "WHERE m.valid_until >= ? AND (m.status IS NULL OR m.status != 'removed') "
-        "AND (u.blocked IS NULL OR u.blocked = 0)",
+        "AND (u.blocked IS NULL OR u.blocked = 0) AND (u.self_departed IS NULL OR u.self_departed = 0)",
         (today_iso,),
     ).fetchall()
     conn.close()

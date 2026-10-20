@@ -194,6 +194,12 @@ def init_db():
         c.execute("ALTER TABLE users ADD COLUMN self_departed INTEGER DEFAULT 0")
     except Exception:
         pass
+    try:
+        # когда человек заблокировал бота (2026-10-20): для списка «Заблокировали бота» и уведомления владельцу;
+        # у тех, кто заблокировал раньше, пусто - дата неизвестна
+        c.execute("ALTER TABLE users ADD COLUMN departed_at TEXT")
+    except Exception:
+        pass
 
     c.execute("""
         CREATE TABLE IF NOT EXISTS admins (
@@ -1792,9 +1798,32 @@ def set_user_self_departed(user_id, departed):
     само, независимо от того, есть ли этот user_id уже в таблице (ничего не
     делает, если человека там ещё нет — до /start ему нечего отмечать)."""
     conn = get_conn()
-    conn.execute("UPDATE users SET self_departed = ? WHERE user_id = ?", (1 if departed else 0, user_id))
+    row = conn.execute("SELECT self_departed FROM users WHERE user_id = ?", (user_id,)).fetchone()
+    changed = False
+    if row is not None:
+        was = bool(row["self_departed"])
+        if departed and not was:
+            conn.execute("UPDATE users SET self_departed = 1, departed_at = ? WHERE user_id = ?", (_now(), user_id))
+            changed = True
+        elif not departed:
+            conn.execute("UPDATE users SET self_departed = 0, departed_at = NULL WHERE user_id = ?", (user_id,))
     conn.commit()
     conn.close()
+    return changed  # True только когда человек заблокировал бота ТОЛЬКО ЧТО (раньше не был отмечен)
+
+
+def get_departed_users_full():
+    """Те, кто сам заблокировал бота / вышел: самые свежие первыми, у кого дата неизвестна - в конце;
+    с записью о Sanctum (если есть)."""
+    conn = get_conn()
+    rows = conn.execute(
+        "SELECT u.user_id, u.username, u.first_name, u.preferred_name, u.departed_at, u.created_at, "
+        "m.status AS m_status, m.valid_until AS m_valid_until, m.lifetime_free AS m_lifetime "
+        "FROM users u LEFT JOIN sanctum_membership m ON m.user_id = u.user_id "
+        "WHERE u.self_departed = 1 ORDER BY (u.departed_at IS NULL), u.departed_at DESC, u.user_id"
+    ).fetchall()
+    conn.close()
+    return rows
 
 
 def get_self_departed_count():

@@ -1495,6 +1495,122 @@ async def cmd_start(message: Message, state: FSMContext):
     await _send_welcome(message)
 
 
+def _departed_notify_enabled() -> bool:
+    return (db.get_setting("departed_notify_enabled") or "1") == "1"
+
+
+def _sanctum_note_for(membership) -> str:
+    """Коротко: кем человек был в Sanctum (для уведомления о блокировке и списка)."""
+    if not membership:
+        return "в Sanctum не был(а)"
+    if membership["lifetime_free"] if "lifetime_free" in membership.keys() else False:
+        return "участник Sanctum (пожизненно)"
+    status = membership["status"] if "status" in membership.keys() else None
+    valid_until = _parse_date(membership["valid_until"]) if "valid_until" in membership.keys() else None
+    if status != "removed" and valid_until and valid_until >= _today():
+        return f"ДЕЙСТВУЮЩИЙ участник Sanctum, доступ до {valid_until.strftime('%d.%m.%Y')}"
+    return "бывший участник Sanctum"
+
+
+async def _notify_departed(bot: Bot, user_id: int):
+    """Владельцу (и помощникам с правом «Подписчики бота») - человек заблокировал бота или вышел из чата."""
+    try:
+        if not _departed_notify_enabled():
+            return
+        u = db.get_user(user_id)
+        if not u:
+            return
+        handle = f" (@{u['username']})" if u["username"] else ""
+        shown = (u["preferred_name"] or u["first_name"] or "").strip() or _user_display_name(u)
+        note = _sanctum_note_for(db.get_sanctum_membership(user_id))
+        text = (
+            f"👋 <b>Бота заблокировал(а):</b> {html.escape(shown)}{html.escape(handle)}\n"
+            f'ID: <a href="tg://user?id={user_id}">{user_id}</a>\n'
+            f"Sanctum: {html.escape(note)}\n"
+            "Письма и рассылки этому человеку больше не доходят."
+        )
+        if "ДЕЙСТВУЮЩИЙ" in note:
+            text += "\n⚠️ Он(а) сейчас платит за Sanctum: возможно, стоит написать лично."
+        kb = InlineKeyboardMarkup(inline_keyboard=[[
+            InlineKeyboardButton(text="👤 Профиль", callback_data=f"adm_user_view_{user_id}"),
+            InlineKeyboardButton(text="👋 Весь список", callback_data="adm_departed"),
+        ]])
+        for admin_id in db.get_all_admin_ids():
+            if not db.has_permission(admin_id, "adm_users_list"):
+                continue
+            try:
+                await bot.send_message(admin_id, text, reply_markup=kb)
+            except Exception:
+                logging.warning("Не удалось сообщить администратору %s о блокировке бота", admin_id)
+    except Exception:
+        logging.warning("Сбой в уведомлении о блокировке бота", exc_info=True)
+
+
+def _build_departed_view(page: int):
+    rows_all = db.get_departed_users_full()
+    total = len(rows_all)
+    pages = max(1, -(-total // USERS_PER_PAGE))
+    page = _page_clamp(pages, page)
+    chunk = rows_all[page * USERS_PER_PAGE:(page + 1) * USERS_PER_PAGE]
+    on = _departed_notify_enabled()
+    head = (
+        f"<b>👋 Заблокировали бота ({total})</b>\n\n"
+        "Эти люди сами заблокировали бота или вышли из чата с ним. Рассылки и письма им не доходят. "
+        "Если человек потом снова напишет боту, он исчезнет из этого списка сам. "
+        "Знак ⚠️ означает действующего участника Sanctum.\n"
+        f"Уведомление Вам о новой блокировке: {'включено' if on else 'выключено'}."
+    )
+    if not total:
+        head += "\n\nСейчас таких людей нет."
+    kb_rows = []
+    today = _today()
+    for r in chunk:
+        when = ""
+        if r["departed_at"]:
+            try:
+                when = datetime.strptime(r["departed_at"][:10], "%Y-%m-%d").strftime("%d.%m") + " · "
+            except ValueError:
+                when = ""
+        else:
+            when = "давно · "
+        valid_until = _parse_date(r["m_valid_until"]) if r["m_valid_until"] else None
+        active = bool(r["m_status"]) and r["m_status"] != "removed" and valid_until and valid_until >= today
+        if active:
+            tail = f"⚠️ Sanctum до {valid_until.strftime('%d.%m')}"
+        elif r["m_status"]:
+            tail = "был(а) в Sanctum"
+        else:
+            tail = "без Sanctum"
+        label = f"{when}{_user_display_name(r)} · {tail}"
+        kb_rows.append([InlineKeyboardButton(text=label[:64], callback_data=f"adm_user_view_{r['user_id']}")])
+    kb_rows.extend(_pager_row("dp", page, pages))
+    kb_rows.append([InlineKeyboardButton(
+        text="🔕 Выключить уведомления" if on else "🔔 Включить уведомления", callback_data="adm_departed_toggle"
+    )])
+    kb_rows.append([InlineKeyboardButton(text="⬅️ К подписчикам бота", callback_data="adm_pg_ul_0")])
+    return head, InlineKeyboardMarkup(inline_keyboard=kb_rows), page
+
+
+@router.callback_query(F.data == "adm_departed")
+async def adm_departed(callback: CallbackQuery):
+    if not await _require_permission(callback, "adm_users_list"):
+        return
+    text, kb, page = _build_departed_view(0)
+    _remember_page(callback.from_user.id, "dp", page)
+    await _edit_keep(callback, text, kb)
+    await callback.answer()
+
+
+@router.callback_query(F.data == "adm_departed_toggle")
+async def adm_departed_toggle(callback: CallbackQuery):
+    if not await _require_permission(callback, "adm_users_list"):
+        return
+    db.set_setting("departed_notify_enabled", "0" if _departed_notify_enabled() else "1")
+    text, kb, page = _build_departed_view(_recall_page(callback.from_user.id, "dp"))
+    await _edit_keep(callback, text, kb)
+    await callback.answer("Уведомления включены" if _departed_notify_enabled() else "Уведомления выключены")
+
+
 @router.my_chat_member()
 async def on_my_chat_member_update(event: ChatMemberUpdated):
     """Telegram сам присылает это событие, когда человек блокирует бота или
@@ -1505,8 +1621,10 @@ async def on_my_chat_member_update(event: ChatMemberUpdated):
     status = event.new_chat_member.status
     user_id = event.from_user.id
     if status in ("kicked", "left"):
-        db.set_user_self_departed(user_id, True)
+        just_now = db.set_user_self_departed(user_id, True)
         logging.info("Пользователь %s сам заблокировал бота или вышел", user_id)
+        if just_now and not db.is_admin(user_id):
+            await _notify_departed(event.bot, user_id)
     elif status == "member":
         # человек сам заблокировал бота, а теперь вернулся: при его /start знакомство пройдёт заново с самого начала
         # (имя, важная просьба, приветствие, «Первое Касание»); флаг нужен, чтобы это не зависело от порядка событий
@@ -3576,7 +3694,7 @@ def _count_recent_log_errors(hours: int = 24) -> int | None:
                 if " ERROR " not in line:
                     continue
                 try:
-                    ts = datetime.strptime(line[:19], "%Y-%m-%d %H:%M:%S").replace(tzinfo=TZ)
+                    ts = datetime.strptime(line[:19], "%Y-%m-%d %H:%M:%S").astimezone(TZ)
                 except ValueError:
                     continue
                 if ts >= cutoff:
@@ -3630,7 +3748,7 @@ def _log_overview(days: int = 7):
                 if not _LOG_TS_RE.match(line):
                     continue
                 try:
-                    ts = datetime.strptime(line[:19], "%Y-%m-%d %H:%M:%S").replace(tzinfo=TZ)
+                    ts = datetime.strptime(line[:19], "%Y-%m-%d %H:%M:%S").astimezone(TZ)
                 except ValueError:
                     continue
                 if ts < cutoff:
@@ -3724,13 +3842,13 @@ def _health_extra(now, problems: list, ok_lines: list, info: list):
         try:
             rows = conn.execute(
                 "SELECT u.user_id, u.preferred_name, u.first_name FROM users u JOIN sanctum_membership m ON m.user_id = u.user_id "
-                "WHERE u.blocked = 1 AND COALESCE(m.status, '') != 'removed' AND m.valid_until >= ?", (now.strftime("%Y-%m-%d"),)
+                "WHERE u.self_departed = 1 AND COALESCE(m.status, '') != 'removed' AND m.valid_until >= ?", (now.strftime("%Y-%m-%d"),)
             ).fetchall()
         finally:
             conn.close()
         if rows:
             names = ", ".join(html.escape((r["preferred_name"] or r["first_name"] or str(r["user_id"]))) for r in rows[:5])
-            problems.append(f"🚫 Действующие участники Sanctum, заблокировавшие бота: {len(rows)} ({names}). Письма им не доходят.")
+            problems.append(f"👋 Действующие участники Sanctum, заблокировавшие бота: {len(rows)} ({names}). Письма им не доходят. Список: «👥 Подписчики бота» → «👋 Заблокировали бота».")
 
     def payment_requisites():
         if not (db.get_setting("payment_requisites") or "").strip():
@@ -3752,6 +3870,20 @@ def _health_extra(now, problems: list, ok_lines: list, info: list):
             e = empty[0]
             problems.append(f"🌙 Скоро «{html.escape(e['title'])}» ({datetime.strptime(e['event_date'], '%Y-%m-%d').strftime('%d.%m')}), а практика этого дня не заполнена («🌙 Календарь ритуалов»).")
 
+    def card_header_in_practice():
+        # в практику по ошибке вставляют всю карточку даты («Тип: ... Дата: ... Уточнение: ...»): людям уйдёт чужая шапка
+        bad_re = re.compile(r"Тип:.*Дата:.*Уточнение:", re.S)
+        bad = []
+        for kind, (emoji, name) in rituals.KINDS.items():
+            txt = _plain_text(db.get_setting("ritual_practice_" + kind) or "")
+            if bad_re.search(txt):
+                bad.append(f"общая практика «{name}»")
+        for e in rituals.events_between(now.date().isoformat(), (now.date() + timedelta(days=90)).isoformat()):
+            if bad_re.search(_plain_text(e["practice"] or "")):
+                bad.append(f"практика даты {datetime.strptime(e['event_date'], '%Y-%m-%d').strftime('%d.%m')}")
+        if bad:
+            problems.append("🌙 В практике осталась шапка карточки даты («Тип: ... Дата: ... Уточнение: ...»), людям она придёт как есть: " + ", ".join(bad[:4]) + ". Уберите всё до слов «ПРАКТИКИ» («🌙 Календарь ритуалов»).")
+
     def activity():
         conn = db.get_conn()
         try:
@@ -3763,7 +3895,7 @@ def _health_extra(now, problems: list, ok_lines: list, info: list):
             hours = (datetime.now() - last).total_seconds() / 3600
             info.append(f"последнее действие людей в боте: {hours:.0f} ч. назад" if hours >= 1 else "последнее действие людей в боте: только что")
 
-    for fn in (restarts, jobs, disk_and_db, blocked_members, payment_requisites, webinars_without_time, calendar_practice, activity):
+    for fn in (restarts, jobs, disk_and_db, blocked_members, payment_requisites, webinars_without_time, calendar_practice, card_header_in_practice, activity):
         safe(fn)
 
 
@@ -3786,7 +3918,7 @@ def _recent_log_error_groups(hours: int = 24, limit: int = 8):
                     if " ERROR " not in line:
                         continue
                     try:
-                        ts = datetime.strptime(line[:19], "%Y-%m-%d %H:%M:%S").replace(tzinfo=TZ)
+                        ts = datetime.strptime(line[:19], "%Y-%m-%d %H:%M:%S").astimezone(TZ)
                     except ValueError:
                         continue
                     if ts >= cutoff:
@@ -6348,7 +6480,13 @@ async def _render_user_detail(callback: CallbackQuery, user_id: int):
     if u["blocked"]:
         status = "🚫 заблокирован Вами"
     elif u["self_departed"]:
-        status = "👋 сам заблокировал бота / вышел"
+        since = ""
+        if "departed_at" in u.keys() and u["departed_at"]:
+            try:
+                since = " (" + datetime.strptime(u["departed_at"][:10], "%Y-%m-%d").strftime("%d.%m.%Y") + ")"
+            except ValueError:
+                since = ""
+        status = "👋 сам заблокировал бота / вышел" + since
     else:
         status = "✅ активен"
     meditation_status = "✅ куплен" if u["bought_meditation_bot"] else "— пока не отмечен"
@@ -9511,6 +9649,10 @@ def _build_users_view(page: int, query: str = ""):
     if not query:
         rows.extend(_pager_row("ul", page, pages))
     rows.append([InlineKeyboardButton(text="🔎 Найти человека", callback_data="adm_fd_ul")])
+    if not query:
+        rows.append([InlineKeyboardButton(
+            text=f"👋 Заблокировали бота ({db.get_self_departed_count()})", callback_data="adm_departed"
+        )])
     if query:
         rows.append([InlineKeyboardButton(text="⬅️ К списку", callback_data="adm_pg_ul_0")])
     rows.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="adm_back")])
@@ -9797,6 +9939,7 @@ def _build_past_webinars_view(past, page: int):
 _PAGE_PERMISSIONS = {
     "ul": "adm_users_list", "sl": "adm_sanctum_list", "sa": "adm_sanctum_list", "il": "adm_intentions_list",
     "fs": "adm_faq_suggestions", "go": "adm_grant_access", "wl": "adm_webinars", "nc": "adm_newcomers",
+    "dp": "adm_users_list",
 }
 
 
@@ -9827,6 +9970,8 @@ async def adm_page_nav(callback: CallbackQuery):
         text, kb, page = _build_faq_sugg_view(page)
     elif kind == "nc":
         text, kb, page = _build_newcomers_view(page)
+    elif kind == "dp":
+        text, kb, page = _build_departed_view(page)
     elif kind == "go":
         text, kb, page = _build_grant_others_view(page)
         if kb is None:
